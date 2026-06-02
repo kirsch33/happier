@@ -223,6 +223,88 @@ describe('happier resume', () => {
     }
   });
 
+  it('repairs a stale active session before dispatching vendor resume when requested', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'happier-resume-repair-'));
+    const directory = await mkdtemp(join(tmpdir(), 'happier-resume-repair-dir-'));
+    const prevHome = process.env.HAPPIER_HOME_DIR;
+    const prevAttach = process.env.HAPPIER_SESSION_ATTACH_FILE;
+    const prevCwd = process.cwd();
+
+    try {
+      process.env.HAPPIER_HOME_DIR = home;
+      reloadConfiguration();
+
+      const credentials: Credentials = {
+        token: 'token-1',
+        encryption: { type: 'legacy', secret: new Uint8Array(32).fill(11) },
+      };
+
+      const vendorResumeId = 'claude_vendor_session_repair_1';
+      let active = true;
+      const rawSession = () => ({
+        ...createSessionRecordFixture({
+          id: 'sid_repair_1',
+          encryptionMode: 'plain',
+          dataEncryptionKey: null,
+          metadata: JSON.stringify({
+            path: directory,
+            host: 'test',
+            flavor: 'claude',
+            claudeSessionId: vendorResumeId,
+          }),
+          active,
+          activeAt: active ? 123 : 0,
+        }),
+      });
+
+      const fetchSessionByIdFn = vi.fn(async () => rawSession());
+      const checkActiveSessionLivenessFn = vi.fn(async () => ({ alive: false as const, reason: 'session_rpc_unreachable' }));
+      const markActiveSessionInactiveFn = vi.fn(async () => {
+        active = false;
+      });
+      const agentHandler: CommandHandler = vi.fn(async (context) => {
+        expect(context.args).toContain('--existing-session');
+        expect(context.args).toContain('sid_repair_1');
+        expect(context.args).toContain('--resume');
+        expect(context.args).toContain(vendorResumeId);
+      });
+
+      await handleResumeCommand(['--repair-active', 'sid_repair_1'], {
+        readCredentialsFn: async () => credentials,
+        fetchSessionByIdFn,
+        readAccountSettingsFn: async () => accountSettingsParse({ schemaVersion: 6, codexBackendMode: 'acp' }),
+        resolveAgentHandlerFn: async () => agentHandler,
+        chdirFn: (next: string) => process.chdir(next),
+        checkActiveSessionLivenessFn,
+        markActiveSessionInactiveFn,
+      });
+
+      expect(checkActiveSessionLivenessFn).toHaveBeenCalledWith(expect.objectContaining({
+        credentials,
+        rawSession: expect.objectContaining({ id: 'sid_repair_1', active: true }),
+      }));
+      expect(markActiveSessionInactiveFn).toHaveBeenCalledWith(expect.objectContaining({
+        credentials,
+        rawSession: expect.objectContaining({ id: 'sid_repair_1', active: true }),
+      }));
+      expect(fetchSessionByIdFn).toHaveBeenCalledTimes(2);
+      expect(agentHandler).toHaveBeenCalledTimes(1);
+    } finally {
+      try {
+        process.chdir(prevCwd);
+      } catch {
+        // ignore
+      }
+      if (prevAttach === undefined) delete process.env.HAPPIER_SESSION_ATTACH_FILE;
+      else process.env.HAPPIER_SESSION_ATTACH_FILE = prevAttach;
+      if (prevHome === undefined) delete process.env.HAPPIER_HOME_DIR;
+      else process.env.HAPPIER_HOME_DIR = prevHome;
+      reloadConfiguration();
+      await rm(home, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('treats interactive cancellation as a cancel (not as "no resumable sessions")', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

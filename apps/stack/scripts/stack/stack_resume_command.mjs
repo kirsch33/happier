@@ -17,6 +17,7 @@ function supportsDaemonResume(helpText) {
 }
 
 export async function runStackResumeCommand({ rootDir, stackName, passthrough, json }) {
+  const repairActive = passthrough.includes('--repair-active');
   const sessionIds = passthrough.filter((arg) => arg && arg !== '--' && !arg.startsWith('--'));
   if (sessionIds.length === 0) {
     printResult({
@@ -50,11 +51,31 @@ export async function runStackResumeCommand({ rootDir, stackName, passthrough, j
         resumeHelpText = '';
       }
 
+      let resumeCommand = happierWrapper;
+      let resumeEnv = env;
+      if (!supportsCliResume(resumeHelpText)) {
+        try {
+          resumeHelpText = await runCapture(process.execPath, [happierBin, 'resume', '--help'], { cwd: rootDir, env: daemonEnv });
+          resumeCommand = happierBin;
+          resumeEnv = daemonEnv;
+        } catch {
+          resumeHelpText = '';
+        }
+      }
+
       if (supportsCliResume(resumeHelpText)) {
         for (const sessionId of sessionIds) {
-          await run(process.execPath, [happierWrapper, 'resume', sessionId], { cwd: rootDir, env });
+          await run(
+            process.execPath,
+            [resumeCommand, 'resume', ...(repairActive ? ['--repair-active'] : []), sessionId],
+            { cwd: rootDir, env: resumeEnv },
+          );
         }
         return { ok: true, out: '' };
+      }
+
+      if (repairActive) {
+        return { ok: false, error: 'resume_not_supported' };
       }
 
       let daemonHelpText = '';

@@ -1,15 +1,19 @@
 import chalk from 'chalk';
 
 import { readCredentials, type Credentials } from '@/persistence';
+import { createSessionEndMutation } from '@/api/session/mutations/sessionMutationTypes';
+import { deliverSessionEndMutation } from '@/api/session/mutations/deliverSessionEndMutation';
 import { createSessionAttachFile } from '@/daemon/sessionAttachFile';
 import { AGENTS } from '@/backends/catalog';
 import type { CatalogAgentId } from '@/backends/types';
 import { fetchSessionById, fetchSessionsPage, type RawSessionListRow, type RawSessionRecord } from '@/session/transport/http/sessionsHttp';
 import { resolveSessionIdOrPrefix } from '@/session/query/resolveSessionId';
 import { resolveSessionEncryptionContextFromCredentials, tryDecryptSessionMetadata } from '@/session/transport/encryption/sessionEncryptionContext';
+import { callSessionRpc } from '@/session/transport/rpc/sessionRpc';
 import { encodeBase64 } from '@/api/encryption';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import type { AccountSettings } from '@happier-dev/protocol';
+import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { accountSettingsParse } from '@happier-dev/protocol';
 import { canUseInkSelector, runSessionActionSelector } from '@/ui/ink/runSessionActionSelector';
 import { buildCliSessionRowModel } from '@/cli/output/session/buildCliSessionRowModel';
@@ -25,6 +29,18 @@ type FetchSessionsPageFn = (params: { token: string; cursor?: string; limit?: nu
 }>;
 
 type ReadAccountSettingsFn = (params: { credentials: Credentials }) => Promise<AccountSettings>;
+type ActiveSessionLivenessResult =
+  | Readonly<{ alive: true }>
+  | Readonly<{ alive: false; reason: string }>;
+type CheckActiveSessionLivenessFn = (params: {
+  credentials: Credentials;
+  rawSession: RawSessionRecord;
+}) => Promise<ActiveSessionLivenessResult>;
+type MarkActiveSessionInactiveFn = (params: {
+  credentials: Credentials;
+  rawSession: RawSessionRecord;
+  observedAt: number;
+}) => Promise<void>;
 
 type ResumableSessionSelection =
   | { type: 'selected'; sessionId: string }
@@ -42,6 +58,58 @@ async function resolveAgentHandler(agentId: CatalogAgentId): Promise<CommandHand
 async function defaultReadAccountSettings(params: { credentials: Credentials }): Promise<AccountSettings> {
   const ctx = await bootstrapAccountSettingsContext({ credentials: params.credentials, mode: 'fast' });
   return ctx.settings;
+}
+
+function resolveRepairActiveRpcTimeoutMs(): number {
+  const raw = String(process.env.HAPPIER_RESUME_REPAIR_ACTIVE_RPC_TIMEOUT_MS ?? '').trim();
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 3_000;
+  return Math.min(30_000, Math.max(100, Math.trunc(parsed)));
+}
+
+async function defaultCheckActiveSessionLiveness(params: {
+  credentials: Credentials;
+  rawSession: RawSessionRecord;
+}): Promise<ActiveSessionLivenessResult> {
+  try {
+    const ctx = resolveSessionEncryptionContextFromCredentials(params.credentials, params.rawSession);
+    await callSessionRpc({
+      token: params.credentials.token,
+      sessionId: params.rawSession.id,
+      ctx,
+      mode: params.rawSession.encryptionMode === 'plain' ? 'plain' : 'e2ee',
+      method: `${params.rawSession.id}:${SESSION_RPC_METHODS.SESSION_WORK_STATE_GET}`,
+      request: {},
+      timeoutMs: resolveRepairActiveRpcTimeoutMs(),
+    });
+    return { alive: true };
+  } catch (error) {
+    return {
+      alive: false,
+      reason: error instanceof Error ? error.message : 'session_rpc_unreachable',
+    };
+  }
+}
+
+async function defaultMarkActiveSessionInactive(params: {
+  credentials: Credentials;
+  rawSession: RawSessionRecord;
+  observedAt: number;
+}): Promise<void> {
+  const result = await deliverSessionEndMutation({
+    token: params.credentials.token,
+    socket: {
+      connected: false,
+      emit: () => undefined,
+    },
+    mutation: createSessionEndMutation({
+      sessionId: params.rawSession.id,
+      observedAt: params.observedAt,
+    }),
+  });
+  if (result.status !== 'delivered') {
+    throw new Error(result.reason);
+  }
 }
 
 async function selectResumableSessionId(params: Readonly<{
@@ -79,6 +147,9 @@ export async function handleResumeCommand(
     chdirFn?: (nextDir: string) => void;
     canUseInkSelectorFn?: () => boolean;
     selectResumableSessionIdFn?: typeof selectResumableSessionId;
+    checkActiveSessionLivenessFn?: CheckActiveSessionLivenessFn;
+    markActiveSessionInactiveFn?: MarkActiveSessionInactiveFn;
+    nowFn?: () => number;
   }>,
 ): Promise<void> {
   const hasHelpFlag = argv.some((arg) => {
@@ -90,9 +161,14 @@ export async function handleResumeCommand(
     console.log('happier resume <session-id-or-prefix>');
     console.log('');
     console.log('Resumes an inactive session (vendor-resume) from the CLI.');
+    console.log('');
+    console.log('Options:');
+    console.log('  --repair-active   Repair a stale active server record before resuming.');
     return;
   }
 
+  const repairActive = argv.includes('--repair-active');
+  const positionalArgs = argv.filter((arg) => arg !== '--repair-active' && !arg.startsWith('--'));
   const readCredentialsFn = deps?.readCredentialsFn ?? readCredentials;
   const readAccountSettingsFn = deps?.readAccountSettingsFn ?? defaultReadAccountSettings;
   const fetchSessionByIdFn = deps?.fetchSessionByIdFn ?? fetchSessionById;
@@ -101,6 +177,9 @@ export async function handleResumeCommand(
   const chdirFn = deps?.chdirFn ?? ((nextDir: string) => process.chdir(nextDir));
   const canUseInkSelectorFn = deps?.canUseInkSelectorFn ?? canUseInkSelector;
   const selectResumableSessionIdFn = deps?.selectResumableSessionIdFn ?? selectResumableSessionId;
+  const checkActiveSessionLivenessFn = deps?.checkActiveSessionLivenessFn ?? defaultCheckActiveSessionLiveness;
+  const markActiveSessionInactiveFn = deps?.markActiveSessionInactiveFn ?? defaultMarkActiveSessionInactive;
+  const nowFn = deps?.nowFn ?? (() => Date.now());
 
   const credentials = await readCredentialsFn();
   if (!credentials) {
@@ -109,7 +188,7 @@ export async function handleResumeCommand(
     process.exit(1);
   }
 
-  const rawInput = argv[0]?.trim() ?? '';
+  const rawInput = positionalArgs[0]?.trim() ?? '';
   const isInteractive = rawInput.length === 0;
 
   const accountSettings = await readAccountSettingsFn({ credentials }).catch(() => accountSettingsParse({}));
@@ -159,13 +238,35 @@ export async function handleResumeCommand(
   }
   if (!rawSession) throw new Error(`Session not found: ${sessionIdOrPrefix}`);
 
-  const rowModel = buildCliSessionRowModel({ credentials, rawSession, accountSettings });
+  let rowModel = buildCliSessionRowModel({ credentials, rawSession, accountSettings });
 
   if (rowModel.archivedAt !== null) {
     throw new Error('Session is archived and cannot be resumed.');
   }
   if (rowModel.active === true) {
-    throw new Error('Session is already active and cannot be resumed.');
+    if (!repairActive) {
+      throw new Error('Session is already active and cannot be resumed.');
+    }
+
+    const liveness = await checkActiveSessionLivenessFn({ credentials, rawSession });
+    if (liveness.alive) {
+      throw new Error('Session is active and reachable. Attach to it or send it a message instead of repair-resuming.');
+    }
+
+    await markActiveSessionInactiveFn({
+      credentials,
+      rawSession,
+      observedAt: nowFn(),
+    });
+    const repairedSession = await fetchSessionByIdFn({ token: credentials.token, sessionId: rawSession.id });
+    if (!repairedSession) {
+      throw new Error(`Session not found after active-session repair: ${rawSession.id}`);
+    }
+    rawSession = repairedSession;
+    rowModel = buildCliSessionRowModel({ credentials, rawSession, accountSettings });
+    if (rowModel.active === true) {
+      throw new Error('Active session repair did not mark the session inactive.');
+    }
   }
 
   const directory = rowModel.path;

@@ -129,7 +129,12 @@ async function runHappierJsonResult({ rootDir, env, args, timeoutMs = 60_000 }) 
   }
 }
 
-async function waitForSessionActive({ rootDir, env, sessionId, timeoutSeconds }) {
+function readFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function waitForSessionActive({ rootDir, env, sessionId, timeoutSeconds, previousActiveAt = null }) {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (Date.now() <= deadline) {
     const status = await runHappierJsonResult({
@@ -139,21 +144,41 @@ async function waitForSessionActive({ rootDir, env, sessionId, timeoutSeconds })
       timeoutMs: 30_000,
     });
     const session = status.ok && status.envelope?.ok ? envelopeSession(status.envelope) : null;
-    if (session?.active === true) return session;
+    if (session?.active === true) {
+      const activeAt = readFiniteNumber(session.activeAt);
+      const previous = readFiniteNumber(previousActiveAt);
+      if (previous === null || (activeAt !== null && activeAt > previous)) {
+        return session;
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   throw new Error('resume_active_timeout');
 }
 
-async function runStackResume({ rootDir, stackName, env, sessionId, timeoutSeconds }) {
-  const child = spawn(process.execPath, [join(rootDir, 'bin', 'hstack.mjs'), 'stack', 'resume', stackName, sessionId, '--json'], {
+async function runStackResume({ rootDir, stackName, env, sessionId, timeoutSeconds, repairActive = false, previousActiveAt = null }) {
+  const child = spawn(process.execPath, [
+    join(rootDir, 'bin', 'hstack.mjs'),
+    'stack',
+    'resume',
+    stackName,
+    ...(repairActive ? ['--repair-active'] : []),
+    sessionId,
+    '--json',
+  ], {
     cwd: rootDir,
     env,
     stdio: 'ignore',
     detached: process.platform !== 'win32',
   });
   child.unref?.();
-  await waitForSessionActive({ rootDir, env, sessionId, timeoutSeconds });
+  await waitForSessionActive({
+    rootDir,
+    env,
+    sessionId,
+    timeoutSeconds,
+    previousActiveAt: repairActive ? previousActiveAt : null,
+  });
   return { pid: child.pid ?? null };
 }
 
@@ -282,27 +307,51 @@ async function recoverExistingMember({ rootDir, stackName, env, descriptor, time
     action = 'resumed';
   }
 
-  const probe = randomToken(12);
-  const message = buildProbeMessage(
-    descriptor,
-    probe,
-    `Supervisor recovery probe for member ${descriptor.memberId}.`,
-  );
-  const sendArgs = ['session', 'send', descriptor.sessionId, message, '--json'];
-  if (descriptor.model) sendArgs.splice(sendArgs.length - 1, 0, '--model', descriptor.model);
-  const send = await runHappierJson({ rootDir, env, args: sendArgs, timeoutMs: 60_000 });
-  if (!send?.ok) {
-    throw new Error(send?.error?.code ? `session_send_failed:${send.error.code}` : 'session_send_failed');
+  const sendProbe = async () => {
+    const probe = randomToken(12);
+    const message = buildProbeMessage(
+      descriptor,
+      probe,
+      `Supervisor recovery probe for member ${descriptor.memberId}.`,
+    );
+    const sendArgs = ['session', 'send', descriptor.sessionId, message, '--json'];
+    if (descriptor.model) sendArgs.splice(sendArgs.length - 1, 0, '--model', descriptor.model);
+    const send = await runHappierJson({ rootDir, env, args: sendArgs, timeoutMs: 60_000 });
+    if (!send?.ok) {
+      throw new Error(send?.error?.code ? `session_send_failed:${send.error.code}` : 'session_send_failed');
+    }
+    const row = await waitForProbeAck({ rootDir, env, sessionId: descriptor.sessionId, probe, timeoutSeconds });
+    return { probe, row };
+  };
+
+  let sent;
+  try {
+    sent = await sendProbe();
+  } catch (error) {
+    if (session.active !== true) {
+      throw error;
+    }
+    resume = await runStackResume({
+      rootDir,
+      stackName,
+      env,
+      sessionId: descriptor.sessionId,
+      timeoutSeconds,
+      repairActive: true,
+      previousActiveAt: session.activeAt ?? null,
+    });
+    action = 'repaired';
+    sent = await sendProbe();
   }
-  const row = await waitForProbeAck({ rootDir, env, sessionId: descriptor.sessionId, probe, timeoutSeconds });
+
   return {
     memberId: descriptor.memberId,
     sessionId: descriptor.sessionId,
     action,
     verified: true,
-    probe,
+    probe: sent.probe,
     resume,
-    transcriptRow: row,
+    transcriptRow: sent.row,
   };
 }
 

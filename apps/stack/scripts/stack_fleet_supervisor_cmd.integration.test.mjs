@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,7 +22,7 @@ function buildStubHappyCliScript() {
     "const logPath = join(home, 'fleet-supervisor-invocations.log');",
     '',
     'function readState() {',
-    "  if (!existsSync(statePath)) return { lastProbeBySession: {}, activeBySession: {} };",
+    "  if (!existsSync(statePath)) return { lastProbeBySession: {}, activeBySession: {}, activeAtBySession: {}, sendFailuresBySession: {} };",
     "  return JSON.parse(readFileSync(statePath, 'utf-8'));",
     '}',
     '',
@@ -55,7 +55,8 @@ function buildStubHappyCliScript() {
     '    printJson({ v: 1, ok: true, kind: "session_status", data: { session: { id, active: false, archivedAt: 123 } } });',
     '    process.exit(0);',
     '  }',
-    '  printJson({ v: 1, ok: true, kind: "session_status", data: { session: { id, active: state.activeBySession?.[id] === true, archivedAt: null } } });',
+    '  const active = state.activeBySession?.[id] === true;',
+    '  printJson({ v: 1, ok: true, kind: "session_status", data: { session: { id, active, activeAt: state.activeAtBySession?.[id] || (active ? 100 : 0), archivedAt: null } } });',
     '  process.exit(0);',
     '}',
     '',
@@ -66,10 +67,16 @@ function buildStubHappyCliScript() {
     '}',
     '',
     "if (args[0] === 'resume') {",
-    '  const id = args[1];',
+    '  const id = args.find((arg, index) => index > 0 && !String(arg).startsWith("--")) || "";',
     '  const state = readState();',
     '  state.activeBySession = state.activeBySession || {};',
+    '  state.activeAtBySession = state.activeAtBySession || {};',
     '  state.activeBySession[id] = true;',
+    '  state.activeAtBySession[id] = (state.activeAtBySession[id] || 100) + 100;',
+    '  if (args.includes("--repair-active")) {',
+    '    state.sendFailuresBySession = state.sendFailuresBySession || {};',
+    '    state.sendFailuresBySession[id] = 0;',
+    '  }',
     '  writeState(state);',
     "  appendFileSync(logPath, `resume ${args.slice(1).join(' ')}\\n`, 'utf-8');",
     '  process.exit(0);',
@@ -80,6 +87,14 @@ function buildStubHappyCliScript() {
     '  const message = args[3] || "";',
     '  const state = readState();',
     '  const probe = probeFromMessage(message);',
+    '  const remainingFailures = Number(state.sendFailuresBySession?.[id] || 0);',
+    '  if (remainingFailures > 0) {',
+    '    state.sendFailuresBySession[id] = remainingFailures - 1;',
+    '    writeState(state);',
+    "    appendFileSync(logPath, `send-fail ${id} ${probe}\\n`, 'utf-8');",
+    '    printJson({ v: 1, ok: false, kind: "session_send", error: { code: "session_rpc_failed" } });',
+    '    process.exit(0);',
+    '  }',
     '  state.lastProbeBySession = state.lastProbeBySession || {};',
     '  state.lastProbeBySession[id] = probe;',
     '  writeState(state);',
@@ -213,6 +228,68 @@ test('hstack stack fleet-supervisor recover resumes inactive sessions and verifi
 
   const invocationLog = await readFile(join(fixture.stackCliHome, 'fleet-supervisor-invocations.log'), 'utf-8');
   assert.match(invocationLog, /^resume session-1$/m);
+  assert.match(invocationLog, /^send session-1 [A-Za-z0-9._-]+$/m);
+});
+
+test('hstack stack fleet-supervisor recover repairs active sessions whose probe send fails', async (t) => {
+  const fixture = await createFleetSupervisorFixture(t);
+  await runNodeCapture(
+    [
+      join(rootDir, 'bin', 'hstack.mjs'),
+      'stack',
+      'fleet-supervisor',
+      fixture.stackName,
+      'register',
+      '--member-id',
+      'member-frozen',
+      '--role',
+      'drill',
+      '--repo',
+      '/tmp/drill-repo',
+      '--backend',
+      'agent:codex',
+      '--recovery-prompt',
+      'Recover this frozen member.',
+      '--session-id',
+      'session-1',
+      '--json',
+    ],
+    { cwd: rootDir, env: fixture.baseEnv }
+  );
+  await writeFile(
+    join(fixture.stackCliHome, 'fleet-supervisor-stub-state.json'),
+    JSON.stringify({
+      lastProbeBySession: {},
+      activeBySession: { 'session-1': true },
+      activeAtBySession: { 'session-1': 100 },
+      sendFailuresBySession: { 'session-1': 1 },
+    }, null, 2),
+    'utf-8'
+  );
+
+  const res = await runNodeCapture(
+    [
+      join(rootDir, 'bin', 'hstack.mjs'),
+      'stack',
+      'fleet-supervisor',
+      fixture.stackName,
+      'recover',
+      '--member-id',
+      'member-frozen',
+      '--timeout-seconds',
+      '10',
+      '--json',
+    ],
+    { cwd: rootDir, env: fixture.baseEnv }
+  );
+
+  assert.equal(res.code, 0, `expected exit 0\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /"verified":\s*true/);
+  assert.match(res.stdout, /"action":\s*"repaired"/);
+
+  const invocationLog = await readFile(join(fixture.stackCliHome, 'fleet-supervisor-invocations.log'), 'utf-8');
+  assert.match(invocationLog, /^send-fail session-1 [A-Za-z0-9._-]+$/m);
+  assert.match(invocationLog, /^resume --repair-active session-1$/m);
   assert.match(invocationLog, /^send session-1 [A-Za-z0-9._-]+$/m);
 });
 

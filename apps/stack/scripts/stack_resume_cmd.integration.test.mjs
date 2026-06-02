@@ -115,6 +115,29 @@ test('hstack stack resume invokes top-level happier resume when supported', asyn
   );
 });
 
+test('hstack stack resume forwards repair-active to top-level happier resume', async (t) => {
+  const fixture = await createResumeFixture(t);
+  const res = await runNodeCapture(
+    [join(rootDir, 'bin', 'hstack.mjs'), 'stack', 'resume', fixture.stackName, '--repair-active', 'session-a', '--json'],
+    {
+      cwd: rootDir,
+      env: {
+        ...fixture.baseEnv,
+        STUB_CLI_RESUME_SUPPORT: '1',
+      },
+    }
+  );
+
+  assert.equal(res.code, 0, `expected exit 0\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /"resumed":\s*\[\s*"session-a"\s*\]/);
+
+  const invocationLog = join(fixture.stackCliHome, 'resume-invocations.log');
+  assert.equal(
+    await readFile(invocationLog, 'utf-8'),
+    'resume --repair-active session-a\n'
+  );
+});
+
 test('hstack stack resume falls back to daemon resume when only daemon resume is supported', async (t) => {
   const fixture = await createResumeFixture(t);
   const res = await runNodeCapture(
