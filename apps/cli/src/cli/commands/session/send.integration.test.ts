@@ -286,7 +286,7 @@ describe('happier session send (integration)', () => {
     reloadConfiguration();
   });
 
-  it('commits an encrypted user message and returns a session_send JSON envelope', async () => {
+  it('rejects inactive sessions instead of appending an unprocessed user row', async () => {
     const { handleSessionCommand } = await import('./index');
 
     const output = captureConsoleJsonOutput();
@@ -305,28 +305,16 @@ describe('happier session send (integration)', () => {
       });
 
       const parsed = output.json();
-      if (parsed.ok !== true) {
-        throw new Error(`Unexpected session_send envelope: ${JSON.stringify(parsed)}`);
-      }
+      expect(parsed.ok).toBe(false);
       expect(parsed.kind).toBe('session_send');
-      expect(parsed.data?.sessionId).toBe('sess_integration_send_123');
-      expect(typeof parsed.data?.localId).toBe('string');
-      expect(parsed.data?.waited).toBe(false);
-
-      const last = receivedMessages[receivedMessages.length - 1];
-      expect(last).toMatchObject({
-        role: 'user',
-        content: { type: 'text', text: 'Hello from controller' },
-      });
-      expect(last?.meta?.sentFrom).toBe('cli');
-      expect(last?.meta?.permissionMode).toBe('safe-yolo');
-      expect(last?.meta?.model).toBe('claude-sonnet-4-0');
+      expect(parsed.error?.code).toBe('session_inactive');
+      expect(receivedMessages).toHaveLength(0);
     } finally {
       output.restore();
     }
   });
 
-  it('supports --wait and returns waited=true in JSON mode', async () => {
+  it('rejects inactive --wait sends before waiting for idle', async () => {
     const { handleSessionCommand } = await import('./index');
 
     const output = captureConsoleJsonOutput();
@@ -347,20 +335,18 @@ describe('happier session send (integration)', () => {
       });
 
       const parsed = output.json();
-      if (parsed.ok !== true) {
-        throw new Error(`Unexpected session_send envelope: ${JSON.stringify(parsed)}`);
-      }
+      expect(parsed.ok, JSON.stringify(parsed)).toBe(false);
       expect(parsed.kind).toBe('session_send');
-      expect(parsed.data?.sessionId).toBe('sess_integration_send_123');
-      expect(parsed.data?.waited).toBe(true);
-      expect(process.exitCode).toBe(0);
+      expect(parsed.error?.code).toBe('session_inactive');
+      expect(receivedMessages).toHaveLength(0);
+      expect(process.exitCode).toBe(1);
     } finally {
       output.restore();
       process.exitCode = prevExitCode;
     }
   });
 
-  it('does not hang waiting for idle when sending to an inactive session that has a pending user turn in the transcript', async () => {
+  it('does not report --wait success for inactive sessions with an unprocessed pending user row', async () => {
     stageCommittedUserMessageInTranscript = true;
     stageVisibleMessageByLocalIdDelayMs = 50;
 
@@ -383,13 +369,12 @@ describe('happier session send (integration)', () => {
       });
 
       const parsed = output.json();
-      if (parsed.ok !== true) {
-        throw new Error(`Unexpected session_send envelope: ${JSON.stringify(parsed)}`);
-      }
+      expect(parsed.ok).toBe(false);
       expect(parsed.kind).toBe('session_send');
-      expect(parsed.data?.waited).toBe(true);
-      expect(transcriptLookupRequests).toBeGreaterThan(0);
-      expect(process.exitCode).toBe(0);
+      expect(parsed.error?.code).toBe('session_inactive');
+      expect(transcriptLookupRequests).toBe(0);
+      expect(receivedMessages).toHaveLength(0);
+      expect(process.exitCode).toBe(1);
     } finally {
       output.restore();
       process.exitCode = prevExitCode;
@@ -1328,13 +1313,36 @@ describe('happier session send (integration)', () => {
 
   it('supports --permission-mode and --model overrides for a single send', async () => {
     const { handleSessionCommand } = await import('./index');
+    const { encodeBase64: encodeBase64Session, encryptWithDataKey } = await import('@/api/encryption');
+
+    const sessionId = 'sess_integration_send_123';
+    const machineKeySeed = new Uint8Array(32).fill(8);
+    let rpcPayload: any = null;
+    sessionActive = true;
+    sessionActiveAt = 2;
+
+    const socket = createApiSessionSocketStub({
+      emit: (event: string, args: unknown[]) => {
+        const [data, cb] = args as [any, ((answer: any) => void) | undefined];
+        if (event === SOCKET_RPC_EVENTS.CALL) {
+          expect(String(data.method ?? '')).toBe(`${sessionId}:${SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND}`);
+          rpcPayload = decryptWithDataKeyFn!(
+            decodeBase64Fn!(String(data.params ?? ''), 'base64'),
+            dek!,
+          );
+          cb?.({ ok: true, result: encodeBase64Session(encryptWithDataKey({ ok: true }, dek!), 'base64') });
+          return;
+        }
+        throw new Error(`Unexpected socket event: ${event}`);
+      },
+    });
+    bindApiSessionSocketMock(mockIo, socket);
 
     const output = captureConsoleJsonOutput();
 
     try {
-      const machineKeySeed = new Uint8Array(32).fill(8);
       await handleSessionCommand(
-        ['send', 'sess_integration_send_123', 'Hello from controller', '--permission-mode', 'bypassPermissions', '--model', 'default', '--json'],
+        ['send', sessionId, 'Hello from controller', '--permission-mode', 'bypassPermissions', '--model', 'default', '--json'],
         {
           readCredentialsFn: async () => ({
             token: 'token_test',
@@ -1352,10 +1360,12 @@ describe('happier session send (integration)', () => {
         throw new Error(`Unexpected session_send envelope: ${JSON.stringify(parsed)}`);
       }
       expect(parsed.kind).toBe('session_send');
-
-      const last = receivedMessages[receivedMessages.length - 1];
-      expect(last?.meta?.permissionMode).toBe('yolo');
-      expect(last?.meta?.model).toBeUndefined();
+      expect(rpcPayload).toMatchObject({
+        text: 'Hello from controller',
+        meta: expect.objectContaining({ permissionMode: 'yolo' }),
+      });
+      expect(rpcPayload?.meta?.model).toBeUndefined();
+      expect(receivedMessages).toHaveLength(0);
     } finally {
       output.restore();
     }

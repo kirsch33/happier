@@ -30,7 +30,7 @@ export type SendSessionMessageResult =
   | Readonly<{ ok: true; sessionId: string; localId: string; waited: boolean }>
   | Readonly<{
       ok: false;
-      code: 'session_not_found' | 'session_id_ambiguous' | 'unsupported' | 'timeout' | 'wait_failed';
+      code: 'session_not_found' | 'session_id_ambiguous' | 'session_inactive' | 'unsupported' | 'timeout' | 'wait_failed';
       candidates?: string[];
       message?: string;
     }>;
@@ -198,6 +198,14 @@ export async function sendSessionMessage(params: Readonly<{
       : ({ t: 'encrypted', c: encryptSessionPayload({ ctx: sessionTarget.ctx, payload: record }) } as const);
 
   const shouldUseRuntimeRpc = sessionTarget.rawSession.active === true;
+  if (!shouldUseRuntimeRpc) {
+    return {
+      ok: false,
+      code: 'session_inactive',
+      message: 'session_inactive',
+    };
+  }
+
   if (shouldUseRuntimeRpc) {
     try {
       await callSessionRpc({
@@ -235,16 +243,6 @@ export async function sendSessionMessage(params: Readonly<{
         permissionMode: permissionIntent,
       });
     }
-  } else {
-    await sendSessionMessageViaSocketCommitted({
-      token: params.credentials.token,
-      sessionId: sessionTarget.sessionId,
-      content,
-      localId,
-      messageRole: 'user',
-      sentFrom: 'cli',
-      permissionMode: permissionIntent,
-    });
   }
 
   if (!params.wait) {
@@ -261,57 +259,34 @@ export async function sendSessionMessage(params: Readonly<{
   let currentTurnAfterSeqExclusive: number | null = null;
 
   try {
-    if (!shouldUseRuntimeRpc) {
-      const materialized = await waitForTranscriptEncryptedMessageByLocalId({
-        token: params.credentials.token,
-        sessionId: sessionTarget.sessionId,
-        localId,
-        maxWaitMs: Math.max(1, deadlineMs - Date.now()),
-      });
-      if (!materialized) {
-        return {
-          ok: false,
-          code: 'timeout',
-        };
-      }
+    const materialized = await waitForTranscriptEncryptedMessageByLocalId({
+      token: params.credentials.token,
+      sessionId: sessionTarget.sessionId,
+      localId,
+      maxWaitMs: Math.max(1, deadlineMs - Date.now()),
+    });
+    if (!materialized) {
       return {
-        ok: true,
-        sessionId: sessionTarget.sessionId,
-        localId,
-        waited: true,
+        ok: false,
+        code: 'timeout',
       };
     }
 
-    if (shouldUseRuntimeRpc) {
-      const materialized = await waitForTranscriptEncryptedMessageByLocalId({
-        token: params.credentials.token,
-        sessionId: sessionTarget.sessionId,
-        localId,
-        maxWaitMs: Math.max(1, deadlineMs - Date.now()),
-      });
-      if (!materialized) {
-        return {
-          ok: false,
-          code: 'timeout',
-        };
-      }
-
-      const refreshedSession = await fetchSessionById({
-        token: params.credentials.token,
-        sessionId: sessionTarget.sessionId,
-      });
-      if (!refreshedSession) {
-        throw new Error('Session not found after send');
-      }
-      waitSessionSnapshot = refreshedSession;
-      currentTurnAfterSeqExclusive = await resolveCurrentTurnAfterSeqExclusive({
-        token: params.credentials.token,
-        sessionId: sessionTarget.sessionId,
-        localId,
-        materializedSeq: materialized.seq,
-        ctx: sessionTarget.ctx,
-      });
+    const refreshedSession = await fetchSessionById({
+      token: params.credentials.token,
+      sessionId: sessionTarget.sessionId,
+    });
+    if (!refreshedSession) {
+      throw new Error('Session not found after send');
     }
+    waitSessionSnapshot = refreshedSession;
+    currentTurnAfterSeqExclusive = await resolveCurrentTurnAfterSeqExclusive({
+      token: params.credentials.token,
+      sessionId: sessionTarget.sessionId,
+      localId,
+      materializedSeq: materialized.seq,
+      ctx: sessionTarget.ctx,
+    });
 
     const initialTurnActivity = await detectSessionTurnActivity({
       token: params.credentials.token,
