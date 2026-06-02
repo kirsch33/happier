@@ -134,6 +134,7 @@ import { resolveStackProcessKindOverrideForSessionSpawn } from './spawn/resolveS
 import { createSpawnConcurrencyGate } from './spawn/createSpawnConcurrencyGate';
 import { computeDaemonSpawnRequestKey, createSpawnRequestCoalescer } from './spawn/spawnRequestCoalescer';
 import { normalizeSpawnSessionDirectory } from '@/rpc/handlers/spawnSessionOptionsContract';
+import { resolveHappierRuntimeContextEnv } from '@/utils/env/resolveHappierRuntimeContextEnv';
 import { startAutomationWorker, type AutomationWorkerHandle } from './automation/automationWorker';
 import { startMemoryWorker, type MemoryWorkerHandle } from './memory/memoryWorker';
 import { createDaemonConnectivityCoordinator } from './connection/createDaemonConnectivityCoordinator';
@@ -1914,8 +1915,19 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             }
 
             const stackProcessKindOverride = resolveStackProcessKindOverrideForSessionSpawn(process.env);
+            const daemonServerSelectionEnv = {
+              activeServerId: configuration.activeServerId,
+              canonicalServerUrl: configuration.serverUrl,
+              apiServerUrl: configuration.apiServerUrl,
+              webappUrl: configuration.webappUrl,
+            };
+            const daemonRuntimeContextEnv = resolveHappierRuntimeContextEnv({
+              homeDir: configuration.happyHomeDir,
+              server: daemonServerSelectionEnv,
+            });
             const extraEnvForChildWithMessage = {
               ...extraEnvForChild,
+              ...daemonRuntimeContextEnv,
               ...(sessionAttachFilePath
                 ? { HAPPIER_SESSION_ATTACH_FILE: sessionAttachFilePath }
                 : {}),
@@ -2244,11 +2256,16 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 });
               };
 
-              const buildWindowsHostedLaunchEnv = (launchSpec: ReturnType<typeof buildHappyCliSubprocessLaunchSpec>) => ({
-                ...process.env,
-                ...extraEnvForChildWithMessage,
-                ...(launchSpec.env ?? {}),
-              });
+              const buildWindowsHostedLaunchEnv = (launchSpec: ReturnType<typeof buildHappyCliSubprocessLaunchSpec>) =>
+                buildSpawnChildProcessEnv({
+                  processEnv: process.env,
+                  extraEnv: {
+                    ...extraEnvForChildWithMessage,
+                    ...(launchSpec.env ?? {}),
+                  },
+                  happyHomeDir: configuration.happyHomeDir,
+                  serverSelectionEnv: daemonServerSelectionEnv,
+                });
 
               if (windowsLaunchMode === 'windows_terminal' || windowsLaunchMode === 'console') {
                 const windowsTerminalIdentity = buildWindowsTerminalWindowIdentity({
@@ -2358,12 +2375,8 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               const childProcessEnv = buildSpawnChildProcessEnv({
                 processEnv: process.env,
                 extraEnv: extraEnvForChildWithMessage,
-                serverSelectionEnv: {
-                  activeServerId: configuration.activeServerId,
-                  canonicalServerUrl: configuration.serverUrl,
-                  apiServerUrl: configuration.apiServerUrl,
-                  webappUrl: configuration.webappUrl,
-                },
+                happyHomeDir: configuration.happyHomeDir,
+                serverSelectionEnv: daemonServerSelectionEnv,
               });
               const spawnOptions = {
                 cwd: resolvedDirectory,

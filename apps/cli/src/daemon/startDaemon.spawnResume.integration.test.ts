@@ -290,6 +290,7 @@ vi.mock('@/backends/catalog', () => ({
     vendorResumeSupport: 'supported',
   })),
   getVendorResumeSupport: vi.fn(async () => () => true),
+  resolveConnectedServiceCandidatePersistedSessionFile: vi.fn(() => null),
   resolveConnectedServiceSwitchContinuity: vi.fn(async (_agentId: string, { serviceId }: { serviceId: string }) => (
     serviceId === 'anthropic' || serviceId === 'claude-subscription'
       ? { mode: 'restart_same_home' }
@@ -315,6 +316,7 @@ vi.mock('@/session/metadata/updateSessionMetadataWithRetry', () => ({
 }));
 
 vi.mock('./connectedServices/resolveConnectedServiceAuthForSpawn', () => ({
+  ConnectedServiceSpawnResumeUnreachableError: class ConnectedServiceSpawnResumeUnreachableError extends Error {},
   resolveConnectedServiceAuthForSpawn: resolveConnectedServiceAuthForSpawnMock,
 }));
 
@@ -794,6 +796,95 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
       } else {
         process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('scopes daemon-spawned child runners to the daemon home and server context', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    const happierHomeOriginal = process.env.HAPPIER_HOME_DIR;
+    const activeServerOriginal = process.env.HAPPIER_ACTIVE_SERVER_ID;
+    const serverUrlOriginal = process.env.HAPPIER_SERVER_URL;
+    const localServerUrlOriginal = process.env.HAPPIER_LOCAL_SERVER_URL;
+    const publicServerUrlOriginal = process.env.HAPPIER_PUBLIC_SERVER_URL;
+    const webappUrlOriginal = process.env.HAPPIER_WEBAPP_URL;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    process.env.HAPPIER_HOME_DIR = '/tmp/live-home';
+    process.env.HAPPIER_ACTIVE_SERVER_ID = 'live';
+    process.env.HAPPIER_SERVER_URL = 'http://127.0.0.1:3005';
+    process.env.HAPPIER_LOCAL_SERVER_URL = 'http://127.0.0.1:3005';
+    process.env.HAPPIER_PUBLIC_SERVER_URL = 'https://live.example.test';
+    process.env.HAPPIER_WEBAPP_URL = 'https://live-app.example.test';
+
+    try {
+      const { startDaemon } = await import('./startDaemon');
+
+      const run = startDaemon();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const spawnSession = harness.getSpawnSession();
+      if (!spawnSession) {
+        throw new Error('Expected spawnSession to be registered');
+      }
+
+      await spawnSession({
+        directory: '/tmp',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        token: 't',
+        codexBackendMode: 'acp',
+      });
+
+      expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+      const firstCall = spawnHappyCLI.mock.calls[0];
+      if (!firstCall) {
+        throw new Error('Expected spawnHappyCLI to be called');
+      }
+      const opts = firstCall[1] as { env?: NodeJS.ProcessEnv } | undefined;
+
+      expect(opts?.env?.HAPPIER_HOME_DIR).toBe('/tmp/happy-home');
+      expect(opts?.env?.HAPPIER_SERVER_URL).toBe('http://localhost:9999');
+      expect(opts?.env?.HAPPIER_ACTIVE_SERVER_ID).not.toBe('live');
+      expect(opts?.env?.HAPPIER_PUBLIC_SERVER_URL).not.toBe('https://live.example.test');
+
+      harness.requestShutdown('happier-cli');
+      await run;
+    } finally {
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      if (happierHomeOriginal === undefined) {
+        delete process.env.HAPPIER_HOME_DIR;
+      } else {
+        process.env.HAPPIER_HOME_DIR = happierHomeOriginal;
+      }
+      if (activeServerOriginal === undefined) {
+        delete process.env.HAPPIER_ACTIVE_SERVER_ID;
+      } else {
+        process.env.HAPPIER_ACTIVE_SERVER_ID = activeServerOriginal;
+      }
+      if (serverUrlOriginal === undefined) {
+        delete process.env.HAPPIER_SERVER_URL;
+      } else {
+        process.env.HAPPIER_SERVER_URL = serverUrlOriginal;
+      }
+      if (localServerUrlOriginal === undefined) {
+        delete process.env.HAPPIER_LOCAL_SERVER_URL;
+      } else {
+        process.env.HAPPIER_LOCAL_SERVER_URL = localServerUrlOriginal;
+      }
+      if (publicServerUrlOriginal === undefined) {
+        delete process.env.HAPPIER_PUBLIC_SERVER_URL;
+      } else {
+        process.env.HAPPIER_PUBLIC_SERVER_URL = publicServerUrlOriginal;
+      }
+      if (webappUrlOriginal === undefined) {
+        delete process.env.HAPPIER_WEBAPP_URL;
+      } else {
+        process.env.HAPPIER_WEBAPP_URL = webappUrlOriginal;
       }
       exitSpy.mockRestore();
     }
@@ -2184,7 +2275,15 @@ describe('startDaemon spawn resume wiring (integration)', () => {
   it('uses the visible Windows console spawner when the resolved launch mode is console', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    const happierHomeOriginal = process.env.HAPPIER_HOME_DIR;
+    const activeServerOriginal = process.env.HAPPIER_ACTIVE_SERVER_ID;
+    const serverUrlOriginal = process.env.HAPPIER_SERVER_URL;
+    const publicServerUrlOriginal = process.env.HAPPIER_PUBLIC_SERVER_URL;
     process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    process.env.HAPPIER_HOME_DIR = '/tmp/live-home';
+    process.env.HAPPIER_ACTIVE_SERVER_ID = 'live';
+    process.env.HAPPIER_SERVER_URL = 'http://127.0.0.1:3005';
+    process.env.HAPPIER_PUBLIC_SERVER_URL = 'https://live.example.test';
     let run: Promise<void> | null = null;
 
     try {
@@ -2223,6 +2322,11 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         args: expect.arrayContaining(['codex', '--happy-starting-mode', 'remote']),
         workingDirectory: '/tmp',
       }));
+      const startArgs = vi.mocked(startHappySessionInVisibleWindowsConsole).mock.calls[0]?.[0];
+      expect(startArgs?.env?.HAPPIER_HOME_DIR).toBe('/tmp/happy-home');
+      expect(startArgs?.env?.HAPPIER_SERVER_URL).toBe('http://localhost:9999');
+      expect(startArgs?.env?.HAPPIER_ACTIVE_SERVER_ID).not.toBe('live');
+      expect(startArgs?.env?.HAPPIER_PUBLIC_SERVER_URL).not.toBe('https://live.example.test');
       expect(buildHappyCliSubprocessLaunchSpec).toHaveBeenCalledWith(
         expect.any(Array),
         { preferWindowsPackagedBinary: true },
@@ -2237,6 +2341,26 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
       } else {
         process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      if (happierHomeOriginal === undefined) {
+        delete process.env.HAPPIER_HOME_DIR;
+      } else {
+        process.env.HAPPIER_HOME_DIR = happierHomeOriginal;
+      }
+      if (activeServerOriginal === undefined) {
+        delete process.env.HAPPIER_ACTIVE_SERVER_ID;
+      } else {
+        process.env.HAPPIER_ACTIVE_SERVER_ID = activeServerOriginal;
+      }
+      if (serverUrlOriginal === undefined) {
+        delete process.env.HAPPIER_SERVER_URL;
+      } else {
+        process.env.HAPPIER_SERVER_URL = serverUrlOriginal;
+      }
+      if (publicServerUrlOriginal === undefined) {
+        delete process.env.HAPPIER_PUBLIC_SERVER_URL;
+      } else {
+        process.env.HAPPIER_PUBLIC_SERVER_URL = publicServerUrlOriginal;
       }
       exitSpy.mockRestore();
     }

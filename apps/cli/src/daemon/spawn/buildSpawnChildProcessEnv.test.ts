@@ -53,6 +53,7 @@ describe('buildSpawnChildProcessEnv', () => {
     const params = {
       processEnv: {
         PATH: '/bin',
+        HAPPIER_HOME_DIR: '/stale/home',
         HAPPIER_ACTIVE_SERVER_ID: 'stale-server',
         HAPPIER_SERVER_URL: 'https://stale.example.test',
         HAPPIER_LOCAL_SERVER_URL: 'http://127.0.0.1:4999',
@@ -60,6 +61,7 @@ describe('buildSpawnChildProcessEnv', () => {
         HAPPIER_WEBAPP_URL: 'https://stale-app.example.test',
       },
       extraEnv: {},
+      happyHomeDir: '/stack/home/.happier',
       serverSelectionEnv: {
         activeServerId: 'stack-a',
         canonicalServerUrl: 'http://127.0.0.1:13155',
@@ -70,6 +72,7 @@ describe('buildSpawnChildProcessEnv', () => {
     const env = buildSpawnChildProcessEnv(params);
 
     expect(env.PATH).toBe('/bin');
+    expect(env.HAPPIER_HOME_DIR).toBe('/stack/home/.happier');
     expect(env.HAPPIER_ACTIVE_SERVER_ID).toBe('stack-a');
     expect(env.HAPPIER_SERVER_URL).toBe('http://127.0.0.1:3005');
     expect(env.HAPPIER_LOCAL_SERVER_URL).toBe('http://127.0.0.1:3005');

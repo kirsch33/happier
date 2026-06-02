@@ -16,6 +16,7 @@ import { createSessionMediaAccessPolicy } from '@/session/sessionMedia/createSes
 import { getProviderCliRuntimeSpec, isAgentMediaCapabilitySupported } from '@happier-dev/agents';
 import { getSessionNotificationTitle } from '@/agent/runtime/readyNotificationContext';
 import { createSessionProviderPendingDrainAdapter } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
+import { resolveHappierRuntimeContextEnvFromConfiguration } from '@/utils/env/resolveHappierRuntimeContextEnvFromConfiguration';
 
 type CatalogAcpProviderRuntimeParams<TBackendOptions extends object> = {
   provider: Parameters<typeof createCatalogAcpBackend>[0];
@@ -123,11 +124,20 @@ export function createCatalogProviderAcpRuntime<TBackendOptions extends object =
           })
         : params.getPermissionMode?.();
       const permissionMode = typeof permissionModeRaw === 'string' ? permissionModeRaw : undefined;
+      const backendOptions = (params.backendOptions ?? {}) as Omit<
+        TBackendOptions,
+        'cwd' | 'mcpServers' | 'permissionHandler' | 'permissionMode' | 'happierSessionId'
+      > & { env?: NodeJS.ProcessEnv };
+      const backendEnv = {
+        ...(backendOptions.env ?? {}),
+        ...resolveHappierRuntimeContextEnvFromConfiguration(),
+      };
 
       const created = await createCatalogAcpBackend<TBackendOptions>(params.provider, {
         cwd: params.directory,
         mcpServers: params.mcpServers,
-        ...(params.backendOptions ?? {}),
+        ...backendOptions,
+        env: backendEnv,
         permissionHandler: params.permissionHandler,
         permissionMode,
         happierSessionId: params.session.sessionId,
