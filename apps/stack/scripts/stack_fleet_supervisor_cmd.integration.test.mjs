@@ -347,3 +347,53 @@ test('hstack stack fleet-supervisor recover replaces archived sessions and links
   const invocationLog = await readFile(join(fixture.stackCliHome, 'fleet-supervisor-invocations.log'), 'utf-8');
   assert.match(invocationLog, /^create session-replacement [A-Za-z0-9._-]+$/m);
 });
+
+test('hstack stack fleet-supervisor status surfaces stack session respawn policy', async (t) => {
+  const fixture = await createFleetSupervisorFixture(t);
+  const res = await runNodeCapture(
+    [
+      join(rootDir, 'bin', 'hstack.mjs'),
+      'stack',
+      'fleet-supervisor',
+      fixture.stackName,
+      'status',
+      '--json',
+    ],
+    { cwd: rootDir, env: fixture.baseEnv }
+  );
+
+  assert.equal(res.code, 0, `expected exit 0\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  const payload = JSON.parse(res.stdout);
+  assert.equal(payload.sessionRespawn.enabled, true);
+  assert.equal(payload.sessionRespawn.source, 'stack_default');
+
+  await fixture.writeStackEnv({ port: 4101 });
+  await writeFile(
+    fixture.envPath,
+    [
+      `HAPPIER_STACK_REPO_DIR=${fixture.monoRoot}`,
+      `HAPPIER_STACK_CLI_HOME_DIR=${fixture.stackCliHome}`,
+      'HAPPIER_STACK_SERVER_PORT=4101',
+      'HAPPIER_DAEMON_SESSION_RESPAWN_ENABLED=false',
+      '',
+    ].join('\n'),
+    'utf-8'
+  );
+
+  const disabledRes = await runNodeCapture(
+    [
+      join(rootDir, 'bin', 'hstack.mjs'),
+      'stack',
+      'fleet-supervisor',
+      fixture.stackName,
+      'status',
+      '--json',
+    ],
+    { cwd: rootDir, env: fixture.baseEnv }
+  );
+
+  assert.equal(disabledRes.code, 0, `expected exit 0\nstdout:\n${disabledRes.stdout}\nstderr:\n${disabledRes.stderr}`);
+  const disabledPayload = JSON.parse(disabledRes.stdout);
+  assert.equal(disabledPayload.sessionRespawn.enabled, false);
+  assert.equal(disabledPayload.sessionRespawn.source, 'explicit_env');
+});

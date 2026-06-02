@@ -246,3 +246,28 @@ test('readStackInfoSnapshot marks daemon as down when stack runtime is otherwise
     await rm(tmp, { recursive: true, force: true });
   }
 });
+
+test('readStackInfoSnapshot surfaces stack session respawn policy with explicit opt-out', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-session-respawn-'));
+  const storageDir = join(tmp, 'storage');
+  const stackName = 'dev-auth';
+  const baseDir = join(storageDir, stackName);
+
+  await mkdir(baseDir, { recursive: true });
+  await writeFile(join(baseDir, 'env'), '', 'utf-8');
+
+  const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
+  try {
+    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    assert.equal(out.runtime.sessionRespawn.enabled, true);
+    assert.equal(out.runtime.sessionRespawn.source, 'stack_default');
+
+    await writeFile(join(baseDir, 'env'), 'HAPPIER_DAEMON_SESSION_RESPAWN_ENABLED=0\n', 'utf-8');
+    const disabled = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    assert.equal(disabled.runtime.sessionRespawn.enabled, false);
+    assert.equal(disabled.runtime.sessionRespawn.source, 'explicit_env');
+  } finally {
+    restore();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});

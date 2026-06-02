@@ -8,6 +8,7 @@ import { randomToken } from '../utils/crypto/tokens.mjs';
 import { resolveStackEnvPath } from '../utils/paths/paths.mjs';
 import { runCapture, runCaptureResult } from '../utils/proc/proc.mjs';
 
+import { resolveStackSessionRespawnStatus } from './session_respawn_status.mjs';
 import { withStackEnv } from './stack_environment.mjs';
 
 const SUPERVISOR_DIR = 'fleet-supervisor';
@@ -555,10 +556,11 @@ export async function runStackFleetSupervisorCommand({ rootDir, stackName, passt
       if (subcommand === 'status') {
         const descriptors = await loadDescriptors(paths, readFlagValue(argv, '--member-id'));
         const state = await readJsonFile(paths.statePath, null);
+        const sessionRespawn = resolveStackSessionRespawnStatus(env);
         printResult({
           json,
-          data: { ok: true, stackName, descriptors, state, paths },
-          text: JSON.stringify({ stackName, descriptors, state, paths }, null, 2),
+          data: { ok: true, stackName, descriptors, state, paths, sessionRespawn },
+          text: JSON.stringify({ stackName, descriptors, state, paths, sessionRespawn }, null, 2),
         });
         return;
       }

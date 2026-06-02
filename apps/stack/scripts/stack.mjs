@@ -1623,6 +1623,10 @@ async function cmdInfo({ rootDir, argv }) {
     const issueSuffix = issues.length > 0 ? ` (${issues.join(',')})` : '';
     console.log(`- health: ${out.runtime.health.status}${issueSuffix}`);
   }
+  if (out.runtime?.sessionRespawn && typeof out.runtime.sessionRespawn.enabled === 'boolean') {
+    const source = out.runtime.sessionRespawn.source === 'explicit_env' ? 'explicit env' : 'stack default';
+    console.log(`- session respawn: ${out.runtime.sessionRespawn.enabled ? 'enabled' : 'disabled'} (${source})`);
+  }
   if (out.ports.server) console.log(`- port: server=${out.ports.server}${out.ports.backend ? ` backend=${out.ports.backend}` : ''}`);
   if (out.ports.ui) {
     const uiRunning = out.runtime?.components?.ui?.running !== false;

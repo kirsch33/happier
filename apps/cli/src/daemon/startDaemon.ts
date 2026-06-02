@@ -239,6 +239,18 @@ function resolvePositiveIntEnv(raw: string | undefined, fallback: number, bounds
   return Math.min(bounds.max, Math.max(bounds.min, parsed));
 }
 
+function hasNonBlankEnvValue(env: NodeJS.ProcessEnv, key: string): boolean {
+  return typeof env[key] === 'string' && env[key]!.trim().length > 0;
+}
+
+function isStackScopedDaemonEnv(env: NodeJS.ProcessEnv): boolean {
+  return (
+    hasNonBlankEnvValue(env, 'HAPPIER_STACK_STACK') ||
+    hasNonBlankEnvValue(env, 'HAPPIER_STACK_ENV_FILE') ||
+    hasNonBlankEnvValue(env, 'HAPPIER_STACK_CLI_HOME_DIR')
+  );
+}
+
 function readBuiltInCatalogAgentIdFromBackendTarget(target: BackendTargetRefV1 | undefined): CatalogAgentId | null {
   if (target?.kind !== 'builtInAgent') return null;
   return typeof target.agentId === 'string' && (CATALOG_AGENT_IDS as readonly string[]).includes(target.agentId)
@@ -2570,7 +2582,10 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 };
 
             const stopSessionCore = createStopSession({ pidToTrackedSession });
-        const sessionRespawnEnabled = parseBooleanEnv(process.env.HAPPIER_DAEMON_SESSION_RESPAWN_ENABLED, false);
+        const sessionRespawnEnabled = parseBooleanEnv(
+          process.env.HAPPIER_DAEMON_SESSION_RESPAWN_ENABLED,
+          isStackScopedDaemonEnv(process.env),
+        );
         const sessionRespawnMaxAttempts = resolvePositiveIntEnv(
           process.env.HAPPIER_DAEMON_SESSION_RESPAWN_MAX_ATTEMPTS,
           10,

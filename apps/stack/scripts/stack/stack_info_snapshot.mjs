@@ -11,6 +11,7 @@ import { resolveStackRuntimeMode } from '../runtime/shared/runtime_mode.mjs';
 import { inspectActiveRuntimeSnapshot } from '../runtime/launch/inspectActiveRuntimeSnapshot.mjs';
 import { getObservedStackDaemon, readStackRuntimeStateWithDaemonSync } from '../utils/stack/runtime_daemon_state.mjs';
 import { applyStackActiveServerScopeEnv } from '../utils/auth/stable_scope_id.mjs';
+import { resolveStackSessionRespawnStatus } from './session_respawn_status.mjs';
 import { join } from 'node:path';
 import { checkDaemonState } from '../daemon.mjs';
 
@@ -134,6 +135,7 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
   const repoWorktreeSpec = repoDir ? worktreeSpecFromDir({ rootDir, component: 'happier-ui', dir: repoDir }) || null : null;
   const runtimeMode = resolveStackRuntimeMode({ argv: [], env: stackEnv }).mode;
   const runtimeInspection = await inspectActiveRuntimeSnapshot({ stackBaseDir: baseDir });
+  const sessionRespawn = resolveStackSessionRespawnStatus(stackEnv);
   const dirs = {
     repoDir,
     uiDir: getComponentDir(rootDir, 'happier-ui', { ...process.env, ...stackEnv }),
@@ -189,6 +191,7 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
         status: healthStatus,
         issues: healthIssues,
       },
+      sessionRespawn,
       ports: runtimePorts,
       expo: runtimeState?.expo ?? null,
       processes: runtimeState?.processes ?? null,

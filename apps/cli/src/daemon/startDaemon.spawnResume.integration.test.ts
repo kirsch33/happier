@@ -298,6 +298,7 @@ vi.mock('@/backends/catalog', () => ({
   )),
   resolveAgentCliSubcommand: vi.fn((agentId: string = 'codex') => (agentId === 'claude' ? 'claude' : 'codex')),
   resolveCatalogAgentId: vi.fn((agentId: string = 'codex') => (agentId === 'claude' ? 'claude' : 'codex')),
+  resolveSessionGoalRuntimeKind: vi.fn(() => 'none'),
   resolveCatalogAgentIdForCliSubcommand: vi.fn((subcommand: string) => {
     const normalized = subcommand.trim();
     return normalized === 'opencode' ? 'opencode' : normalized === 'claude' ? 'claude' : 'codex';
@@ -500,6 +501,8 @@ describe('startDaemon spawn resume wiring (integration)', () => {
     delete process.env.HAPPIER_DAEMON_SESSION_RESPAWN_ENABLED;
     delete process.env.HAPPIER_DAEMON_STOP_SESSION_WAIT_FOR_EXIT_MS;
     delete process.env.HAPPIER_DAEMON_STOP_SESSION_WAIT_FOR_EXIT_POLL_INTERVAL_MS;
+    delete process.env.HAPPIER_STACK_STACK;
+    delete process.env.HAPPIER_STACK_ENV_FILE;
   });
 
   it('leaves daemon session runner respawn disabled unless explicitly enabled', async () => {
@@ -525,6 +528,76 @@ describe('startDaemon spawn resume wiring (integration)', () => {
 
       harness.requestShutdown('happier-cli');
       await run;
+    } finally {
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('enables daemon session runner respawn by default when the daemon is stack scoped', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    process.env.HAPPIER_STACK_STACK = 'respawn-stack';
+    process.env.HAPPIER_STACK_ENV_FILE = '/tmp/respawn-stack/env';
+    delete process.env.HAPPIER_DAEMON_SESSION_RESPAWN_ENABLED;
+
+    try {
+      const { startDaemon } = await import('./startDaemon');
+
+      const run = startDaemon();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (sessionRespawnManagerCapture.createSessionRunnerRespawnManager.mock.calls.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      harness.requestShutdown('happier-cli');
+      await run;
+
+      expect(sessionRespawnManagerCapture.createSessionRunnerRespawnManager).toHaveBeenCalledWith(
+        expect.objectContaining({ enabled: true }),
+      );
+    } finally {
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('keeps stack-scoped daemon session runner respawn disabled when explicitly opted out', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    process.env.HAPPIER_STACK_STACK = 'respawn-stack';
+    process.env.HAPPIER_STACK_ENV_FILE = '/tmp/respawn-stack/env';
+    process.env.HAPPIER_DAEMON_SESSION_RESPAWN_ENABLED = '0';
+
+    try {
+      const { startDaemon } = await import('./startDaemon');
+
+      const run = startDaemon();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (sessionRespawnManagerCapture.createSessionRunnerRespawnManager.mock.calls.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      harness.requestShutdown('happier-cli');
+      await run;
+
+      expect(sessionRespawnManagerCapture.createSessionRunnerRespawnManager).toHaveBeenCalledWith(
+        expect.objectContaining({ enabled: false }),
+      );
     } finally {
       if (refreshEnvOriginal === undefined) {
         delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
