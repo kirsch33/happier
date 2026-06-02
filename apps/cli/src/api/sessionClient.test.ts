@@ -15,6 +15,7 @@ import { createMockSession, createSessionRecordFixture } from '@/testkit/backend
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { HttpStatusError } from './client/httpStatusError';
 import { logger } from '@/ui/logger';
+import { reloadConfiguration } from '@/configuration';
 
 const HISTORICAL_CATCH_UP_AGE_MS = 60_000;
 
@@ -485,6 +486,7 @@ describe('ApiSessionClient connection handling', () => {
             'HAPPIER_STACK_TOOL_TRACE_FILE',
             'HAPPIER_DAEMON_INITIAL_PROMPT',
             'HAPPIER_FEATURE_EXECUTION_RUNS__ENABLED',
+            'HAPPIER_RESUME_STALE_USER_MESSAGE_MS',
         ]);
         originalArgv = [...process.argv];
         vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -517,6 +519,7 @@ describe('ApiSessionClient connection handling', () => {
 
         process.argv = originalArgv;
         envScope.restore();
+        reloadConfiguration();
         __resetToolTraceForTests();
         vi.useRealTimers();
         vi.unstubAllGlobals();
@@ -667,9 +670,46 @@ describe('ApiSessionClient connection handling', () => {
         );
     });
 
+    it('filters stale explicit startup catch-up user messages from agent delivery', async () => {
+        envScope.patch({ HAPPIER_RESUME_STALE_USER_MESSAGE_MS: '1000' });
+        reloadConfiguration();
+
+        const axiosMod = await import('axios');
+        const axios = axiosMod.default as any;
+        const plaintext = {
+            role: 'user',
+            content: { type: 'text', text: 'stale explicit resume prompt' },
+            meta: { source: 'ui', sentFrom: 'web' },
+        };
+        const getSpy = vi.spyOn(axios, 'get').mockResolvedValue(
+            buildMessagesListResponse([
+                buildEncryptedTranscriptMessage({
+                    session: mockSession,
+                    plaintext,
+                    id: 'm-explicit-stale-prompt',
+                    seq: 1,
+                    createdAt: historicalCatchUpCreatedAt(),
+                }),
+            ]),
+        );
+
+        mockSession.seq = 0;
+        mockSession.initialTranscriptAfterSeq = 0;
+        mockSession.metadata.startedBy = 'daemon';
+
+        const client = createClient('token', mockSession);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+
+        await waitForNextTick();
+        expect(getSessionMessagesGetCalls(getSpy, mockSession.id).length).toBeGreaterThanOrEqual(1);
+        expect(onUserMessage).not.toHaveBeenCalled();
+    });
+
     it('does not let stale catch-up rows authorize later stale rows for provider delivery', async () => {
         const axiosMod = await import('axios');
-        const axios = axiosMod.default as any;        const createdAt = historicalCatchUpCreatedAt();
+        const axios = axiosMod.default as any;
+        const createdAt = historicalCatchUpCreatedAt();
 
         const firstStalePrompt = {
             role: 'user',

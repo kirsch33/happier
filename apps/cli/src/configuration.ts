@@ -239,6 +239,7 @@ class Configuration {
 
   // Startup transcript catch-up (avoids missing early prompts; prevents replaying entire history into the agent queue).
   public readonly startupTranscriptCatchUpSeqRewind: number
+  public readonly resumeStaleUserMessageMs: number
 
   // Claude remote TaskOutput sidechain import limits (defense-in-depth against huge transcripts).
   public readonly claudeTaskOutputMaxPendingPerAgent: number
@@ -665,6 +666,10 @@ class Configuration {
     this.startupTranscriptCatchUpSeqRewind = resolveIntEnvWithBounds(
       'HAPPIER_STARTUP_TRANSCRIPT_CATCH_UP_SEQ_REWIND',
       { min: 0, default: 1, max: 1000 },
+    );
+    this.resumeStaleUserMessageMs = resolveIntEnvWithBounds(
+      'HAPPIER_RESUME_STALE_USER_MESSAGE_MS',
+      { min: 0, default: 3_600_000, max: MAX_SAFE_NODE_TIMEOUT_MS },
     );
 
     this.claudeTaskOutputMaxPendingPerAgent = resolveIntEnvWithBounds(

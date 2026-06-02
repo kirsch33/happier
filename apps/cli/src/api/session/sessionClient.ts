@@ -983,12 +983,37 @@ export class ApiSessionClient extends EventEmitter {
             });
             return false;
         };
+        const logStaleCatchUpSuppression = (ageMs: number): boolean => {
+            logger.debug('[DELIVERY-DECISION] stale catch-up user-message suppressed', {
+                sessionId: this.sessionId,
+                updateId: update?.id,
+                msgSeq,
+                messageLocalId: message.localId,
+                messageSource: message.meta?.source ?? null,
+                catchUpAfterSeq: opts.catchUpAfterSeq,
+                catchUpAfterSeqIsExplicit: opts.catchUpAfterSeqIsExplicit,
+                createdAtMs: message.createdAt,
+                ageMs,
+                staleAfterMs: configuration.resumeStaleUserMessageMs,
+                decision: false,
+                reason: 'stale_replay',
+            });
+            return false;
+        };
 
         if (!update?.id?.startsWith('catchup-')) return true;
 
         if (message.meta?.source === 'daemon-initial-prompt') {
             const expectedLocalId = buildDaemonInitialPromptLocalId(this.sessionId);
             return Boolean(expectedLocalId && localId === expectedLocalId);
+        }
+
+        const staleUserMessageMs = configuration.resumeStaleUserMessageMs;
+        if (staleUserMessageMs > 0 && typeof message.createdAt === 'number' && Number.isFinite(message.createdAt)) {
+            const ageMs = Date.now() - message.createdAt;
+            if (ageMs > staleUserMessageMs) {
+                return logStaleCatchUpSuppression(ageMs);
+            }
         }
 
         const rawCatchUpAfterSeq = opts.catchUpAfterSeq;
