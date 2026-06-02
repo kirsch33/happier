@@ -7,6 +7,7 @@ import net from 'node:net';
 
 import { withPatchedProcessEnv } from './testkit/core/env_scope.mjs';
 import { readStackInfoSnapshot } from './stack/stack_info_snapshot.mjs';
+import { isAlive, spawnOwnedSleep, waitForProcessAlive } from './testkit/stack_stop_sweeps_testkit.mjs';
 
 async function withListeningServer() {
   const server = net.createServer();
@@ -269,5 +270,60 @@ test('readStackInfoSnapshot surfaces stack session respawn policy with explicit 
   } finally {
     restore();
     await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('readStackInfoSnapshot reports leftover stack session runners as degraded health', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-session-leftover-'));
+  const storageDir = join(tmp, 'storage');
+  const stackName = 'dev-auth';
+  const baseDir = join(storageDir, stackName);
+  const envPath = join(baseDir, 'env');
+  const repoDir = join(tmp, 'repo');
+
+  await mkdir(baseDir, { recursive: true });
+  await writeFile(
+    envPath,
+    [
+      `HAPPIER_STACK_REPO_DIR=${repoDir}`,
+      `HAPPIER_STACK_CLI_HOME_DIR=${join(baseDir, 'cli')}`,
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+
+  const sessionRunner = spawnOwnedSleep({
+    env: {
+      ...process.env,
+      HAPPIER_STACK_STACK: stackName,
+      HAPPIER_STACK_ENV_FILE: envPath,
+      HAPPIER_STACK_PROCESS_KIND: 'session',
+    },
+  });
+  t.after(async () => {
+    const pid = sessionRunner?.pid;
+    if (pid && isAlive(pid)) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // ignore
+        }
+      }
+    }
+    await rm(tmp, { recursive: true, force: true });
+  });
+  await waitForProcessAlive({ pid: sessionRunner.pid, label: 'leftover stack session runner' });
+
+  const restore = withPatchedProcessEnv(t, { HAPPIER_STACK_STORAGE_DIR: storageDir });
+  try {
+    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    assert.equal(out.runtime.components.sessionRunners.count, 1);
+    assert.deepEqual(out.runtime.health.issues, ['session_runners_leftover']);
+    assert.equal(out.runtime.health.status, 'degraded');
+  } finally {
+    restore();
   }
 });

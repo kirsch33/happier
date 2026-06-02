@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runNodeCapture } from './testkit/stack_script_command_testkit.mjs';
 import { createStackArchiveFixture } from './testkit/stack_archive_command_testkit.mjs';
+import { isAlive, spawnOwnedSleep, waitForProcessAlive, waitForProcessExit } from './testkit/stack_stop_sweeps_testkit.mjs';
 
 test('hstack stack archive protects referenced worktrees by default', async (t) => {
   const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -83,4 +84,50 @@ test('hstack stack archive --dry-run reports protected worktrees without mutatin
 
   await stat(join(fixture.storageDir, fixture.stackName, 'env'));
   await stat(join(fixture.worktreeDir, '.git'));
+});
+
+test('hstack stack archive stops stack-owned session markers before archiving metadata', async (t) => {
+  const scriptsDir = dirname(fileURLToPath(import.meta.url));
+  const rootDir = dirname(scriptsDir);
+  const fixture = await createStackArchiveFixture(t, { stackName: 'exp-test', worktreeSlug: 'archived-with-session-marker' });
+  const envPath = join(fixture.storageDir, fixture.stackName, 'env');
+
+  const sessionMarker = spawnOwnedSleep({
+    env: {
+      ...fixture.baseEnv,
+      HAPPIER_STACK_STACK: fixture.stackName,
+      HAPPIER_STACK_ENV_FILE: envPath,
+      HAPPIER_STACK_PROCESS_KIND: 'session',
+    },
+  });
+  t.after(() => {
+    const pid = sessionMarker?.pid;
+    if (!pid || !isAlive(pid)) return;
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // ignore
+      }
+    }
+  });
+  await waitForProcessAlive({ pid: sessionMarker.pid, label: 'archive session marker' });
+
+  const date = '2000-01-07';
+  const nodeEnv = { ...fixture.baseEnv, PATH: '' };
+  const res = await runNodeCapture([join(rootDir, 'scripts', 'stack.mjs'), 'archive', fixture.stackName, `--date=${date}`, '--json'], {
+    cwd: rootDir,
+    env: nodeEnv,
+  });
+  assert.equal(res.code, 0, `expected stack archive exit 0\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  await waitForProcessExit({
+    pid: sessionMarker.pid,
+    timeoutMs: 20_000,
+    intervalMs: 50,
+    label: 'archive session marker after archive',
+  });
+  assert.ok(!isAlive(sessionMarker.pid), `expected archive to stop stack-owned session marker ${sessionMarker.pid}`);
 });

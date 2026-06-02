@@ -12,6 +12,7 @@ import { inspectActiveRuntimeSnapshot } from '../runtime/launch/inspectActiveRun
 import { getObservedStackDaemon, readStackRuntimeStateWithDaemonSync } from '../utils/stack/runtime_daemon_state.mjs';
 import { applyStackActiveServerScopeEnv } from '../utils/auth/stable_scope_id.mjs';
 import { resolveStackSessionRespawnStatus } from './session_respawn_status.mjs';
+import { listPidsWithEnvNeedles } from '../utils/proc/ownership.mjs';
 import { join } from 'node:path';
 import { checkDaemonState } from '../daemon.mjs';
 
@@ -83,6 +84,13 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
   });
   const daemonPid = Number(observedDaemon.pid);
   const daemonRunning = observedDaemon.running === true;
+  const sessionRunnerPids = envPath
+    ? (await listPidsWithEnvNeedles([
+        `HAPPIER_STACK_ENV_FILE=${envPath}`,
+        'HAPPIER_STACK_PROCESS_KIND=session',
+      ])).filter((pid) => pid !== process.pid && Number.isFinite(pid) && pid > 1 && isPidAlive(pid))
+    : [];
+  const sessionRunnersRunning = sessionRunnerPids.length > 0;
 
   const ownerAlive = Number.isFinite(ownerPid) && ownerPid > 1 ? isPidAlive(ownerPid) : false;
   const serverPidAlive = Number.isFinite(serverPid) && serverPid > 1 ? isPidAlive(serverPid) : false;
@@ -110,9 +118,11 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
       ? uiPortListening
       : expoPidAlive;
   const candidateRuntimePids = [ownerPid, serverPid, expoPid, expoTailscaleForwarderPid, daemonPid]
+    .concat(sessionRunnerPids)
     .filter((pid) => Number.isFinite(pid) && pid > 1);
   const runningPid = candidateRuntimePids.find((pid) => isPidAlive(pid)) ?? null;
-  const running = ownerAlive || serverRunning || uiRunning || daemonRunning || serverPidAlive || expoPidAlive || expoForwarderAlive;
+  const infraRunning = ownerAlive || serverRunning || uiRunning || serverPidAlive || expoPidAlive || expoForwarderAlive;
+  const running = infraRunning || daemonRunning || sessionRunnersRunning;
 
   const healthIssues = [];
   if (Number.isFinite(serverPort) && serverPort > 0 && !serverRunning) {
@@ -121,8 +131,11 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
   if (Number.isFinite(uiPort) && uiPort > 0 && !uiRunning) {
     healthIssues.push('ui_down');
   }
-  if (daemonExpected && running && !daemonRunning) {
+  if (daemonExpected && infraRunning && !daemonRunning) {
     healthIssues.push('daemon_down');
+  }
+  if (sessionRunnersRunning && !daemonRunning) {
+    healthIssues.push('session_runners_leftover');
   }
   const healthStatus = !running ? 'stopped' : healthIssues.length > 0 ? 'degraded' : 'healthy';
 
@@ -185,6 +198,11 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
         expoTailscaleForwarder: {
           pid: Number.isFinite(expoTailscaleForwarderPid) && expoTailscaleForwarderPid > 1 ? expoTailscaleForwarderPid : null,
           running: expoForwarderAlive,
+        },
+        sessionRunners: {
+          pids: sessionRunnerPids,
+          count: sessionRunnerPids.length,
+          running: sessionRunnersRunning,
         },
       },
       health: {

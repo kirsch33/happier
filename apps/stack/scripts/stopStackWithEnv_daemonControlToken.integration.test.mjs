@@ -139,6 +139,61 @@ test('stopStackWithEnv aggressive mode passes x-happier-daemon-token to daemon c
   assert.equal(stopCalls[0]?.token, token);
 });
 
+test('stopStackWithEnv normal stop marks daemon sessions intentionally stopped before daemon shutdown', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happier-stack-stop-sessions-first-'));
+  t.after(async () => {
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  const token = 'token-normal-stop';
+  const daemon = await startDaemonControlServer({ token });
+  t.after(async () => {
+    await daemon.close();
+  });
+
+  const repoRoot = join(tmp, 'repo');
+  await mkdir(join(repoRoot, 'apps', 'ui'), { recursive: true });
+  await mkdir(join(repoRoot, 'apps', 'cli'), { recursive: true });
+  await mkdir(join(repoRoot, 'apps', 'server'), { recursive: true });
+  await writeFile(join(repoRoot, 'apps', 'ui', 'package.json'), '{}\n', 'utf8');
+  await writeFile(join(repoRoot, 'apps', 'cli', 'package.json'), '{}\n', 'utf8');
+  await writeFile(join(repoRoot, 'apps', 'server', 'package.json'), '{}\n', 'utf8');
+
+  const baseDir = join(tmp, 'stack');
+  await mkdir(baseDir, { recursive: true });
+  const cliHomeDir = join(tmp, 'cli-home');
+  await mkdir(cliHomeDir, { recursive: true });
+  await writeFile(
+    join(cliHomeDir, 'daemon.state.json'),
+    JSON.stringify({ pid: process.pid, httpPort: daemon.port, controlToken: token }) + '\n',
+    'utf8',
+  );
+
+  const env = {
+    ...process.env,
+    HAPPIER_STACK_REPO_DIR: repoRoot,
+    HAPPIER_STACK_CLI_HOME_DIR: cliHomeDir,
+    HAPPIER_STACK_SERVER_PORT: '4101',
+  };
+
+  const res = await stopStackWithEnv({
+    rootDir: repoRoot,
+    baseDir,
+    stackName: 'test-stack',
+    env,
+    json: true,
+    aggressive: false,
+    noDocker: true,
+  });
+
+  assert.equal(res.daemonSessionsStopped?.skipped, false);
+  assert.deepEqual(res.daemonSessionsStopped?.stoppedSessionIds, []);
+
+  const stopCalls = daemon.calls.filter((c) => c.url === '/stop');
+  assert.equal(stopCalls.length, 1);
+  assert.equal(stopCalls[0]?.token, token);
+});
+
 test('stopStackWithEnv preserveDaemon skips daemon shutdown and keeps daemon control untouched', async (t) => {
   const tmp = await mkdtemp(join(tmpdir(), 'happier-stack-stop-preserve-daemon-'));
   t.after(async () => {

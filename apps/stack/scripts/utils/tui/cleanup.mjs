@@ -34,5 +34,6 @@ export async function stopStackForTuiExit({ rootDir, stackName, json = false, no
     aggressive: false,
     sweepOwned: false,
     autoSweep: true,
+    stopSessionMarkersOnDaemonUnavailable: false,
   });
 }

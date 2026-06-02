@@ -88,6 +88,9 @@ async function stopDaemonTrackedSessions({ cliHomeDir, serverUrl, json }) {
     if (!json) console.warn(`[stack] failed to list daemon sessions: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   });
+  if (!listed) {
+    return { ok: false, skipped: true, reason: 'daemon_control_unavailable', stoppedSessionIds: [] };
+  }
   const children = Array.isArray(listed?.children) ? listed.children : [];
 
   const stoppedSessionIds = [];
@@ -102,6 +105,40 @@ async function stopDaemonTrackedSessions({ cliHomeDir, serverUrl, json }) {
   }
 
   return { ok: true, skipped: false, stoppedSessionIds };
+}
+
+function shouldUseStackSessionMarkerFallback(daemonSessionsStopped) {
+  if (!daemonSessionsStopped || typeof daemonSessionsStopped !== 'object') return true;
+  if (daemonSessionsStopped.ok === false) return true;
+  return daemonSessionsStopped.skipped === true && daemonSessionsStopped.reason !== 'preserve_daemon';
+}
+
+async function stopStackSessionMarkerProcesses({ stackName, envPath, cliHomeDir, json }) {
+  if (!envPath) {
+    return { fallback: true, skipped: true, reason: 'missing_env_path', killed: [] };
+  }
+
+  const envNeedle = `HAPPIER_STACK_ENV_FILE=${envPath}`;
+  const pids = await listPidsWithEnvNeedles([envNeedle, 'HAPPIER_STACK_PROCESS_KIND=session']);
+  const killed = [];
+  for (const pid of Array.from(new Set(pids))) {
+    if (pid === process.pid) continue;
+    if (!Number.isFinite(pid) || pid <= 1) continue;
+    if (!isPidAlive(pid)) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const res = await killProcessGroupOwnedByStack(pid, {
+      stackName,
+      envPath,
+      cliHomeDir,
+      label: 'session-runner-fallback',
+      json,
+    });
+    if (res.killed) {
+      killed.push({ pid, reason: res.reason, pgid: res.pgid ?? null });
+    }
+  }
+
+  return { fallback: true, skipped: false, reason: 'daemon_unavailable', killed };
 }
 
 async function stopExpoStateDir({ stackName, baseDir, kind, stateFileName, envPath, json }) {
@@ -147,6 +184,7 @@ export async function stopStackWithEnv({
   sweepOwned = false,
   autoSweep = true,
   preserveDaemon = false,
+  stopSessionMarkersOnDaemonUnavailable = true,
 }) {
   const actions = {
     stackName,
@@ -156,6 +194,7 @@ export async function stopStackWithEnv({
     preserveDaemon,
     runner: null,
     daemonSessionsStopped: null,
+    sessionRunners: null,
     daemonStopped: false,
     killedPorts: [],
     expoDev: [],
@@ -189,6 +228,24 @@ export async function stopStackWithEnv({
   }
   const runnerPid = Number(runtimeState?.ownerPid);
   const processes = runtimeState?.processes && typeof runtimeState.processes === 'object' ? runtimeState.processes : {};
+
+  if (!preserveDaemon) {
+    try {
+      actions.daemonSessionsStopped = await stopDaemonTrackedSessions({ cliHomeDir, serverUrl: internalServerUrl, json });
+    } catch (e) {
+      actions.errors.push({ step: 'daemon-sessions', error: e instanceof Error ? e.message : String(e) });
+    }
+  } else {
+    actions.daemonSessionsStopped = { ok: true, skipped: true, reason: 'preserve_daemon', stoppedSessionIds: [] };
+  }
+
+  if (!preserveDaemon && stopSessionMarkersOnDaemonUnavailable && shouldUseStackSessionMarkerFallback(actions.daemonSessionsStopped)) {
+    actions.sessionRunners = await stopStackSessionMarkerProcesses({ stackName, envPath, cliHomeDir, json });
+  } else if (!stopSessionMarkersOnDaemonUnavailable) {
+    actions.sessionRunners = { fallback: false, skipped: true, reason: 'session_marker_fallback_disabled', killed: [] };
+  } else {
+    actions.sessionRunners = { fallback: false, skipped: true, reason: 'daemon_session_stop_available', killed: [] };
+  }
 
   // Kill known child processes first (process groups), then stop daemon, then stop runner.
   const killedProcessPids = [];
@@ -241,16 +298,6 @@ export async function stopStackWithEnv({
   actions.runner = { stopped: false, pid: Number.isFinite(runnerPid) ? runnerPid : null, reason: runtimeState ? 'not_running_or_not_owned' : 'missing_state' };
   actions.killedPorts = actions.killedPorts ?? [];
   actions.processes = { killed: killedProcessPids };
-
-  if (aggressive && !preserveDaemon) {
-    try {
-      actions.daemonSessionsStopped = await stopDaemonTrackedSessions({ cliHomeDir, serverUrl: internalServerUrl, json });
-    } catch (e) {
-      actions.errors.push({ step: 'daemon-sessions', error: e instanceof Error ? e.message : String(e) });
-    }
-  } else if (preserveDaemon) {
-    actions.daemonSessionsStopped = { ok: true, skipped: true, reason: 'preserve_daemon', stoppedSessionIds: [] };
-  }
 
   if (!preserveDaemon) {
     try {

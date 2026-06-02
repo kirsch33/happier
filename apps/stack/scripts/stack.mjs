@@ -56,6 +56,7 @@ import { runStackWorkspaceCommand } from './stack/stack_workspace_command.mjs';
 import { resolveRequestedRepoCheckoutDir } from './stack/repo_checkout_resolution.mjs';
 import { resolveTransientRepoOverrides } from './stack/transient_repo_overrides.mjs';
 import { runStackInstallCommand } from './stack/stack_install_command.mjs';
+import { stopStackWithEnv } from './utils/stack/stop.mjs';
 import { ensureEnvFilePruned, ensureEnvFileUpdated } from './utils/env/env_file.mjs';
 import { listAllStackNames, stackExistsSync } from './utils/stack/stacks.mjs';
 import { writeDevAuthKey } from './utils/auth/dev_key.mjs';
@@ -1374,7 +1375,7 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
     }
   }
 
-  const { baseDir } = resolveStackEnvPath(stackName);
+  const { baseDir, envPath } = resolveStackEnvPath(stackName);
   const destStackDir = join(dirname(baseDir), '.archived', date, stackName);
 
   const worktreePlans = [];
@@ -1471,6 +1472,20 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
     };
   }
 
+  const stopActions = await stopStackWithEnv({
+    rootDir,
+    stackName,
+    baseDir,
+    env: {
+      ...process.env,
+      ...env,
+      HAPPIER_STACK_STACK: stackName,
+      HAPPIER_STACK_ENV_FILE: envPath,
+      HAPPIER_STACK_RUNTIME_STATE_PATH: getStackRuntimeStatePath(stackName),
+    },
+    json,
+  });
+
   await mkdir(dirname(destStackDir), { recursive: true });
   await rename(baseDir, destStackDir);
 
@@ -1487,7 +1502,7 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
     }
   }
 
-  return { ok: true, dryRun: false, stackName, date, archivedStackDir: destStackDir, archiveWorktrees, protectedWorktrees, archivedWorktrees };
+  return { ok: true, dryRun: false, stackName, date, archivedStackDir: destStackDir, archiveWorktrees, protectedWorktrees, archivedWorktrees, stopActions };
 }
 
 // (removed) per-component stack pinning: stacks now pin a single monorepo checkout via HAPPIER_STACK_REPO_DIR.
