@@ -69,12 +69,24 @@ import type { NormalizedProviderUsageLimitDetailsV1 } from './connectedServices/
 import { reportConnectedServiceRuntimeAuthFailureToDaemon } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import { classifyClaudeConnectedServiceRuntimeAuthFailure } from './connectedServices/classifyClaudeConnectedServiceRuntimeAuthFailure';
 import { findConnectedServiceChildSelection } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import { createSessionAutonomyDriver } from '@/agent/runtime/sessionAutonomy/sessionAutonomyDriver';
+
+const CLAUDE_SESSION_AUTONOMY_CADENCE_MS = 270_000;
 
 function mergeSessionWorkStateIntoMetadata(
     metadata: Metadata,
     params: Omit<Parameters<typeof mergeSessionWorkStateMetadataV1>[0], 'metadata'>,
 ): Metadata {
     return mergeSessionWorkStateMetadataV1({ ...params, metadata }) as unknown as Metadata;
+}
+
+function buildClaudeAutonomyMode(session: Session, localId: string): EnhancedMode {
+    return {
+        permissionMode: session.lastPermissionMode || 'default',
+        replaySeedAllowed: true,
+        localId,
+        claudeRemoteAgentSdkEnabled: true,
+    };
 }
 
 interface PermissionsField {
@@ -568,6 +580,36 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     const streamedTranscriptWriter: StreamedTranscriptWriter = createStreamedTranscriptWriter({
         provider: 'claude' as any,
         session: createClaudeRemoteStreamedTranscriptSession(session.client),
+    });
+
+    const autonomyDriver = createSessionAutonomyDriver({
+        sessionId: session.client.sessionId,
+        agentId: 'claude',
+        backendId: 'claude',
+        cadenceMs: CLAUDE_SESSION_AUTONOMY_CADENCE_MS,
+        getMetadata: () => session.client.getMetadataSnapshot() as Record<string, unknown> | null,
+        updateMetadata: async (updater) => {
+            await session.client.updateMetadata((metadata) => updater(metadata as unknown as Record<string, unknown>) as Metadata);
+        },
+        hasQueuedInput: () => session.queue.size() > 0,
+        hasPendingInput: async () => {
+            try {
+                return (await session.client.peekPendingMessageQueueV2Count()) > 0;
+            } catch {
+                return false;
+            }
+        },
+        isWakeLocalIdInFlight: async (localId) => {
+            const committedSeq = session.client.getCommittedUserMessageSeq?.(localId);
+            return typeof committedSeq === 'number' && committedSeq >= 0;
+        },
+        enqueueContinuation: (continuation) => {
+            logger.debug('[remote]: enqueueing Happier autonomy continuation', {
+                localId: continuation.localId,
+                goalItemId: continuation.goal.itemId,
+            });
+            session.queue.push(continuation.message, buildClaudeAutonomyMode(session, continuation.localId));
+        },
     });
 
     const taskOutputCollector = new ClaudeRemoteTaskOutputCollector();
@@ -1141,6 +1183,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 modeHash = p.hash;
                                 mode = p.mode;
                                 permissionHandler.handleModeChange(p.mode.permissionMode);
+                                await autonomyDriver.handleProviderInputStarted(p.mode.localId);
                                 beginReadyNotificationTurn();
                                 await recordClaudeRemotePromptTurnStarted();
                                 return { message: p.message, mode: p.mode };
@@ -1161,6 +1204,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             const nextMode = msg.mode;
                             mode = nextMode;
                             permissionHandler.handleModeChange(nextMode.permissionMode);
+                            await autonomyDriver.handleProviderInputStarted(nextMode.localId);
                             beginReadyNotificationTurn();
                             const replaySeedResolution = await resolveClaudeRemoteQueuedPromptWithReplaySeed({
                                 sessionClient: session.client,
@@ -1247,6 +1291,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onReady: async () => {
                         await messageQueue.flush();
                         readyHandler(readyTurnContext);
+                        await autonomyDriver.handleProviderIdle();
                     },
                     onSubagentFlush: async () => {
                         await messageQueue.flush();
@@ -1364,6 +1409,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     } finally {
 
         // Clean up permission handler
+        autonomyDriver.cancel();
         await permissionHandler.resetAndFlush();
         permissionHandler.dispose();
         subagentFileCollector.cleanup();

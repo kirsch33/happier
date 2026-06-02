@@ -156,6 +156,61 @@ describe('resolveRespawnSessionRuntimeSnapshot', () => {
     });
   });
 
+  it('derives respawn initialGoal from fresh persisted active Claude prompt-autonomy work state', async () => {
+    const readCredentials = vi.fn(async () => credentials('fresh-token'));
+    const resolveAttachContext = vi.fn(async () => ({
+      ok: true as const,
+      attachPayload: { v: 2 as const, encryptionMode: 'plain' as const },
+      vendorResumeId: 'claude-vendor-session',
+      sessionPath: '/tmp/repo',
+      metadata: {
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'claude',
+          agentId: 'claude',
+          updatedAt: 800,
+          primaryItemId: 'goal:claude-vendor-session',
+          items: [
+            {
+              id: 'goal:claude-vendor-session',
+              kind: 'goal',
+              origin: 'happier',
+              status: 'active',
+              title: 'Continue Claude Overwatch after runtime restart',
+              tokenBudget: 5000,
+              updatedAt: 800,
+            },
+          ],
+        },
+      },
+    }));
+
+    const result = await resolveRespawnSessionRuntimeSnapshot({
+      sessionId: 'session-1',
+      spawnOptions: defaultRespawnOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-vendor-session',
+      }),
+      vendorResumeId: 'claude-vendor-session',
+      defaultOptions: defaultRespawnOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-vendor-session',
+      }),
+      credentials: credentials('stale-token'),
+      readCredentials,
+      resolveAttachContext,
+    });
+
+    expect(result).toMatchObject({
+      initialGoal: {
+        objective: 'Continue Claude Overwatch after runtime restart',
+        status: 'active',
+        tokenBudget: 5000,
+      },
+      resume: 'claude-vendor-session',
+    });
+  });
+
   it('falls back to default respawn options when persisted metadata cannot be loaded', async () => {
     const defaultOptions = defaultRespawnOptions({ resume: 'vendor-resume' });
     const result = await resolveRespawnSessionRuntimeSnapshot({

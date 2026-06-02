@@ -63,6 +63,22 @@ Create the `dev-auth` seed stack once, authenticate once, then reuse it when cre
 hstack auth seed
 ```
 
+### Claude provider auth for stack sessions
+
+Claude sessions that run under a stack must use stack-scoped Claude auth. Set `CLAUDE_CONFIG_DIR`
+to a stack-owned directory and seed that directory by copying Claude credential files from a trusted
+source; do not unset `CLAUDE_CONFIG_DIR` to fall back to live `~/.claude`.
+
+```bash
+mkdir -p ~/.happier/stacks/<stack>/claude
+cp ~/.claude/.credentials.json ~/.happier/stacks/<stack>/claude/.credentials.json
+hstack stack env <stack> set CLAUDE_CONFIG_DIR=~/.happier/stacks/<stack>/claude
+```
+
+If the stack uses connected-service Claude auth instead, materialize that service for the session.
+Claude launch fails closed when a stack-scoped session has no `CLAUDE_CONFIG_DIR` credentials and no
+connected-service materialized auth, even if live provider auth env vars are present.
+
 Interactive wizard (TTY only):
 
 ```bash

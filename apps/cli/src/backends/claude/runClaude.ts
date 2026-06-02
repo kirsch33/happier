@@ -76,6 +76,8 @@ import { resolveRequestedSessionDirectory } from '@/agent/runtime/resolveRequest
 import { publishClaudeSessionModelsMetadataBestEffort } from '@/backends/claude/sessionControls/publishClaudeSessionModelsMetadataBestEffort';
 import { resolveTerminationArchiveDecision } from '@/agent/runtime/terminationArchivePolicy';
 import { resolveClaudeHookTransport } from '@/backends/claude/utils/resolveClaudeHookTransport';
+import { readDaemonInitialGoalFromEnv } from '@/agent/runtime/sessionInitialGoal';
+import { mergeHappierInitialGoalIntoSessionWorkStateMetadata } from '@/agent/runtime/sessionGoals/happierGoalWorkState';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -159,6 +161,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         await runClaudeLocalFastStart(credentials, options);
         return;
     }
+
+    const daemonInitialGoal = readDaemonInitialGoalFromEnv();
 
     const { api, machineId } = await initializeBackendApiContext({
         credentials,
@@ -376,6 +380,22 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             }),
             mode: 'start',
         });
+    }
+
+    if (daemonInitialGoal) {
+        try {
+            await session.updateMetadata((currentMetadata) =>
+                mergeHappierInitialGoalIntoSessionWorkStateMetadata(currentMetadata, {
+                    sessionId: baseSession.id,
+                    backendId: 'claude',
+                    agentId: 'claude',
+                    nowMs: Date.now(),
+                    initialGoal: daemonInitialGoal,
+                }) as Metadata,
+            );
+        } catch (error) {
+            logger.debug('[claude] Failed to seed daemon initial goal metadata (non-fatal)', error);
+        }
     }
 
     {

@@ -1,5 +1,8 @@
 import type { PermissionMode } from '@/api/types';
 import { isPermissionMode } from '@/api/types';
+import { readActiveInitialGoalFromSessionWorkStateMetadata } from '@/agent/runtime/sessionGoals/activeGoalSnapshot';
+import { resolveSessionGoalRuntimeKind } from '@/backends/catalog';
+import { CATALOG_AGENT_IDS, type CatalogAgentId } from '@/backends/types';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 import {
   LEGACY_ACP_SESSION_MODE_OVERRIDE_KEY,
@@ -11,11 +14,9 @@ import {
 import {
   ConnectedServiceBindingsV1Schema,
   ConnectedServiceMaterializationIdentityV1Schema,
-  readDisplayableSessionWorkStateV1,
   type ConnectedServiceBindingsV1,
   type ConnectedServiceMaterializationIdentityV1,
   type SessionInitialGoalRequestV1,
-  type SessionWorkStateItemV1,
 } from '@happier-dev/protocol';
 import {
   HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY,
@@ -242,48 +243,22 @@ function chooseVendorResumeId(params: ResolveSessionRuntimeSnapshotParams): Sess
   return value ? { value, updatedAt: null } : null;
 }
 
-function isCodexAppServerSpawnOptions(options: SpawnSessionOptions): boolean {
-  return options.backendTarget?.kind === 'builtInAgent'
-    && options.backendTarget.agentId === 'codex'
-    && options.codexBackendMode === 'appServer';
+function isCatalogAgentId(value: unknown): value is CatalogAgentId {
+  return typeof value === 'string' && (CATALOG_AGENT_IDS as readonly string[]).includes(value);
 }
 
-function isActiveGoalItem(item: SessionWorkStateItemV1): boolean {
-  return item.kind === 'goal' && item.status === 'active';
-}
-
-function chooseActiveGoalItem(
-  items: readonly SessionWorkStateItemV1[],
-  primaryItemId: string | null | undefined,
-): SessionWorkStateItemV1 | null {
-  const primaryActive = primaryItemId
-    ? items.find((item) => item.id === primaryItemId && isActiveGoalItem(item))
-    : null;
-  return primaryActive ?? items.find(isActiveGoalItem) ?? null;
-}
-
-function readInitialGoalFromPersistedWorkState(
-  metadata: Record<string, unknown> | null | undefined,
-): SessionInitialGoalRequestV1 | null {
-  const workState = readDisplayableSessionWorkStateV1(metadata?.sessionWorkStateV1);
-  if (!workState) return null;
-
-  const activeGoal = chooseActiveGoalItem(workState.items, workState.primaryItemId);
-  if (!activeGoal) return null;
-
-  return {
-    objective: activeGoal.title,
-    status: 'active',
-    ...(Object.prototype.hasOwnProperty.call(activeGoal, 'tokenBudget')
-      ? { tokenBudget: activeGoal.tokenBudget ?? null }
-      : {}),
-  };
+function readSpawnOptionsAgentId(options: SpawnSessionOptions): CatalogAgentId | null {
+  const agentId = options.backendTarget?.kind === 'builtInAgent' ? options.backendTarget.agentId : null;
+  return isCatalogAgentId(agentId) ? agentId : null;
 }
 
 function chooseInitialGoal(params: ResolveSessionRuntimeSnapshotParams): SessionRuntimeSnapshot['initialGoal'] {
   if (params.incomingOptions.initialGoal) return params.incomingOptions.initialGoal;
-  if (!isCodexAppServerSpawnOptions(params.incomingOptions)) return null;
-  return readInitialGoalFromPersistedWorkState(params.persistedMetadata);
+  const runtimeKind = resolveSessionGoalRuntimeKind(readSpawnOptionsAgentId(params.incomingOptions), {
+    codexBackendMode: params.incomingOptions.codexBackendMode,
+  });
+  if (runtimeKind === 'none') return null;
+  return readActiveInitialGoalFromSessionWorkStateMetadata(params.persistedMetadata);
 }
 
 function applySnapshotToSpawnOptions(

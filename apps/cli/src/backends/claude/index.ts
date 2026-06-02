@@ -31,6 +31,7 @@ export const agent = {
   getConnectedServiceCredentialLifecycleDescriptor: async () => claudeConnectedServiceCredentialLifecycleDescriptor,
   getConnectedServiceStateSharingDescriptor: async () => claudeConnectedServiceStateSharingDescriptor,
   getSessionUsageLimitRecoveryControlAdapter: async () => claudeUsageLimitRecoveryControlAdapter,
+  sessionGoalRuntimeKind: 'happier-prompt-autonomy',
   resolveConnectedServiceSwitchContinuity: async (params) => await resolveClaudeConnectedServiceSwitchContinuity(params),
   // Claude's underlying probe takes a `{ vendorResumeId, processEnv }` shape rather than the
   // normalized `VerifyResumeReachableInput`. Adapt here (behavior-preserving: same mapping the

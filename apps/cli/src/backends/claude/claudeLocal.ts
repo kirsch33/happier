@@ -21,6 +21,7 @@ import { resolveCliRuntimeAssetPath } from '@/runtime/assets/resolveCliRuntimeAs
 import { HAPPIER_BASE_SYSTEM_PROMPT_V1 } from '@happier-dev/protocol';
 import { configuration } from '@/configuration';
 import { isolateClaudeRuntimeAuthEnv } from './spawn/isolateClaudeRuntimeAuthEnv';
+import { assertClaudeStackScopedRuntimeAuth } from './spawn/assertClaudeStackScopedRuntimeAuth';
 import { logClaudeRuntimeAuthEnvDiagnostic } from './spawn/logClaudeRuntimeAuthEnvDiagnostic';
 import { HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR } from '@/daemon/spawn/spawnExplicitEnvKeysMarker';
 
@@ -388,6 +389,10 @@ export async function claudeLocal(opts: {
                 ...(opts.envOverlay ?? {}),
             })
             isolateClaudeRuntimeAuthEnv(env);
+            assertClaudeStackScopedRuntimeAuth({
+                runnerEnv: process.env,
+                childEnv: env,
+            });
             // Internal daemon→CLI marker used for strict env filtering in Agent SDK remote mode.
             // Never forward it into the Claude Code subprocess environment.
             delete env[HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR];

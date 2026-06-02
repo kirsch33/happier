@@ -26,6 +26,8 @@ import type {
   ProviderNativeForkHandler,
   SessionCatalogControlAdapter,
   SessionGoalControlAdapter,
+  SessionGoalRuntimeKind,
+  SessionGoalRuntimeKindParams,
   SessionUsageLimitRecoveryControlAdapter,
   VendorResumeSupportFn,
 } from './types';
@@ -231,6 +233,16 @@ export function resolveConnectedServiceCandidatePersistedSessionFile(
   const catalogId = resolveCatalogAgentId(agentId);
   const entry = AGENTS[catalogId];
   return entry?.resolveConnectedServiceCandidatePersistedSessionFile?.({ metadata }) ?? null;
+}
+
+export function resolveSessionGoalRuntimeKind(
+  agentId: AgentId | null | undefined,
+  params: SessionGoalRuntimeKindParams = {},
+): SessionGoalRuntimeKind {
+  const catalogId = resolveCatalogAgentId(agentId);
+  const entry = AGENTS[catalogId];
+  const runtimeKind = entry?.sessionGoalRuntimeKind ?? 'none';
+  return typeof runtimeKind === 'function' ? runtimeKind(params) : runtimeKind;
 }
 
 export async function getSessionGoalControlAdapter(agentId?: AgentId | null): Promise<SessionGoalControlAdapter | null> {

@@ -37,6 +37,18 @@ type RemoteDispatchMockOptions = {
 };
 type StartRemoteModeStaticControlParams = Parameters<typeof startRemoteModeStaticControlFn>[0];
 
+function createMetadataFixture(extra: Record<string, unknown> = {}): Metadata {
+  return {
+    path: '/tmp',
+    host: 'test-host',
+    homeDir: '/tmp/home',
+    happyHomeDir: '/tmp/home/.happier',
+    happyLibDir: '/tmp/home/.happier/lib',
+    happyToolsDir: '/tmp/home/.happier/tools',
+    ...extra,
+  };
+}
+
 const mockInkRender = vi.fn(() => ({ unmount: vi.fn() }));
 vi.mock('ink', () => ({
   render: mockInkRender,
@@ -2095,6 +2107,83 @@ function createRemoteHarness(options?: {
       }));
     });
 
+    expect(await switchHandler({ to: 'local' })).toBe(true);
+    await expect(launcherPromise).resolves.toBe('switch');
+  }, 30_000);
+
+  it('enqueues a Happier autonomy continuation after ready when an active goal is idle', async () => {
+    const { session, client, switchHandlerReady } = createRemoteHarness({
+      sessionId: 'sess_0',
+      applyMetadataUpdates: true,
+      metadata: createMetadataFixture({
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'claude',
+          agentId: 'claude',
+          updatedAt: 123,
+          primaryItemId: 'goal:overwatch',
+          items: [
+            {
+              id: 'goal:overwatch',
+              kind: 'goal',
+              origin: 'happier',
+              status: 'active',
+              title: 'Keep Overwatch moving',
+              backendId: 'claude',
+              agentId: 'claude',
+              updatedAt: 123,
+            },
+          ],
+        },
+        sessionAutonomyV1: {
+          v: 1,
+          goalItemId: 'goal:overwatch',
+          status: 'active',
+          cadenceMs: 270_000,
+          nextWakeAt: '2000-01-01T00:00:00.000Z',
+          wakeAttempt: 0,
+          updatedAt: '2026-06-02T10:45:00.000Z',
+        },
+      }),
+    });
+    client.waitForMetadataUpdate = vi.fn((signal?: AbortSignal) => new Promise<boolean>((resolve) => {
+      if (signal?.aborted) {
+        resolve(false);
+        return;
+      }
+      signal?.addEventListener('abort', () => resolve(false), { once: true });
+    }));
+
+    let nextPrompt: { message: string; mode: EnhancedMode } | null = null;
+    const dispatchStarted = createDeferred<void>();
+    mockClaudeRemoteDispatch.mockImplementationOnce(async (opts: unknown) => {
+      const dispatchOpts = opts as any;
+      dispatchStarted.resolve(undefined);
+      await dispatchOpts.onReady?.();
+      nextPrompt = await dispatchOpts.nextMessage?.();
+      await waitForAbort(dispatchOpts.signal);
+    });
+
+    const { claudeRemoteLauncher } = await import('./claudeRemoteLauncher');
+    const launcherPromise = claudeRemoteLauncher(session);
+    await dispatchStarted.promise;
+
+    await vi.waitFor(() => {
+      expect(nextPrompt).toEqual(expect.objectContaining({
+        message: expect.stringContaining('Keep Overwatch moving'),
+        mode: expect.objectContaining({
+          localId: 'autonomy:happy_sess_1:goal:overwatch:1',
+        }),
+      }));
+    });
+    expect(client.getMetadataSnapshot()).toEqual(expect.objectContaining({
+      sessionAutonomyV1: expect.objectContaining({
+        lastWakeLocalId: 'autonomy:happy_sess_1:goal:overwatch:1',
+        inFlightLocalId: null,
+      }),
+    }));
+
+    const switchHandler = await switchHandlerReady;
     expect(await switchHandler({ to: 'local' })).toBe(true);
     await expect(launcherPromise).resolves.toBe('switch');
   }, 30_000);

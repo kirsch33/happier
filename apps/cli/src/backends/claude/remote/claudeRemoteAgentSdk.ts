@@ -19,6 +19,7 @@ import { resolveClaudeConfigDirOverride } from '@/backends/claude/utils/resolveC
 import { resolveClaudeConfigDirEnvOverlay } from '@/backends/claude/utils/resolveClaudeConfigDirEnvOverlay';
 import { resolveClaudeCodeExperimentalEnvOverlay } from '@/backends/claude/spawn/resolveClaudeCodeExperimentalEnvOverlay';
 import { isolateClaudeRuntimeAuthEnv } from '@/backends/claude/spawn/isolateClaudeRuntimeAuthEnv';
+import { assertClaudeStackScopedRuntimeAuth } from '@/backends/claude/spawn/assertClaudeStackScopedRuntimeAuth';
 import { logClaudeRuntimeAuthEnvDiagnostic } from '@/backends/claude/spawn/logClaudeRuntimeAuthEnvDiagnostic';
 import { isCompactHookLocalCommandStdout } from '@/backends/claude/utils/isCompactHookLocalCommandStdout';
 import { normalizeClaudeToolUseNamesInSdkMessage } from '@/backends/claude/utils/normalizeClaudeToolUseNames';
@@ -689,6 +690,10 @@ export async function claudeRemoteAgentSdk(opts: {
             return Object.keys(out).length > 0 ? out : undefined;
         })();
         const claudeSubprocessEnv = isolateClaudeRuntimeAuthEnv({ ...xdgIsolationEnv, ...buildClaudeSubprocessEnv(), ...experimentalEnvOverlay });
+        assertClaudeStackScopedRuntimeAuth({
+            runnerEnv: process.env,
+            childEnv: claudeSubprocessEnv,
+        });
         logClaudeRuntimeAuthEnvDiagnostic({
             logPrefix: 'claudeRemoteAgentSdk',
             sessionId: opts.sessionId ?? null,

@@ -47,6 +47,7 @@ export const agent = {
   getSessionGoalControlAdapter: async () => codexAppServerGoalControlAdapter,
   getSessionCatalogControlAdapter: async () => codexAppServerCatalogControlAdapter,
   getSessionUsageLimitRecoveryControlAdapter: async () => codexAppServerUsageLimitRecoveryControlAdapter,
+  sessionGoalRuntimeKind: ({ codexBackendMode }) => codexBackendMode === 'appServer' ? 'native' : 'none',
   vendorResumeSupport: AGENTS_CORE.codex.resume.vendorResume,
   getVendorResumeSupport: async () => supportsCodexVendorResume,
   getAcpBackendFactory: async () => {

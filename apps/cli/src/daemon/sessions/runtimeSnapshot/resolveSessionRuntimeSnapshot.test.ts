@@ -320,6 +320,43 @@ describe('resolveSessionRuntimeSnapshot', () => {
     });
   });
 
+  it('rebuilds the active persisted Claude goal as an initial resume goal for prompt autonomy', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-session-1',
+      }),
+      persistedMetadata: {
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'claude',
+          agentId: 'claude',
+          updatedAt: 500,
+          primaryItemId: 'goal:claude-session-1',
+          items: [
+            {
+              id: 'goal:claude-session-1',
+              kind: 'goal',
+              origin: 'happier',
+              backendId: 'claude',
+              vendorRef: 'claude-session-1',
+              status: 'active',
+              title: 'Keep Overwatch driving after restart',
+              tokenBudget: 2400,
+              updatedAt: 500,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(result.spawnOptions.initialGoal).toEqual({
+      objective: 'Keep Overwatch driving after restart',
+      status: 'active',
+      tokenBudget: 2400,
+    });
+  });
+
   it('does not rebuild paused persisted Codex app-server goals as initial resume goals', () => {
     const result = resolveSessionRuntimeSnapshot({
       incomingOptions: baseIncomingOptions({
@@ -348,5 +385,72 @@ describe('resolveSessionRuntimeSnapshot', () => {
 
     expect(result.spawnOptions.initialGoal).toBeUndefined();
     expect(result.snapshot.initialGoal).toBeNull();
+  });
+
+  it.each(['paused', 'complete', 'blocked', 'cancelled'] as const)(
+    'does not rebuild %s persisted Claude prompt-autonomy goals as initial resume goals',
+    (status) => {
+      const result = resolveSessionRuntimeSnapshot({
+        incomingOptions: baseIncomingOptions({
+          backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+          resume: 'claude-session-1',
+        }),
+        persistedMetadata: {
+          sessionWorkStateV1: {
+            v: 1,
+            backendId: 'claude',
+            updatedAt: 500,
+            items: [
+              {
+                id: 'goal:claude-session-1',
+                kind: 'goal',
+                origin: 'happier',
+                status,
+                title: 'Nonactive goal',
+                updatedAt: 500,
+              },
+            ],
+          },
+        },
+      });
+
+      expect(result.spawnOptions.initialGoal).toBeUndefined();
+      expect(result.snapshot.initialGoal).toBeNull();
+    },
+  );
+
+  it('keeps incoming one-shot initial goals over persisted active goals', () => {
+    const incomingInitialGoal = {
+      objective: 'Use the direct spawn goal',
+      status: 'active' as const,
+      tokenBudget: 42,
+    };
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        resume: 'claude-session-1',
+        initialGoal: incomingInitialGoal,
+      }),
+      persistedMetadata: {
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'claude',
+          updatedAt: 500,
+          items: [
+            {
+              id: 'goal:claude-session-1',
+              kind: 'goal',
+              origin: 'happier',
+              status: 'active',
+              title: 'Persisted goal should not win',
+              updatedAt: 500,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(result.spawnOptions.initialGoal).toEqual(incomingInitialGoal);
+    expect(result.snapshot.initialGoal).toEqual(incomingInitialGoal);
   });
 });

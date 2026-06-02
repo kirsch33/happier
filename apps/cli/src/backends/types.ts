@@ -65,6 +65,19 @@ export type VendorResumeSupportFn = (params: VendorResumeSupportParams) => boole
 
 export type HeadlessTmuxArgvTransform = (argv: string[]) => string[];
 
+export type SessionGoalRuntimeKind =
+  | 'native'
+  | 'happier-prompt-autonomy'
+  | 'none';
+
+export type SessionGoalRuntimeKindParams = Readonly<{
+  codexBackendMode?: CodexBackendMode;
+}>;
+
+export type SessionGoalRuntimeKindResolver = (
+  params: SessionGoalRuntimeKindParams,
+) => SessionGoalRuntimeKind;
+
 export type ProviderAttachScope = 'local' | 'remote';
 
 export type ProviderAttachEligibility =
@@ -345,6 +358,14 @@ export type AgentCatalogEntry = Readonly<{
    * session runtime.
    */
   getSessionUsageLimitRecoveryControlAdapter?: () => Promise<SessionUsageLimitRecoveryControlAdapter | null>;
+  /**
+   * Provider-owned active-goal runtime behavior for session resume/restart.
+   *
+   * Shared daemon code consumes this data to decide whether persisted active
+   * Happier goals should be rearmed into runtime startup without branching on
+   * provider ids.
+   */
+  sessionGoalRuntimeKind?: SessionGoalRuntimeKind | SessionGoalRuntimeKindResolver;
   /**
    * Whether this agent supports vendor-level resume (NOT Happy session resume).
    *
