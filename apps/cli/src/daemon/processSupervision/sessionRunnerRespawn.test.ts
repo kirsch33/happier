@@ -223,6 +223,53 @@ describe('createSessionRunnerRespawnManager', () => {
     );
   });
 
+  it('omits stale tracked initialGoal from default respawn options so the resolver can re-read current metadata', async () => {
+    vi.useFakeTimers();
+    const spawnSession = vi.fn(async (_opts: unknown) => ({ type: 'success' as const, pid: 123 }));
+    const resolveRespawnOptions = vi.fn<SessionRunnerRespawnOptionsResolver>(async ({ defaultOptions }) => defaultOptions);
+
+    const manager = createSessionRunnerRespawnManager({
+      enabled: true,
+      maxRestarts: 1,
+      baseDelayMs: 50,
+      maxDelayMs: 50,
+      jitterMs: 0,
+      isSessionAlreadyRunning: async () => false,
+      spawnSession: (opts) => spawnSession(opts),
+      resolveRespawnOptions,
+      random: () => 0,
+      logDebug: () => {},
+      logWarn: () => {},
+    });
+
+    const tracked: TrackedSession = {
+      startedBy: 'daemon',
+      pid: 111,
+      happySessionId: 'sess-stale-goal',
+      spawnOptions: {
+        directory: '/tmp',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        codexBackendMode: 'appServer',
+        initialGoal: {
+          objective: 'Stale active goal',
+          status: 'active',
+        },
+      } satisfies SpawnSessionOptions,
+    };
+
+    manager.handleUnexpectedExit(tracked, { reason: 'process-missing', code: null, signal: null });
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(resolveRespawnOptions).toHaveBeenCalledWith(expect.objectContaining({
+      defaultOptions: expect.not.objectContaining({
+        initialGoal: expect.anything(),
+      }),
+    }));
+    expect(spawnSession).toHaveBeenCalledWith(expect.not.objectContaining({
+      initialGoal: expect.anything(),
+    }));
+  });
+
   it('does not respawn sessions that were not started by the daemon', async () => {
     vi.useFakeTimers();
     const spawnSession = vi.fn(async (_opts: unknown) => ({ type: 'success' as const, pid: 123 }));

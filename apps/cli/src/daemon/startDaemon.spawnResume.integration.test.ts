@@ -651,6 +651,84 @@ describe('startDaemon spawn resume wiring (integration)', () => {
     }
   });
 
+  it('tracks daemon initialGoal on spawn options so respawn can re-arm self-driving resumes', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+
+    let run: Promise<void> | null = null;
+    try {
+      const onHappySessionWebhookModule = await import('./sessions/onHappySessionWebhook');
+      const trackedSessionCapture: {
+        current: Map<number, {
+          pid: number;
+          spawnOptions?: {
+            initialGoal?: {
+              objective: string;
+              status?: 'active';
+              tokenBudget?: number | null;
+            };
+          };
+        }> | null;
+      } = { current: null };
+
+      vi.mocked(onHappySessionWebhookModule.createOnHappySessionWebhook).mockImplementation(({ pidToTrackedSession }) => {
+        trackedSessionCapture.current = pidToTrackedSession as typeof trackedSessionCapture.current;
+        return vi.fn();
+      });
+
+      const { startDaemon } = await import('./startDaemon');
+      run = startDaemon();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      let spawnSession = harness.getSpawnSession();
+      for (let attempt = 0; !spawnSession && attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        spawnSession = harness.getSpawnSession();
+      }
+      if (!spawnSession) {
+        throw new Error('Expected spawnSession to be registered');
+      }
+
+      const initialGoal = {
+        objective: 'Keep driving unattended after restart.',
+        status: 'active' as const,
+        tokenBudget: 12_000,
+      };
+      const spawnResult = await spawnSession({
+        directory: '/tmp',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        codexBackendMode: 'appServer',
+        initialGoal,
+        token: 't',
+      });
+
+      expect(spawnResult.type).toBe('success');
+      const trackedSessions = trackedSessionCapture.current;
+      if (!trackedSessions) {
+        throw new Error('Expected tracked session map from webhook wiring');
+      }
+      expect(trackedSessions.get(12345)?.spawnOptions?.initialGoal).toEqual(initialGoal);
+
+      harness.requestShutdown('happier-cli');
+      await run;
+      run = null;
+    } finally {
+      const onHappySessionWebhookModule = await import('./sessions/onHappySessionWebhook');
+      vi.mocked(onHappySessionWebhookModule.createOnHappySessionWebhook).mockImplementation(() => vi.fn());
+      if (run) {
+        harness.requestShutdown('happier-cli');
+        await run.catch(() => {});
+      }
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
   it('tracks connected-service materialization diagnostics on spawn options for downstream switch surfaces', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;

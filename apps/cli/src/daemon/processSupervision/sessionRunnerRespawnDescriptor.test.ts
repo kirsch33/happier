@@ -12,6 +12,42 @@ import type { Credentials } from '@/persistence';
 import { HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY } from '@/agent/runtime/sessionConnectedServiceMaterializationIdentityEnv';
 
 describe('sessionRunnerRespawnDescriptor', () => {
+  it('round-trips daemon initialGoal through the respawn descriptor so resumed sessions re-arm self-driving goals', () => {
+    const initialGoal = {
+      objective: 'Keep driving unattended after restart.',
+      status: 'active' as const,
+      tokenBudget: 12_000,
+    };
+    const spawnOptions = {
+      directory: '/tmp/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      codexBackendMode: 'appServer',
+      resume: 'codex-thread-1',
+      initialGoal,
+    } satisfies SpawnSessionOptions;
+
+    const descriptor = buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(spawnOptions);
+
+    expect(descriptor).toMatchObject({
+      version: 1,
+      directory: '/tmp/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      codexBackendMode: 'appServer',
+      resume: 'codex-thread-1',
+      initialGoal,
+    });
+
+    const restored = buildSpawnSessionOptionsFromRespawnDescriptorV1(descriptor!);
+    expect(restored).toMatchObject({
+      directory: '/tmp/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      codexBackendMode: 'appServer',
+      resume: 'codex-thread-1',
+      approvedNewDirectoryCreation: true,
+      initialGoal,
+    });
+  });
+
   it('round-trips mcpSelection through the respawn descriptor', () => {
     const spawnOptions = {
       directory: '/tmp/repo',

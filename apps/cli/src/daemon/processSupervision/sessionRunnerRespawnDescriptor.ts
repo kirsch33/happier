@@ -1,5 +1,5 @@
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
-import { resolveCanonicalCodexBackendMode } from '@/rpc/handlers/registerSessionHandlers';
+import { resolveCanonicalCodexBackendMode } from '@/rpc/handlers/codexBackendMode';
 import type { TerminalMode, TerminalSpawnOptions } from '@/terminal/runtime/terminalConfig';
 import { HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY } from '@/agent/runtime/sessionConnectedServiceMaterializationIdentityEnv';
 import {
@@ -8,6 +8,7 @@ import {
   ConnectedServiceMaterializationIdentityV1Schema,
   openAccountScopedBlobCiphertext,
   sealAccountScopedBlobCiphertext,
+  SessionInitialGoalRequestV1Schema,
   SessionMcpSelectionV1Schema,
   type AccountScopedCryptoMaterial,
 } from '@happier-dev/protocol';
@@ -175,6 +176,7 @@ export const SessionRunnerRespawnDescriptorV1Schema = z
     agentModeUpdatedAt: z.number().int().optional(),
     modelId: z.string().optional(),
     modelUpdatedAt: z.number().int().optional(),
+    initialGoal: SessionInitialGoalRequestV1Schema.optional(),
     sessionConfigOptionOverrides: z.unknown().optional(),
     environmentVariables: z.record(z.string(), z.string()).optional(),
     sealedEnvironmentVariables: SealedRespawnEnvironmentVariablesSchema.optional(),
@@ -236,6 +238,7 @@ export function buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(
     ...(typeof spawnOptions.agentModeUpdatedAt === 'number' ? { agentModeUpdatedAt: spawnOptions.agentModeUpdatedAt } : {}),
     ...(typeof spawnOptions.modelId === 'string' ? { modelId: spawnOptions.modelId } : {}),
     ...(typeof spawnOptions.modelUpdatedAt === 'number' ? { modelUpdatedAt: spawnOptions.modelUpdatedAt } : {}),
+    ...(spawnOptions.initialGoal ? { initialGoal: spawnOptions.initialGoal } : {}),
     ...(spawnOptions.sessionConfigOptionOverrides ? { sessionConfigOptionOverrides: spawnOptions.sessionConfigOptionOverrides } : {}),
     ...(safeEnvironmentVariables ? { environmentVariables: safeEnvironmentVariables } : {}),
     ...(sealedEnvironmentVariables ? { sealedEnvironmentVariables } : {}),
@@ -288,6 +291,7 @@ export function buildSpawnSessionOptionsFromRespawnDescriptorV1(
     ...(typeof descriptor.agentModeUpdatedAt === 'number' ? { agentModeUpdatedAt: descriptor.agentModeUpdatedAt } : {}),
     ...(typeof descriptor.modelId === 'string' ? { modelId: descriptor.modelId } : {}),
     ...(typeof descriptor.modelUpdatedAt === 'number' ? { modelUpdatedAt: descriptor.modelUpdatedAt } : {}),
+    ...(descriptor.initialGoal ? { initialGoal: descriptor.initialGoal } : {}),
     ...(descriptor.sessionConfigOptionOverrides ? { sessionConfigOptionOverrides: descriptor.sessionConfigOptionOverrides as any } : {}),
     ...(environmentVariables ? { environmentVariables } : {}),
     ...(descriptor.connectedServices ? { connectedServices: descriptor.connectedServices } : {}),

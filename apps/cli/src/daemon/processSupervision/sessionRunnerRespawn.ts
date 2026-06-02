@@ -77,9 +77,13 @@ function buildRespawnOptions(params: Readonly<{
   const resumeFromOptions = normalizeOptionalString(params.spawnOptions.resume);
   const resumeFromTracked = normalizeOptionalString(params.vendorResumeId);
   const effectiveResume = resumeFromOptions || resumeFromTracked;
-  const { resume: _resume, ...spawnOptionsWithoutResume } = params.spawnOptions;
+  const {
+    initialGoal: _initialGoal,
+    resume: _resume,
+    ...spawnOptionsWithoutOneShotControls
+  } = params.spawnOptions;
   return {
-    ...spawnOptionsWithoutResume,
+    ...spawnOptionsWithoutOneShotControls,
     ...(effectiveResume ? { resume: effectiveResume } : {}),
     existingSessionId: params.sessionId,
     sessionId: undefined,

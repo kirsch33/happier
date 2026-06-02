@@ -102,6 +102,60 @@ describe('resolveRespawnSessionRuntimeSnapshot', () => {
     });
   });
 
+  it('derives respawn initialGoal from fresh persisted active Codex app-server work state', async () => {
+    const readCredentials = vi.fn(async () => credentials('fresh-token'));
+    const resolveAttachContext = vi.fn(async () => ({
+      ok: true as const,
+      attachPayload: { v: 2 as const, encryptionMode: 'plain' as const },
+      vendorResumeId: 'thread-active-goal',
+      sessionPath: '/tmp/repo',
+      metadata: {
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'codex',
+          updatedAt: 800,
+          primaryItemId: 'goal:thread-active-goal',
+          items: [
+            {
+              id: 'goal:thread-active-goal',
+              kind: 'goal',
+              origin: 'vendor',
+              status: 'active',
+              title: 'Continue after runtime restart',
+              tokenBudget: 5000,
+              updatedAt: 800,
+            },
+          ],
+        },
+      },
+    }));
+
+    const result = await resolveRespawnSessionRuntimeSnapshot({
+      sessionId: 'session-1',
+      spawnOptions: defaultRespawnOptions({
+        codexBackendMode: 'appServer',
+        resume: 'thread-active-goal',
+      }),
+      vendorResumeId: 'thread-active-goal',
+      defaultOptions: defaultRespawnOptions({
+        codexBackendMode: 'appServer',
+        resume: 'thread-active-goal',
+      }),
+      credentials: credentials('stale-token'),
+      readCredentials,
+      resolveAttachContext,
+    });
+
+    expect(result).toMatchObject({
+      initialGoal: {
+        objective: 'Continue after runtime restart',
+        status: 'active',
+        tokenBudget: 5000,
+      },
+      resume: 'thread-active-goal',
+    });
+  });
+
   it('falls back to default respawn options when persisted metadata cannot be loaded', async () => {
     const defaultOptions = defaultRespawnOptions({ resume: 'vendor-resume' });
     const result = await resolveRespawnSessionRuntimeSnapshot({

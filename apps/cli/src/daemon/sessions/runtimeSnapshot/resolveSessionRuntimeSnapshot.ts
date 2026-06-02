@@ -11,8 +11,11 @@ import {
 import {
   ConnectedServiceBindingsV1Schema,
   ConnectedServiceMaterializationIdentityV1Schema,
+  readDisplayableSessionWorkStateV1,
   type ConnectedServiceBindingsV1,
   type ConnectedServiceMaterializationIdentityV1,
+  type SessionInitialGoalRequestV1,
+  type SessionWorkStateItemV1,
 } from '@happier-dev/protocol';
 import {
   HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY,
@@ -29,6 +32,7 @@ export type SessionRuntimeSnapshot = Readonly<{
   permissionMode: SnapshotValue<PermissionMode> | null;
   agentModeId: SnapshotValue<string> | null;
   modelId: SnapshotValue<string> | null;
+  initialGoal: SessionInitialGoalRequestV1 | null;
   vendorResumeId: Readonly<{ value: string; updatedAt: number | null }> | null;
 }>;
 
@@ -238,6 +242,50 @@ function chooseVendorResumeId(params: ResolveSessionRuntimeSnapshotParams): Sess
   return value ? { value, updatedAt: null } : null;
 }
 
+function isCodexAppServerSpawnOptions(options: SpawnSessionOptions): boolean {
+  return options.backendTarget?.kind === 'builtInAgent'
+    && options.backendTarget.agentId === 'codex'
+    && options.codexBackendMode === 'appServer';
+}
+
+function isActiveGoalItem(item: SessionWorkStateItemV1): boolean {
+  return item.kind === 'goal' && item.status === 'active';
+}
+
+function chooseActiveGoalItem(
+  items: readonly SessionWorkStateItemV1[],
+  primaryItemId: string | null | undefined,
+): SessionWorkStateItemV1 | null {
+  const primaryActive = primaryItemId
+    ? items.find((item) => item.id === primaryItemId && isActiveGoalItem(item))
+    : null;
+  return primaryActive ?? items.find(isActiveGoalItem) ?? null;
+}
+
+function readInitialGoalFromPersistedWorkState(
+  metadata: Record<string, unknown> | null | undefined,
+): SessionInitialGoalRequestV1 | null {
+  const workState = readDisplayableSessionWorkStateV1(metadata?.sessionWorkStateV1);
+  if (!workState) return null;
+
+  const activeGoal = chooseActiveGoalItem(workState.items, workState.primaryItemId);
+  if (!activeGoal) return null;
+
+  return {
+    objective: activeGoal.title,
+    status: 'active',
+    ...(Object.prototype.hasOwnProperty.call(activeGoal, 'tokenBudget')
+      ? { tokenBudget: activeGoal.tokenBudget ?? null }
+      : {}),
+  };
+}
+
+function chooseInitialGoal(params: ResolveSessionRuntimeSnapshotParams): SessionRuntimeSnapshot['initialGoal'] {
+  if (params.incomingOptions.initialGoal) return params.incomingOptions.initialGoal;
+  if (!isCodexAppServerSpawnOptions(params.incomingOptions)) return null;
+  return readInitialGoalFromPersistedWorkState(params.persistedMetadata);
+}
+
 function applySnapshotToSpawnOptions(
   options: SpawnSessionOptions,
   snapshot: SessionRuntimeSnapshot,
@@ -268,6 +316,10 @@ function applySnapshotToSpawnOptions(
   if (snapshot.modelId) {
     next.modelId = snapshot.modelId.value;
     next.modelUpdatedAt = snapshot.modelId.updatedAt;
+  }
+
+  if (snapshot.initialGoal) {
+    next.initialGoal = snapshot.initialGoal;
   }
 
   if (snapshot.vendorResumeId) {
@@ -323,6 +375,7 @@ export function resolveSessionRuntimeSnapshot(
       readStringControlFromOptions(params.trackedSpawnOptions, 'modelId', 'modelUpdatedAt', 'tracked'),
       readStringControlFromOptions(params.incomingOptions, 'modelId', 'modelUpdatedAt', 'incoming'),
     ]),
+    initialGoal: chooseInitialGoal(params),
     vendorResumeId: chooseVendorResumeId(params),
   };
 

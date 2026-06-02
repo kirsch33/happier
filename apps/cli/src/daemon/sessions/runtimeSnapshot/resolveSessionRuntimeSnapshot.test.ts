@@ -62,6 +62,7 @@ describe('resolveSessionRuntimeSnapshot', () => {
       permissionMode: { value: 'yolo', updatedAt: 200 },
       agentModeId: { value: 'plan', updatedAt: 210 },
       modelId: { value: 'claude-opus-4-7', updatedAt: 220 },
+      initialGoal: null,
       vendorResumeId: { value: 'vendor-persisted', updatedAt: null },
     });
     expect(result.spawnOptions).toMatchObject({
@@ -279,5 +280,73 @@ describe('resolveSessionRuntimeSnapshot', () => {
       .toEqual(materializationIdentity);
     expect((result.spawnOptions as { connectedServiceMaterializationIdentityV1?: unknown }).connectedServiceMaterializationIdentityV1)
       .toEqual(materializationIdentity);
+  });
+
+  it('rebuilds the active persisted Codex app-server goal as an initial resume goal', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        codexBackendMode: 'appServer',
+        resume: 'thread-1',
+      }),
+      persistedMetadata: {
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'codex',
+          agentId: 'codex',
+          updatedAt: 500,
+          primaryItemId: 'goal:thread-1',
+          items: [
+            {
+              id: 'goal:thread-1',
+              kind: 'goal',
+              origin: 'vendor',
+              backendId: 'codex',
+              vendorRef: 'thread-1',
+              status: 'active',
+              title: 'Keep working after daemon restart',
+              tokenBudget: 1200,
+              updatedAt: 500,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(result.spawnOptions.initialGoal).toEqual({
+      objective: 'Keep working after daemon restart',
+      status: 'active',
+      tokenBudget: 1200,
+    });
+  });
+
+  it('does not rebuild paused persisted Codex app-server goals as initial resume goals', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        codexBackendMode: 'appServer',
+        resume: 'thread-1',
+      }),
+      persistedMetadata: {
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'codex',
+          updatedAt: 500,
+          items: [
+            {
+              id: 'goal:thread-1',
+              kind: 'goal',
+              origin: 'vendor',
+              status: 'paused',
+              title: 'Paused goal',
+              updatedAt: 500,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(result.spawnOptions.initialGoal).toBeUndefined();
+    expect(result.snapshot.initialGoal).toBeNull();
   });
 });

@@ -1881,7 +1881,6 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 const {
                   existingSessionAttachPayload: _existingSessionAttachPayload,
                   initialTranscriptAfterSeq: _initialTranscriptAfterSeq,
-                  initialGoal: _initialGoal,
                   ...trackedSpawnOptionsBase
                 } = normalizedOptions;
                 const trackedSpawnOptions: SpawnSessionOptions = {

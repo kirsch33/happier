@@ -29,6 +29,11 @@ describe('adoptSessionsFromMarkers respawn descriptor', () => {
         directory: '/tmp/workspace',
         backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
         resume: 'vendor-sess-123',
+        initialGoal: {
+          objective: 'Keep working after daemon restart',
+          status: 'active',
+          tokenBudget: 1200,
+        },
         environmentVariables: {
           CLAUDE_CONFIG_DIR: '/tmp/claude-config',
           CODEX_HOME: '/tmp/codex-home',
@@ -52,6 +57,11 @@ describe('adoptSessionsFromMarkers respawn descriptor', () => {
       directory: '/tmp/workspace',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
       resume: 'vendor-sess-123',
+      initialGoal: {
+        objective: 'Keep working after daemon restart',
+        status: 'active',
+        tokenBudget: 1200,
+      },
       environmentVariables: {
         CLAUDE_CONFIG_DIR: '/tmp/claude-config',
         CODEX_HOME: '/tmp/codex-home',
