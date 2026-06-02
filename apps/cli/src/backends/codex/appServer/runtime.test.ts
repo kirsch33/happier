@@ -342,6 +342,12 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        setTimeout(() => {',
             '            process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: msg.params?.threadId ?? null, turn: { id: turnId } } }) + "\\n");',
         '        }, respondDelayMs + 5);',
+        '        if (text === "goal-turn-finalize-renamed") {',
+        '            setTimeout(() => {',
+        '                process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: msg.params?.threadId ?? null, turn: { id: "turn-goal-renamed-terminal" } } }) + "\\n");',
+        '            }, 20);',
+        '            continue;',
+        '        }',
         '        if (text === "bridge-streams") {',
         '            setTimeout(() => {',
         '                process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { itemId: "msg_1", delta: "Hello " } }) + "\\n");',
@@ -2064,6 +2070,37 @@ describe('createCodexAppServerRuntime', () => {
         });
         const requestLog = await readRequestLog(requestLogPath);
         expect(requestLog.filter((entry) => entry.method === 'turn/start')).toEqual([]);
+    });
+
+    it('finalizes a same-thread goal turn when Codex reports a renamed terminal turn id', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-goal-turn-renamed-');
+        const onThinkingChange = vi.fn();
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange,
+            session: {
+                updateMetadata: vi.fn(),
+                sendAgentMessageCommitted: vi.fn(async () => {}),
+                sendCodexMessage: vi.fn(),
+                sessionTurnLifecycle,
+            } as any,
+        });
+
+        await runtime.startOrLoad({});
+        const sendOutcome = await Promise.race([
+            runtime.sendPrompt('goal-turn-finalize-renamed').then(() => 'resolved' as const),
+            new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+        ]);
+        if (sendOutcome === 'timed-out') {
+            await runtime.cancel();
+        }
+
+        expect(sendOutcome).toBe('resolved');
+        expect(sessionTurnLifecycle.completeTurn).toHaveBeenCalledWith({
+            provider: 'codex',
+        });
+        expect(onThinkingChange).toHaveBeenLastCalledWith(false);
     });
 
     it('adopts resumed native app-server turns from server requests before terminal notifications', async () => {

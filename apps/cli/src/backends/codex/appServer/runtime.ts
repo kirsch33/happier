@@ -2245,6 +2245,14 @@ export function createCodexAppServerRuntime(params: Readonly<{
         return !notificationTurnId || !activeTurn.turnId || notificationTurnId === activeTurn.turnId;
     };
 
+    const terminalNotificationMatchesPendingTurn = (notificationParams: unknown): boolean => {
+        if (notificationMatchesPendingTurn(notificationParams)) return true;
+        const activeTurn = pendingTurn;
+        if (!activeTurn) return false;
+        const notificationThreadId = readThreadId(notificationParams);
+        return Boolean(notificationThreadId && notificationThreadId === activeTurn.threadId);
+    };
+
     const resolveStreamUpdateContext = async (
         method: string,
         notificationParams: unknown,
@@ -2440,7 +2448,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                                 if (terminalTurnId && deferredRecoverableFailureTurnIds.delete(terminalTurnId)) {
                                     return;
                                 }
-                                if (notificationMatchesPendingTurn(notificationParams)) {
+                                if (terminalNotificationMatchesPendingTurn(notificationParams)) {
                                     markActiveTurnNonSteerable();
                                     if (method === 'turn/completed' && readCodexTurnStatus(notificationParams) === 'failed') {
                                         const failure = createCodexAppServerTurnFailure(notificationParams, runtimeEnv, params.session);
