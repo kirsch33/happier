@@ -1345,6 +1345,7 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
   const { flags, kv } = parseArgs(argv);
   const json = wantsJson(argv, { flags });
   const dryRun = flags.has('--dry-run');
+  const archiveWorktrees = flags.has('--archive-worktrees') || flags.has('--archive-referenced-worktrees');
   const date = (kv.get('--date') ?? '').toString().trim() || getTodayYmd();
 
   if (!stackExistsSync(stackName)) {
@@ -1376,21 +1377,34 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
   const { baseDir } = resolveStackEnvPath(stackName);
   const destStackDir = join(dirname(baseDir), '.archived', date, stackName);
 
+  const worktreePlans = [];
+  for (const wt of byRoot.values()) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await runCapture(
+      process.execPath,
+      [join(rootDir, 'scripts', 'worktrees.mjs'), 'archive', wt.dir, '--dry-run', `--date=${date}`, '--json'],
+      { cwd: rootDir, env: process.env }
+    );
+    const info = JSON.parse(out);
+    worktreePlans.push({
+      dir: wt.dir,
+      destDir: typeof info?.destDir === 'string' ? info.destDir : null,
+      action: archiveWorktrees ? 'archive' : 'protect',
+      reason: archiveWorktrees ? null : 'stack_archive_worktrees_requires_explicit_opt_in',
+      linkedStacks: Array.isArray(info?.linkedStacks) ? info.linkedStacks : [],
+    });
+  }
+
+  const protectedWorktrees = worktreePlans.filter((wt) => wt.action === 'protect');
+
   // Safety: avoid archiving a worktree that is still actively referenced by other stacks.
   // If we did, we'd break those stacks by moving their active checkout.
-  if (!dryRun && byRoot.size) {
+  if (archiveWorktrees && !dryRun && worktreePlans.length) {
     const otherStacks = new Map(); // envPath -> Set(keys)
     const otherNames = new Set();
 
-    for (const wt of byRoot.values()) {
-      // eslint-disable-next-line no-await-in-loop
-      const out = await runCapture(
-        process.execPath,
-        [join(rootDir, 'scripts', 'worktrees.mjs'), 'archive', wt.dir, '--dry-run', `--date=${date}`, '--json'],
-        { cwd: rootDir, env: process.env }
-      );
-      const info = JSON.parse(out);
-      const linked = Array.isArray(info.linkedStacks) ? info.linkedStacks : [];
+    for (const wt of worktreePlans) {
+      const linked = Array.isArray(wt.linkedStacks) ? wt.linkedStacks : [];
       for (const s of linked) {
         if (!s?.name || s.name === stackName) continue;
         otherNames.add(s.name);
@@ -1447,7 +1461,13 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
       date,
       stackBaseDir: baseDir,
       archivedStackDir: destStackDir,
-      worktrees: Array.from(byRoot.values()),
+      archiveWorktrees,
+      plannedMoves: {
+        stack: { dir: baseDir, destDir: destStackDir },
+        worktrees: worktreePlans.filter((wt) => wt.action === 'archive'),
+      },
+      protectedWorktrees,
+      worktrees: worktreePlans,
     };
   }
 
@@ -1455,17 +1475,19 @@ async function cmdArchiveStack({ rootDir, argv, stackName }) {
   await rename(baseDir, destStackDir);
 
   const archivedWorktrees = [];
-  for (const wt of byRoot.values()) {
-    if (!existsSync(wt.dir)) continue;
-    // eslint-disable-next-line no-await-in-loop
-    const out = await runCapture(process.execPath, [join(rootDir, 'scripts', 'worktrees.mjs'), 'archive', wt.dir, `--date=${date}`, '--json'], {
-      cwd: rootDir,
-      env: process.env,
-    });
-    archivedWorktrees.push(JSON.parse(out));
+  if (archiveWorktrees) {
+    for (const wt of byRoot.values()) {
+      if (!existsSync(wt.dir)) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const out = await runCapture(process.execPath, [join(rootDir, 'scripts', 'worktrees.mjs'), 'archive', wt.dir, `--date=${date}`, '--json'], {
+        cwd: rootDir,
+        env: process.env,
+      });
+      archivedWorktrees.push(JSON.parse(out));
+    }
   }
 
-  return { ok: true, dryRun: false, stackName, date, archivedStackDir: destStackDir, archivedWorktrees };
+  return { ok: true, dryRun: false, stackName, date, archivedStackDir: destStackDir, archiveWorktrees, protectedWorktrees, archivedWorktrees };
 }
 
 // (removed) per-component stack pinning: stacks now pin a single monorepo checkout via HAPPIER_STACK_REPO_DIR.
@@ -2251,8 +2273,21 @@ async function main() {
       printResult({ json, data: res });
     } else if (res.dryRun) {
       console.log(`[stack] would archive "${stackName}" -> ${res.archivedStackDir} (dry-run)`);
+      if (Array.isArray(res.plannedMoves?.worktrees) && res.plannedMoves.worktrees.length) {
+        for (const wt of res.plannedMoves.worktrees) {
+          console.log(`[stack] would archive worktree ${wt.dir} -> ${wt.destDir ?? '(unknown)'}`);
+        }
+      }
+      if (Array.isArray(res.protectedWorktrees) && res.protectedWorktrees.length) {
+        for (const wt of res.protectedWorktrees) {
+          console.log(`[stack] protected worktree ${wt.dir} (pass --archive-worktrees to archive it)`);
+        }
+      }
     } else {
       console.log(`[stack] archived "${stackName}" -> ${res.archivedStackDir}`);
+      if (Array.isArray(res.protectedWorktrees) && res.protectedWorktrees.length) {
+        console.log(`[stack] protected ${res.protectedWorktrees.length} referenced worktree(s); pass --archive-worktrees to archive them explicitly`);
+      }
     }
     return;
   }
