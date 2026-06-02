@@ -1,10 +1,15 @@
 import { join } from 'node:path';
 
 import { printResult } from '../utils/cli/cli.mjs';
-import { getComponentDir } from '../utils/paths/paths.mjs';
+import { getComponentDir, resolveStackEnvPath } from '../utils/paths/paths.mjs';
 import { run, runCapture } from '../utils/proc/proc.mjs';
 
 import { withStackEnv } from './stack_environment.mjs';
+
+function supportsCliResume(helpText) {
+  const normalized = String(helpText ?? '').toLowerCase();
+  return /^\s*happier\s+resume(?:\s|$)/m.test(normalized);
+}
 
 function supportsDaemonResume(helpText) {
   const normalized = String(helpText ?? '').toLowerCase();
@@ -28,12 +33,33 @@ export async function runStackResumeCommand({ rootDir, stackName, passthrough, j
   const result = await withStackEnv({
     stackName,
     fn: async ({ env }) => {
+      const happierWrapper = join(rootDir, 'scripts', 'happier.mjs');
       const cliDir = getComponentDir(rootDir, 'happier-cli', env);
       const happierBin = join(cliDir, 'bin', 'happier.mjs');
+      const cliHomeDir = (env.HAPPIER_STACK_CLI_HOME_DIR ?? join(resolveStackEnvPath(stackName, env).baseDir, 'cli')).toString();
+      const daemonEnv = {
+        ...env,
+        HAPPIER_HOME_DIR: cliHomeDir,
+        HAPPIER_STACK_CLI_HOME_DIR: cliHomeDir,
+      };
+
+      let resumeHelpText = '';
+      try {
+        resumeHelpText = await runCapture(process.execPath, [happierWrapper, 'resume', '--help'], { cwd: rootDir, env });
+      } catch {
+        resumeHelpText = '';
+      }
+
+      if (supportsCliResume(resumeHelpText)) {
+        for (const sessionId of sessionIds) {
+          await run(process.execPath, [happierWrapper, 'resume', sessionId], { cwd: rootDir, env });
+        }
+        return { ok: true, out: '' };
+      }
 
       let daemonHelpText = '';
       try {
-        daemonHelpText = await runCapture(process.execPath, [happierBin, 'daemon', '--help'], { cwd: rootDir, env });
+        daemonHelpText = await runCapture(process.execPath, [happierBin, 'daemon', '--help'], { cwd: rootDir, env: daemonEnv });
       } catch {
         daemonHelpText = '';
       }
@@ -42,7 +68,7 @@ export async function runStackResumeCommand({ rootDir, stackName, passthrough, j
         return { ok: false, error: 'resume_not_supported' };
       }
 
-      const out = await run(process.execPath, [happierBin, 'daemon', 'resume', ...sessionIds], { cwd: rootDir, env });
+      const out = await run(process.execPath, [happierBin, 'daemon', 'resume', ...sessionIds], { cwd: rootDir, env: daemonEnv });
       return { ok: true, out };
     },
   });
@@ -53,7 +79,7 @@ export async function runStackResumeCommand({ rootDir, stackName, passthrough, j
       data: { ok: false, error: 'resume_not_supported', resumed: [] },
       text: [
         '[stack] resume_not_supported',
-        'Current happier-cli does not support `happier daemon resume`.',
+        'Current happier-cli does not support `happier resume` or `happier daemon resume`.',
         'Use the app UI to resume inactive sessions, or update to a compatible CLI/hstack pair.',
       ].join('\n'),
     });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,7 +19,23 @@ function buildStubHappyCliScript() {
     'const args = process.argv.slice(2);',
     "const home = process.env.HAPPIER_HOME_DIR || process.cwd();",
     "const logPath = join(home, 'resume-invocations.log');",
+    "const supportsCliResume = process.env.STUB_CLI_RESUME_SUPPORT === '1';",
     "const supportsDaemonResume = process.env.STUB_DAEMON_RESUME_SUPPORT === '1';",
+    '',
+    'if (args[0] === \'resume\' && args[1] === \'--help\') {',
+    '  if (supportsCliResume) {',
+    "    console.log('happier resume');",
+    "    console.log('happier resume <session-id-or-prefix>');",
+    '    process.exit(0);',
+    '  }',
+    "  console.error('Unknown command: resume');",
+    '  process.exit(1);',
+    '}',
+    '',
+    'if (args[0] === \'resume\') {',
+    "  appendFileSync(logPath, `resume ${args.slice(1).join(' ')}\\n`, 'utf-8');",
+    '  process.exit(0);',
+    '}',
     '',
     'if (args[0] === \'daemon\' && args[1] === \'--help\') {',
     '  if (supportsDaemonResume) {',
@@ -76,7 +92,30 @@ test('hstack stack resume fails closed when happier daemon does not support resu
   assert.equal(existsSync(invocationLog), false, 'expected daemon resume not to be invoked');
 });
 
-test('hstack stack resume invokes happier daemon resume when supported', async (t) => {
+test('hstack stack resume invokes top-level happier resume when supported', async (t) => {
+  const fixture = await createResumeFixture(t);
+  const res = await runNodeCapture(
+    [join(rootDir, 'bin', 'hstack.mjs'), 'stack', 'resume', fixture.stackName, 'session-a', 'session-b', '--json'],
+    {
+      cwd: rootDir,
+      env: {
+        ...fixture.baseEnv,
+        STUB_CLI_RESUME_SUPPORT: '1',
+      },
+    }
+  );
+
+  assert.equal(res.code, 0, `expected exit 0\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+  assert.match(res.stdout, /"resumed":\s*\[\s*"session-a",\s*"session-b"\s*\]/);
+
+  const invocationLog = join(fixture.stackCliHome, 'resume-invocations.log');
+  assert.equal(
+    await readFile(invocationLog, 'utf-8'),
+    'resume session-a\nresume session-b\n'
+  );
+});
+
+test('hstack stack resume falls back to daemon resume when only daemon resume is supported', async (t) => {
   const fixture = await createResumeFixture(t);
   const res = await runNodeCapture(
     [join(rootDir, 'bin', 'hstack.mjs'), 'stack', 'resume', fixture.stackName, 'session-a', 'session-b', '--json'],
@@ -91,4 +130,10 @@ test('hstack stack resume invokes happier daemon resume when supported', async (
 
   assert.equal(res.code, 0, `expected exit 0\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
   assert.match(res.stdout, /"resumed":\s*\[\s*"session-a",\s*"session-b"\s*\]/);
+
+  const invocationLog = join(fixture.stackCliHome, 'resume-invocations.log');
+  assert.equal(
+    await readFile(invocationLog, 'utf-8'),
+    'daemon resume session-a session-b\n'
+  );
 });
