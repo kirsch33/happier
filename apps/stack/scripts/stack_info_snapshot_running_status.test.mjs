@@ -273,6 +273,52 @@ test('readStackInfoSnapshot surfaces stack session respawn policy with explicit 
   }
 });
 
+test('readStackInfoSnapshot marks inherited live relay server urls as degraded health for non-main stacks', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-live-url-leak-'));
+  const storageDir = join(tmp, 'storage');
+  const stackName = 'dev-auth';
+  const baseDir = join(storageDir, stackName);
+
+  await mkdir(baseDir, { recursive: true });
+
+  const serverListener = await withListeningServer();
+  await writeFile(
+    join(baseDir, 'env'),
+    [
+      `HAPPIER_STACK_SERVER_PORT=${serverListener.port}`,
+      'HAPPIER_STACK_DAEMON=0',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+
+  const restore = withPatchedProcessEnv(t, {
+    HAPPIER_STACK_STORAGE_DIR: storageDir,
+    HAPPIER_SERVER_URL: 'http://127.0.0.1:3005',
+    HAPPIER_PUBLIC_SERVER_URL: 'http://127.0.0.1:3005',
+    HAPPIER_LOCAL_SERVER_URL: 'http://127.0.0.1:3005',
+    HAPPIER_WEBAPP_URL: 'http://localhost:3005',
+  });
+  try {
+    const out = await readStackInfoSnapshot({ rootDir: process.cwd(), stackName });
+    assert.equal(out.runtime.running, true);
+    assert.equal(out.runtime.liveRelayLeak.detected, true);
+    assert.equal(out.runtime.liveRelayLeak.expectedServerUrl, `http://127.0.0.1:${serverListener.port}`);
+    assert.deepEqual(out.runtime.liveRelayLeak.leakedKeys, [
+      'HAPPIER_SERVER_URL',
+      'HAPPIER_PUBLIC_SERVER_URL',
+      'HAPPIER_LOCAL_SERVER_URL',
+      'HAPPIER_WEBAPP_URL',
+    ]);
+    assert.deepEqual(out.runtime.health.issues, ['live_relay_env_leak']);
+    assert.equal(out.runtime.health.status, 'degraded');
+  } finally {
+    restore();
+    await serverListener.close();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test('readStackInfoSnapshot reports leftover stack session runners as degraded health', async (t) => {
   const tmp = await mkdtemp(join(tmpdir(), 'hstack-info-session-leftover-'));
   const storageDir = join(tmp, 'storage');

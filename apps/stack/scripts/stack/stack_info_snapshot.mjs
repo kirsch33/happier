@@ -17,6 +17,45 @@ import { join } from 'node:path';
 import { checkDaemonState } from '../daemon.mjs';
 
 const readExistingEnv = readTextOrEmpty;
+const LIVE_RELAY_PORT = 3005;
+const LIVE_RELAY_LEAK_ENV_KEYS = [
+  'HAPPIER_SERVER_URL',
+  'HAPPIER_PUBLIC_SERVER_URL',
+  'HAPPIER_LOCAL_SERVER_URL',
+  'HAPPIER_WEBAPP_URL',
+];
+
+function readUrlPort(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    const port = url.port || (url.protocol === 'http:' ? '80' : '443');
+    const parsed = Number(port);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function detectLiveRelayEnvLeak({ stackName, serverPort, stackEnv }) {
+  const port = Number(serverPort);
+  const expectedServerUrl = Number.isFinite(port) && port > 0 ? `http://127.0.0.1:${port}` : null;
+  const name = String(stackName ?? '').trim() || 'main';
+  if (name === 'main' || !Number.isFinite(port) || port <= 0 || port === LIVE_RELAY_PORT) {
+    return { detected: false, leakedKeys: [], expectedServerUrl };
+  }
+
+  const effectiveEnv = { ...process.env, ...(stackEnv ?? {}) };
+  const leakedKeys = LIVE_RELAY_LEAK_ENV_KEYS.filter((key) => readUrlPort(effectiveEnv[key]) === LIVE_RELAY_PORT);
+
+  return {
+    detected: leakedKeys.length > 0,
+    leakedKeys,
+    expectedServerUrl,
+  };
+}
 
 export async function readStackInfoSnapshot({ rootDir, stackName }) {
   const baseDir = resolveStackEnvPath(stackName).baseDir;
@@ -137,7 +176,11 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
   if (sessionRunnersRunning && !daemonRunning) {
     healthIssues.push('session_runners_leftover');
   }
-  const healthStatus = !running ? 'stopped' : healthIssues.length > 0 ? 'degraded' : 'healthy';
+  const liveRelayLeak = detectLiveRelayEnvLeak({ stackName, serverPort, stackEnv });
+  if (liveRelayLeak.detected) {
+    healthIssues.push('live_relay_env_leak');
+  }
+  const healthStatus = liveRelayLeak.detected ? 'degraded' : !running ? 'stopped' : healthIssues.length > 0 ? 'degraded' : 'healthy';
 
   const host = resolveLocalhostHost({ stackMode: true, stackName });
   const internalServerUrl = serverPort ? `http://127.0.0.1:${serverPort}` : null;
@@ -209,6 +252,7 @@ export async function readStackInfoSnapshot({ rootDir, stackName }) {
         status: healthStatus,
         issues: healthIssues,
       },
+      liveRelayLeak,
       sessionRespawn,
       ports: runtimePorts,
       expo: runtimeState?.expo ?? null,

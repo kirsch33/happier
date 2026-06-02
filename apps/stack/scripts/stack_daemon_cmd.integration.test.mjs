@@ -104,6 +104,7 @@ if (sub === 'start') {
   // Capture resolved target server so integration tests can assert correct stack port selection.
   append('server_url=' + String(process.env.HAPPIER_SERVER_URL || ''));
   append('webapp_url=' + String(process.env.HAPPIER_WEBAPP_URL || ''));
+  append('active_server_id=' + String(process.env.HAPPIER_ACTIVE_SERVER_ID || ''));
   append('direct_peer_bind_port=' + String(process.env.HAPPIER_MACHINE_TRANSFER_DIRECT_PEER_BIND_PORT || ''));
   append('direct_peer_advertised_hosts=' + String(process.env.HAPPIER_MACHINE_TRANSFER_DIRECT_PEER_ADVERTISED_HOSTS || ''));
   append('direct_peer_feature_enabled=' + String(process.env.HAPPIER_FEATURE_MACHINES_TRANSFER_DIRECT_PEER__ENABLED || ''));
@@ -287,6 +288,42 @@ test('hstack stack daemon start accepts server-scoped credentials without legacy
 
   const startRes = await runHstack(['stack', 'daemon', fixture.stackName, 'start', '--json'], { env: fixture.baseEnv });
   assertExitOk(startRes, 'stack daemon start with server-scoped credentials');
+});
+
+test('hstack stack daemon start exports stack server url and active server id despite live relay parent env', async (t) => {
+  const fixture = await createDaemonFixture(t, {
+    prefix: 'happy-stacks-stack-daemon-live-url-parent-env-',
+    stackName: 'exp-test',
+    serverPort: 4101,
+  });
+  const expectedActiveServerId = buildStackStableScopeId({ stackName: fixture.stackName, cliIdentity: 'default' });
+
+  await writeServerScopedAuth({
+    cliHomeDir: fixture.stackCliHome,
+    serverUrl: `http://127.0.0.1:${fixture.serverPort}`,
+    env: { HAPPIER_ACTIVE_SERVER_ID: expectedActiveServerId },
+  });
+  await fixture.writeStackEnv();
+
+  const parentEnv = {
+    ...fixture.baseEnv,
+    HAPPIER_SERVER_URL: 'http://127.0.0.1:3005',
+    HAPPIER_PUBLIC_SERVER_URL: 'http://127.0.0.1:3005',
+    HAPPIER_LOCAL_SERVER_URL: 'http://127.0.0.1:3005',
+    HAPPIER_WEBAPP_URL: 'http://localhost:3005',
+    HAPPIER_ACTIVE_SERVER_ID: 'main-live-relay',
+  };
+  registerDaemonCleanup(t, { env: parentEnv, stackName: fixture.stackName });
+
+  const startRes = await runHstack(['stack', 'daemon', fixture.stackName, 'start', '--json'], { env: parentEnv });
+  assertExitOk(startRes, 'stack daemon start with live relay parent env');
+
+  const logPath = join(fixture.stackCliHome, 'stub-daemon.log');
+  const logText = await readLogText(logPath);
+  assert.match(logText, new RegExp(`server_url=http://127\\.0\\.0\\.1:${fixture.serverPort}\\b`));
+  assert.match(logText, new RegExp(`active_server_id=${expectedActiveServerId}\\b`));
+  assert.doesNotMatch(logText, /server_url=http:\/\/127\.0\.0\.1:3005\b/);
+  assert.doesNotMatch(logText, /active_server_id=main-live-relay\b/);
 });
 
 test('hstack stack daemon start rejects credentials scoped to a different server url', async (t) => {

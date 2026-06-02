@@ -403,8 +403,15 @@ async function main() {
   }
   // Only set default env vars when no explicit server selection flags are present
   if (!prefixServerSelection.hasExplicitSelection && !settingsDefaults) {
-    env.HAPPIER_SERVER_URL = env.HAPPIER_SERVER_URL || internalServerUrl;
-    env.HAPPIER_WEBAPP_URL = env.HAPPIER_WEBAPP_URL || publicServerUrl;
+    if (isStackScopedInvocation) {
+      env.HAPPIER_SERVER_URL = internalServerUrl;
+      env.HAPPIER_WEBAPP_URL = publicServerUrl;
+      delete env.HAPPIER_PUBLIC_SERVER_URL;
+      delete env.HAPPIER_LOCAL_SERVER_URL;
+    } else {
+      env.HAPPIER_SERVER_URL = env.HAPPIER_SERVER_URL || internalServerUrl;
+      env.HAPPIER_WEBAPP_URL = env.HAPPIER_WEBAPP_URL || publicServerUrl;
+    }
   }
   if (resolvedCli.kind === 'tsx') {
     // TSX resolves path aliases (`@/...`) using the tsconfig it finds. When the CLI runs from arbitrary

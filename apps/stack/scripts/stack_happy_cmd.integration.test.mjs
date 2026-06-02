@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildStackStableScopeId } from './utils/auth/stable_scope_id.mjs';
 import { runNodeCapture } from './testkit/stack_script_command_testkit.mjs';
 import { createStackHappierCliCommandFixture } from './testkit/stack_happier_cli_command_testkit.mjs';
 import { createRuntimeSnapshotFixture } from './testkit/runtime_snapshot_testkit.mjs';
@@ -19,6 +20,8 @@ function buildStubHappyCliScript({ message }) {
       `  envFile: process.env.HAPPIER_STACK_ENV_FILE || null,`,
       `  homeDir: process.env.HAPPIER_HOME_DIR || null,`,
       `  serverUrl: process.env.HAPPIER_SERVER_URL || null,`,
+      `  publicServerUrl: process.env.HAPPIER_PUBLIC_SERVER_URL || null,`,
+      `  localServerUrl: process.env.HAPPIER_LOCAL_SERVER_URL || null,`,
       `  webappUrl: process.env.HAPPIER_WEBAPP_URL || null,`,
       `  activeServerId: process.env.HAPPIER_ACTIVE_SERVER_ID || null,`,
       `}));`,
@@ -329,6 +332,38 @@ test('hstack happier (HAPPIER_STACK_STACK set) uses stack.runtime.json ports whe
   assert.equal(out.stack, fixture.stackName);
   assert.equal(out.serverUrl, 'http://127.0.0.1:4888');
   assert.equal(out.webappUrl, 'http://localhost:4888');
+});
+
+test('hstack happier (stack-scoped direct invocation) overrides inherited live relay urls', async (t) => {
+  const fixture = await createHappyStackFixture(t, {
+    prefix: 'happier-stack-happy-direct-live-url-leak-',
+    message: 'direct-live-url-leak',
+    serverPort: 4899,
+  });
+
+  const res = await runNodeCapture([join(rootDir, 'bin', 'happier.mjs')], {
+    cwd: rootDir,
+    env: {
+      ...fixture.baseEnv,
+      HAPPIER_STACK_STACK: fixture.stackName,
+      HAPPIER_STACK_ENV_FILE: join(fixture.storageDir, fixture.stackName, 'env'),
+      HAPPIER_SERVER_URL: 'http://127.0.0.1:3005',
+      HAPPIER_PUBLIC_SERVER_URL: 'http://127.0.0.1:3005',
+      HAPPIER_LOCAL_SERVER_URL: 'http://127.0.0.1:3005',
+      HAPPIER_WEBAPP_URL: 'http://localhost:3005',
+    },
+  });
+  assert.equal(res.code, 0, `expected exit 0, got ${res.code}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  const out = JSON.parse(res.stdout.trim());
+  assert.equal(out.message, 'direct-live-url-leak');
+  assert.equal(out.stack, fixture.stackName);
+  assert.equal(out.homeDir, join(fixture.storageDir, fixture.stackName, 'cli'));
+  assert.equal(out.serverUrl, 'http://127.0.0.1:4899');
+  assert.equal(out.webappUrl, 'http://localhost:4899');
+  assert.equal(out.publicServerUrl, null);
+  assert.equal(out.localServerUrl, null);
+  assert.equal(out.activeServerId, buildStackStableScopeId({ stackName: fixture.stackName, cliIdentity: 'default' }));
 });
 
 test('hstack happier prefers the matching stack server profile id over the stable scope id', async (t) => {
