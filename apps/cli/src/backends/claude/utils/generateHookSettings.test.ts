@@ -59,6 +59,45 @@ describe('generateHookSettingsFile', () => {
     ]));
   });
 
+  it('can carry hooks through settings when Claude does not support plugin dirs', () => {
+    const filePath = generateHookSettingsFile(43124, {
+      hookTransport: 'settings',
+      enableLocalPermissionBridge: true,
+      permissionHookSecret: 'test-secret-123',
+    });
+    createdFiles.push(filePath);
+
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as any;
+    const sessionStartCommand = parsed.hooks?.SessionStart?.[0]?.hooks?.[0]?.command as string;
+    const permissionCommand = parsed.hooks?.PermissionRequest?.[0]?.hooks?.[0]?.command as string;
+    expect(sessionStartCommand).toContain('session_hook_forwarder.cjs');
+    expect(sessionStartCommand).toContain('SessionStart');
+    expect(permissionCommand).toContain('permission_hook_forwarder.cjs');
+    expect(permissionCommand).toContain('test-secret-123');
+    expect(parsed.permissions?.allow).toEqual(expect.arrayContaining([
+      'mcp__happier__change_title',
+      'mcp__happier__session_title_set',
+    ]));
+  });
+
+  it('does not register settings hooks when hook mirroring is disabled', () => {
+    envScope.patch({ HAPPIER_CLAUDE_HOOKS_DISABLED: '1' });
+
+    const filePath = generateHookSettingsFile(43126, {
+      hookTransport: 'settings',
+      enableLocalPermissionBridge: true,
+      permissionHookSecret: 'test-secret-123',
+    });
+    createdFiles.push(filePath);
+
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as any;
+    expect(parsed.hooks).toBeUndefined();
+    expect(parsed.permissions?.allow).toEqual(expect.arrayContaining([
+      'mcp__happier__change_title',
+      'mcp__happier__session_title_set',
+    ]));
+  });
+
   it('does not read or copy arbitrary keys from Claude settings.json', () => {
     const dir = mkdtempSync(join(tmpdir(), 'happier-claude-settings-'));
     createdDirs.push(dir);

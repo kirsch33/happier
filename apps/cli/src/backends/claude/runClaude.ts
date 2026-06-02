@@ -75,6 +75,7 @@ import { createSessionMetadataShutdownDeadline } from '@/session/services/sessio
 import { resolveRequestedSessionDirectory } from '@/agent/runtime/resolveRequestedSessionDirectory';
 import { publishClaudeSessionModelsMetadataBestEffort } from '@/backends/claude/sessionControls/publishClaudeSessionModelsMetadataBestEffort';
 import { resolveTerminationArchiveDecision } from '@/agent/runtime/terminationArchivePolicy';
+import { resolveClaudeHookTransport } from '@/backends/claude/utils/resolveClaudeHookTransport';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -517,22 +518,30 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     const hookServer = await startHookServer(hookServerOptions);
     logger.debug(`[START] Hook server started on port ${hookServer.port}`);
 
-    // Generate hook artifacts for Claude:
-    //  - settings file carries non-hook config (permissions.allow for mcp__happier__change_title*)
-    //  - plugin dir carries SessionStart + PermissionRequest hooks via --plugin-dir
-    // Split because Claude Code's --settings is non-composable for hooks (first --settings wins
-    // when multiple wrappers inject their own), whereas --plugin-dir is additive.
+    // Prefer plugin-dir hooks because Claude Code's --settings is non-composable
+    // for hooks when wrappers inject their own settings overlay. Older Claude CLIs
+    // that do not expose --plugin-dir get a settings-hook compatibility fallback.
+    const hookTransport = await resolveClaudeHookTransport({
+        cwd: workingDirectory,
+        timeoutMs: resolveClaudeHelpProbeTimeoutMs(),
+    });
     const hookSettingsPath = await generateHookSettingsFileWithEnsuredRuntime(hookServer.port, {
         enableLocalPermissionBridge: true,
         permissionHookSecret,
+        hookTransport,
     });
     logger.debug(`[START] Generated hook settings file: ${hookSettingsPath}`);
-    const hookPluginDir = await generateHookPluginDirWithEnsuredRuntime(hookServer.port, {
-        enableLocalPermissionBridge: true,
-        permissionHookSecret,
-    });
+    const hookPluginDir = hookTransport === 'plugin-dir'
+        ? await generateHookPluginDirWithEnsuredRuntime(hookServer.port, {
+            enableLocalPermissionBridge: true,
+            permissionHookSecret,
+            hookTransport: 'plugin-dir',
+        })
+        : null;
     if (hookPluginDir) {
         logger.debug(`[START] Generated hook plugin dir: ${hookPluginDir}`);
+    } else if (hookTransport === 'settings') {
+        logger.debug('[START] Hook plugin dir skipped; Claude CLI does not advertise --plugin-dir support');
     } else {
         logger.debug('[START] Hook plugin dir generation skipped (HAPPIER_CLAUDE_HOOKS_DISABLED)');
     }
@@ -1005,6 +1014,14 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
         if (Number.isFinite(parsed) && parsed > 0) return parsed;
         return process.env.CI ? 3_000 : 1_500;
     };
+    let claudeHookTransportPromise: ReturnType<typeof resolveClaudeHookTransport> | null = null;
+    const resolveClaudeHookTransportOnce = (): ReturnType<typeof resolveClaudeHookTransport> => {
+        claudeHookTransportPromise ??= resolveClaudeHookTransport({
+            cwd: workingDirectory,
+            timeoutMs: resolveClaudeHelpProbeTimeoutMs(),
+        });
+        return claudeHookTransportPromise;
+    };
     let pushSender: PushNotificationClient | null = null;
     let currentClaudeRemoteMetaState = resolveInitialClaudeRemoteMetaState({ metaDefaults: options.claudeRemoteMetaDefaults });
     let localPermissionBridgeEnabled = currentClaudeRemoteMetaState.claudeLocalPermissionBridgeEnabled === true;
@@ -1052,21 +1069,28 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
             registerRpcHandlers: ({ artifacts }) => {
                 registerSessionHandlers(artifacts.deferredSession.rpcHandlerManager, workingDirectory);
             },
-                startHookServer: async () => {
-                    return await startHookServer(hookServerOptions);
-                },
-                generateHookSettingsFile: async (port) => {
-                    return await generateHookSettingsFileWithEnsuredRuntime(port, {
-                        enableLocalPermissionBridge: true,
-                        permissionHookSecret,
-                    });
-                },
-                generateHookPluginDir: async (port) => {
-                    return await generateHookPluginDirWithEnsuredRuntime(port, {
-                        enableLocalPermissionBridge: true,
-                        permissionHookSecret,
-                    });
-                },
+            startHookServer: async () => {
+                return await startHookServer(hookServerOptions);
+            },
+            generateHookSettingsFile: async (port) => {
+                const hookTransport = await resolveClaudeHookTransportOnce();
+                return await generateHookSettingsFileWithEnsuredRuntime(port, {
+                    enableLocalPermissionBridge: true,
+                    permissionHookSecret,
+                    hookTransport,
+                });
+            },
+            generateHookPluginDir: async (port) => {
+                const hookTransport = await resolveClaudeHookTransportOnce();
+                if (hookTransport !== 'plugin-dir') {
+                    return null;
+                }
+                return await generateHookPluginDirWithEnsuredRuntime(port, {
+                    enableLocalPermissionBridge: true,
+                    permissionHookSecret,
+                    hookTransport: 'plugin-dir',
+                });
+            },
             cleanupHookSettingsFile,
             cleanupHookPluginDir,
             initializeSessionInBackground: async ({ artifacts, signal }) => {

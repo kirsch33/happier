@@ -5,8 +5,10 @@ import { handleToolCallUpdate } from '../sessionUpdateHandlers';
 import { DefaultTransport } from '../../transport';
 import { CursorTransport } from '@/backends/cursor/acp/transport';
 
-function createCtx(transport: HandlerContext['transport']): HandlerContext & { emitted: any[] } {
-  const emitted: any[] = [];
+type EmittedAgentMessage = Parameters<HandlerContext['emit']>[0];
+
+function createCtx(transport: HandlerContext['transport']): HandlerContext & { emitted: EmittedAgentMessage[] } {
+  const emitted: EmittedAgentMessage[] = [];
   return {
     transport,
     activeToolCalls: new Set(),
@@ -19,7 +21,7 @@ function createCtx(transport: HandlerContext['transport']): HandlerContext & { e
     idleTimeout: null,
     recentPromptHadChangeTitle: false,
     toolCallCountSincePrompt: 0,
-    emit: (msg) => emitted.push(msg),
+    emit: (msg: EmittedAgentMessage) => emitted.push(msg),
     emitIdleStatus: () => {},
     clearIdleTimeout: () => {},
     setIdleTimeout: () => {},

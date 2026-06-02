@@ -1086,6 +1086,15 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 || isCodexAppServerInvalidRequestMapExpectedStringError(error));
     };
 
+    const shouldRetryWithTextOnlyInput = (
+        error: unknown,
+        input: readonly CodexAppServerTurnInputItem[],
+    ): boolean => {
+        return input.length > 1
+            && (isCodexAppServerInvalidParamsError(error)
+                || isCodexAppServerInvalidRequestMapExpectedStringError(error));
+    };
+
     const setThinking = (nextThinking: boolean): void => {
         if (thinking === nextThinking) return;
         thinking = nextThinking;
@@ -3005,7 +3014,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
             try {
                 await requestSteerWithStaleTurnRecovery(structuredInput, 'expectedTurnId');
             } catch (error) {
-                if (structuredInput.length > 1 && isCodexAppServerInvalidParamsError(error)) {
+                if (shouldRetryWithTextOnlyInput(error, structuredInput)) {
                     await requestSteerWithStaleTurnRecovery(textOnlyInput, 'expectedTurnId');
                     await turnBoundaryTracker.appendSteerMessage({ localId: options?.localId ?? null });
                     return;
@@ -3023,7 +3032,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 try {
                     await requestSteerWithStaleTurnRecovery(structuredInput, 'turnId');
                 } catch (legacyError) {
-                    if (structuredInput.length > 1 && isCodexAppServerInvalidParamsError(legacyError)) {
+                    if (shouldRetryWithTextOnlyInput(legacyError, structuredInput)) {
                         await requestSteerWithStaleTurnRecovery(textOnlyInput, 'turnId');
                         await turnBoundaryTracker.appendSteerMessage({ localId: options?.localId ?? null });
                         return;
@@ -3109,7 +3118,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                             try {
                                 response = await client.request('turn/start', turnStartParams);
                             } catch (legacyError) {
-                                if (input.length > 1 && isCodexAppServerInvalidParamsError(legacyError)) {
+                                if (shouldRetryWithTextOnlyInput(legacyError, input)) {
                                     response = await client.request('turn/start', {
                                         ...turnStartParams,
                                         input: textOnlyInput,
@@ -3118,7 +3127,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                                     throw legacyError;
                                 }
                             }
-                        } else if (input.length > 1 && isCodexAppServerInvalidParamsError(error)) {
+                        } else if (shouldRetryWithTextOnlyInput(error, input)) {
                             response = await client.request('turn/start', {
                                 ...turnStartParams,
                                 input: textOnlyInput,

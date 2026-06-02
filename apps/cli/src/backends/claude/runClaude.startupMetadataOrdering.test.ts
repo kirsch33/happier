@@ -127,12 +127,18 @@ vi.mock('@/backends/claude/utils/startHookServer', () => ({
     startHookServer: vi.fn(async () => ({ port: 12345, stop: vi.fn() })),
 }));
 
+vi.mock('@/backends/claude/utils/resolveClaudeHookTransport', () => ({
+    resolveClaudeHookTransport: vi.fn(async () => 'settings'),
+}));
+
 vi.mock('@/backends/claude/utils/generateHookSettingsFileWithEnsuredRuntime', () => ({
     generateHookSettingsFileWithEnsuredRuntime: vi.fn(async () => '/tmp/happier-hook-settings.json'),
+    generateHookPluginDirWithEnsuredRuntime: vi.fn(async () => '/tmp/happier-hook-plugin'),
 }));
 
 vi.mock('@/backends/claude/utils/generateHookSettings', () => ({
     cleanupHookSettingsFile: vi.fn(),
+    cleanupHookPluginDir: vi.fn(),
 }));
 
 vi.mock('@/rpc/handlers/killSession', () => ({

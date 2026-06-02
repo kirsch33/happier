@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ensureClaudeJsRuntimeExecutableMock = vi.fn(async () => '/managed/js-runtime');
 const generateHookSettingsFileMock = vi.fn(() => '/tmp/generated-hooks.json');
+const generateHookPluginDirMock = vi.fn(() => '/tmp/generated-hook-plugin');
 
 vi.mock('@/backends/claude/utils/ensureClaudeJsRuntimeExecutable', () => ({
   ensureClaudeJsRuntimeExecutable: ensureClaudeJsRuntimeExecutableMock,
@@ -9,14 +10,17 @@ vi.mock('@/backends/claude/utils/ensureClaudeJsRuntimeExecutable', () => ({
 
 vi.mock('./generateHookSettings', () => ({
   generateHookSettingsFile: generateHookSettingsFileMock,
+  generateHookPluginDir: generateHookPluginDirMock,
 }));
 
 describe('generateHookSettingsFileWithEnsuredRuntime', () => {
   beforeEach(() => {
     ensureClaudeJsRuntimeExecutableMock.mockReset();
     generateHookSettingsFileMock.mockReset();
+    generateHookPluginDirMock.mockReset();
     ensureClaudeJsRuntimeExecutableMock.mockResolvedValue('/managed/js-runtime');
     generateHookSettingsFileMock.mockReturnValue('/tmp/generated-hooks.json');
+    generateHookPluginDirMock.mockReturnValue('/tmp/generated-hook-plugin');
   });
 
   it('ensures the Claude JS runtime before generating hook settings', async () => {

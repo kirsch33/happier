@@ -83,7 +83,9 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     emitGoalContinuationItemsBeforeStarted?: boolean;
     rejectReviewStartMethodUnavailable?: boolean;
     rejectStructuredTurnInput?: boolean;
+    rejectStructuredTurnInputAsStringShape?: boolean;
     rejectStructuredSteerInput?: boolean;
+    rejectStructuredSteerInputAsStringShape?: boolean;
     emitResumeContinuationUserInputRequest?: boolean;
     emitResumeTurnStartedBeforeResponse?: boolean;
     rejectPermissionsProfileAsStringShape?: boolean;
@@ -316,6 +318,10 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        }',
         `        if (${JSON.stringify(params.rejectStructuredTurnInput === true)} && Array.isArray(msg.params?.input) && msg.params.input.length > 1) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: structured turn input unsupported" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectStructuredTurnInputAsStringShape === true)} && Array.isArray(msg.params?.input) && msg.params.input.length > 1) {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32600, message: "Invalid request: invalid type: map, expected a string" } }) + "\\n");',
         '            continue;',
         '        }',
         '        const text = Array.isArray(msg.params?.input) ? String(msg.params.input[0]?.text ?? "unknown") : "unknown";',
@@ -937,6 +943,10 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: structured steer input unsupported" } }) + "\\n");',
         '            continue;',
         '        }',
+        `        if (${JSON.stringify(params.rejectStructuredSteerInputAsStringShape === true)} && Array.isArray(msg.params?.input) && msg.params.input.length > 1) {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32600, message: "Invalid request: invalid type: map, expected a string" } }) + "\\n");',
+        '            continue;',
+        '        }',
         '        if (!selected) {',
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "turn/steer requires expectedTurnId" } }) + "\\n");',
         '            continue;',
@@ -1000,7 +1010,9 @@ describe('createCodexAppServerRuntime', () => {
             emitGoalContinuationItemsBeforeStarted?: boolean;
             rejectReviewStartMethodUnavailable?: boolean;
             rejectStructuredTurnInput?: boolean;
+            rejectStructuredTurnInputAsStringShape?: boolean;
             rejectStructuredSteerInput?: boolean;
+            rejectStructuredSteerInputAsStringShape?: boolean;
             emitResumeContinuationUserInputRequest?: boolean;
             emitResumeTurnStartedBeforeResponse?: boolean;
             rejectPermissionsProfileAsStringShape?: boolean;
@@ -1027,7 +1039,9 @@ describe('createCodexAppServerRuntime', () => {
             emitGoalContinuationItemsBeforeStarted: options.emitGoalContinuationItemsBeforeStarted,
             rejectReviewStartMethodUnavailable: options.rejectReviewStartMethodUnavailable,
             rejectStructuredTurnInput: options.rejectStructuredTurnInput,
+            rejectStructuredTurnInputAsStringShape: options.rejectStructuredTurnInputAsStringShape,
             rejectStructuredSteerInput: options.rejectStructuredSteerInput,
+            rejectStructuredSteerInputAsStringShape: options.rejectStructuredSteerInputAsStringShape,
             emitResumeContinuationUserInputRequest: options.emitResumeContinuationUserInputRequest,
             emitResumeTurnStartedBeforeResponse: options.emitResumeTurnStartedBeforeResponse,
             rejectPermissionsProfileAsStringShape: options.rejectPermissionsProfileAsStringShape,
@@ -1245,6 +1259,40 @@ describe('createCodexAppServerRuntime', () => {
             sandbox: 'read-only',
         });
         expect(startRequests[1]?.params).not.toHaveProperty('permissions');
+    });
+
+    it('falls back to legacy app-server permission fields when resuming against older Codex string profile shape', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-resume-permission-string-fallback-', {
+            rejectPermissionsProfileAsStringShape: true,
+        });
+
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({ resumeId: 'resume-123', importHistory: false });
+
+        const requestLog = await readRequestLog(requestLogPath);
+        const resumeRequests = requestLog.filter((entry) => entry.method === 'thread/resume') as Array<{ params?: Record<string, unknown> }>;
+        expect(resumeRequests).toHaveLength(2);
+        expect(resumeRequests[0]?.params).toMatchObject({
+            threadId: 'resume-123',
+            permissions: {
+                type: 'profile',
+                id: ':read-only',
+            },
+            persistExtendedHistory: true,
+        });
+        expect(resumeRequests[1]?.params).toMatchObject({
+            threadId: 'resume-123',
+            approvalPolicy: 'never',
+            sandbox: 'read-only',
+            persistExtendedHistory: true,
+        });
+        expect(resumeRequests[1]?.params).not.toHaveProperty('permissions');
     });
 
     it('publishes connected-service direct-session metadata when activeServerDir owns CODEX_HOME', async () => {
@@ -2444,6 +2492,48 @@ describe('createCodexAppServerRuntime', () => {
         expect(turnStarts[1]?.params).not.toHaveProperty('approvalPolicy');
     });
 
+    it('retries turn start with text-only input when older app-server expects string input items', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-turn-string-shape-fallback-', {
+            rejectStructuredTurnInputAsStringShape: true,
+        });
+
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+            permissionMode: 'default',
+        });
+
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('structured-turn-string-shape-fallback', {
+            metadata: {
+                happierStructuredInputV1: {
+                    vendorPluginMentions: [
+                        { displayName: 'Reviewer', vendorPluginRef: 'plugin://reviewer@codex' },
+                    ],
+                },
+            },
+        });
+
+        const turnStarts = (await readRequestLog(requestLogPath))
+            .filter((entry) => entry.method === 'turn/start') as Array<{ params?: Record<string, unknown> }>;
+        expect(turnStarts).toEqual([
+            expect.objectContaining({
+                params: expect.objectContaining({
+                    input: [
+                        { type: 'text', text: 'structured-turn-string-shape-fallback' },
+                        { type: 'mention', name: 'Reviewer', path: 'plugin://reviewer@codex' },
+                    ],
+                }),
+            }),
+            expect.objectContaining({
+                params: expect.objectContaining({
+                    input: [{ type: 'text', text: 'structured-turn-string-shape-fallback' }],
+                }),
+            }),
+        ]);
+    });
+
     it('retries turn steer with text-only input when structured steer input is unsupported', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-steer-structured-fallback-', {
             rejectStructuredSteerInput: true,
@@ -2488,6 +2578,55 @@ describe('createCodexAppServerRuntime', () => {
                     threadId: 'thread-started',
                     expectedTurnId: 'turn-cancel-me',
                     input: [{ type: 'text', text: 'nudge with plugin' }],
+                }),
+            }),
+        ]);
+    });
+
+    it('retries turn steer with text-only input when older app-server expects string input items', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-steer-string-shape-fallback-', {
+            rejectStructuredSteerInputAsStringShape: true,
+        });
+
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        await runtime.startOrLoad({});
+        const sendPromptPromise = runtime.sendPrompt('cancel-me');
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        expect(runtime.isTurnInFlight()).toBe(true);
+        await runtime.steerPrompt('nudge with old input shape', {
+            metadata: {
+                happierStructuredInputV1: {
+                    vendorPluginMentions: [
+                        { displayName: 'Reviewer', vendorPluginRef: 'plugin://reviewer@codex' },
+                    ],
+                },
+            },
+        });
+        await sendPromptPromise;
+
+        const requestLog = (await readFile(requestLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+        expect(requestLog.filter((entry: { method: string }) => entry.method === 'turn/steer')).toEqual([
+            expect.objectContaining({
+                params: expect.objectContaining({
+                    threadId: 'thread-started',
+                    expectedTurnId: 'turn-cancel-me',
+                    input: [
+                        { type: 'text', text: 'nudge with old input shape' },
+                        { type: 'mention', name: 'Reviewer', path: 'plugin://reviewer@codex' },
+                    ],
+                }),
+            }),
+            expect.objectContaining({
+                params: expect.objectContaining({
+                    threadId: 'thread-started',
+                    expectedTurnId: 'turn-cancel-me',
+                    input: [{ type: 'text', text: 'nudge with old input shape' }],
                 }),
             }),
         ]);

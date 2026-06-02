@@ -1,9 +1,10 @@
 /**
  * Generate temporary hook artifacts for a Claude CLI session.
  *
- * Hooks are registered via `--plugin-dir <dir>` (an ephemeral session-only plugin
- * whose only payload is a `hooks/hooks.json`). Non-hook configuration (for now just
- * the `mcp__happier__change_title*` allow rules) still rides on `--settings <file>`.
+ * Hooks are registered via `--plugin-dir <dir>` when the installed Claude CLI
+ * supports it (an ephemeral session-only plugin whose only payload is a
+ * `hooks/hooks.json`). Non-hook configuration (for now just the
+ * `mcp__happier__change_title*` allow rules) still rides on `--settings <file>`.
  *
  * Why not put the hooks in the `--settings` overlay like we used to?
  *
@@ -16,13 +17,15 @@
  *
  * `--plugin-dir` is in a different, additive channel: multiple plugin dirs compose
  * without collision, and our hooks fire regardless of what else is in the spawn
- * chain. This module produces both artifacts so the caller can pass
+ * chain. For older Claude CLIs that do not expose `--plugin-dir`, callers can ask
+ * the settings file to carry hooks as a compatibility fallback. This module
+ * produces both artifacts so the caller can pass
  *   claude --plugin-dir <pluginDir> --settings <settingsFile> ...
  * and have hooks register reliably.
  *
- * Set `HAPPIER_CLAUDE_HOOKS_DISABLED=1` in the environment to suppress plugin-dir
- * generation entirely (for debugging Happier-spawned Claude without hook mirroring).
- * The non-hook settings file is still written in that mode.
+ * Set `HAPPIER_CLAUDE_HOOKS_DISABLED=1` in the environment to suppress hook
+ * registration entirely (for debugging Happier-spawned Claude without hook
+ * mirroring). The non-hook settings file is still written in that mode.
  */
 
 import { join } from 'node:path';
@@ -38,13 +41,15 @@ import { resolveReleaseRingScopedBasename } from '@/cli/runtime/publicReleaseCha
 export interface GenerateHookSettingsOptions {
     enableLocalPermissionBridge?: boolean;
     permissionHookSecret?: string;
+    hookTransport?: 'plugin-dir' | 'settings';
 }
 
-type ClaudeSettingsOverlay = Readonly<{
+type ClaudeSettingsOverlay = {
+    hooks?: Record<string, unknown>;
     permissions?: Readonly<{
         allow?: readonly string[];
     }>;
-}>;
+};
 
 const HOOKS_DISABLED_ENV_VAR = 'HAPPIER_CLAUDE_HOOKS_DISABLED';
 
@@ -73,52 +78,7 @@ function resolveTmpRoot(subdirName: 'hooks' | 'hook-plugins'): string {
     return root;
 }
 
-/**
- * Generate a temporary settings JSON file with non-hook configuration only
- * (currently: MCP change_title allow rules). Hooks are no longer carried here;
- * see `generateHookPluginDir` for those.
- */
-export function generateHookSettingsFile(_port: number, _options: GenerateHookSettingsOptions = {}): string {
-    const hooksDir = resolveTmpRoot('hooks');
-
-    // Unique filename per process to avoid conflicts
-    const filename = `session-hook-${process.pid}.json`;
-    const filepath = join(hooksDir, filename);
-
-    const settings: ClaudeSettingsOverlay = {
-        permissions: {
-            allow: [
-                'mcp__happier__change_title',
-                'mcp__happier__session_title_set',
-            ],
-        },
-    };
-
-    writeFileSync(filepath, JSON.stringify(settings, null, 2));
-    logger.debug(`[generateHookSettings] Created settings file: ${filepath}`);
-
-    return filepath;
-}
-
-/**
- * Generate a temporary plugin directory containing `hooks/hooks.json`.
- * Claude is launched with `--plugin-dir <returned path>` so the session registers
- * these hooks as an additive, session-only plugin.
- *
- * Returns `null` when `HAPPIER_CLAUDE_HOOKS_DISABLED=1` is set — callers should
- * then skip passing `--plugin-dir` and proceed without hook mirroring.
- */
-export function generateHookPluginDir(port: number, options: GenerateHookSettingsOptions = {}): string | null {
-    if (areHappierHooksDisabled()) {
-        logger.debug(`[generateHookSettings] ${HOOKS_DISABLED_ENV_VAR} is set; skipping hook plugin generation`);
-        return null;
-    }
-
-    const pluginsRoot = resolveTmpRoot('hook-plugins');
-    const pluginDir = join(pluginsRoot, `session-${process.pid}`);
-    const hooksDir = join(pluginDir, 'hooks');
-    mkdirSync(hooksDir, { recursive: true });
-
+function buildClaudeHookDefinitions(port: number, options: GenerateHookSettingsOptions = {}): Record<string, unknown> {
     const nodeExecutable = resolveNodeExecutable();
     const sessionForwarderScript = resolveCliRuntimeAssetPath('scripts', 'session_hook_forwarder.cjs');
     const buildSessionHookCommand = (hookEventName: string): string =>
@@ -165,7 +125,63 @@ export function generateHookPluginDir(port: number, options: GenerateHookSetting
         ];
     }
 
-    const hooksJson = { hooks };
+    return hooks;
+}
+
+/**
+ * Generate a temporary settings JSON file. By default it contains non-hook
+ * configuration only; older Claude CLIs that do not support --plugin-dir can ask
+ * for `hookTransport: 'settings'` to carry hooks through this overlay instead.
+ */
+export function generateHookSettingsFile(port: number, options: GenerateHookSettingsOptions = {}): string {
+    const hooksDir = resolveTmpRoot('hooks');
+
+    // Unique filename per process to avoid conflicts
+    const filename = `session-hook-${process.pid}.json`;
+    const filepath = join(hooksDir, filename);
+
+    const settings: ClaudeSettingsOverlay = {
+        permissions: {
+            allow: [
+                'mcp__happier__change_title',
+                'mcp__happier__session_title_set',
+            ],
+        },
+    };
+    if (options.hookTransport === 'settings') {
+        if (areHappierHooksDisabled()) {
+            logger.debug(`[generateHookSettings] ${HOOKS_DISABLED_ENV_VAR} is set; skipping settings hook registration`);
+        } else {
+            settings.hooks = buildClaudeHookDefinitions(port, options);
+        }
+    }
+
+    writeFileSync(filepath, JSON.stringify(settings, null, 2));
+    logger.debug(`[generateHookSettings] Created settings file: ${filepath}`);
+
+    return filepath;
+}
+
+/**
+ * Generate a temporary plugin directory containing `hooks/hooks.json`.
+ * Claude is launched with `--plugin-dir <returned path>` so the session registers
+ * these hooks as an additive, session-only plugin.
+ *
+ * Returns `null` when `HAPPIER_CLAUDE_HOOKS_DISABLED=1` is set — callers should
+ * then skip passing `--plugin-dir` and proceed without hook mirroring.
+ */
+export function generateHookPluginDir(port: number, options: GenerateHookSettingsOptions = {}): string | null {
+    if (areHappierHooksDisabled()) {
+        logger.debug(`[generateHookSettings] ${HOOKS_DISABLED_ENV_VAR} is set; skipping hook plugin generation`);
+        return null;
+    }
+
+    const pluginsRoot = resolveTmpRoot('hook-plugins');
+    const pluginDir = join(pluginsRoot, `session-${process.pid}`);
+    const hooksDir = join(pluginDir, 'hooks');
+    mkdirSync(hooksDir, { recursive: true });
+
+    const hooksJson = { hooks: buildClaudeHookDefinitions(port, options) };
     const hooksFile = join(hooksDir, 'hooks.json');
     writeFileSync(hooksFile, JSON.stringify(hooksJson, null, 2));
     logger.debug(`[generateHookSettings] Created hook plugin dir: ${pluginDir}`);

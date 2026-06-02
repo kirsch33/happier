@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -102,6 +102,8 @@ const getOrCreateSessionSpy = vi.fn(async () => ({ id: 'sess_1', metadataVersion
 const sendSessionEventSpy = vi.fn();
 let startHookServerCalls = 0;
 let generateHookSettingsCalls = 0;
+let generateHookPluginDirCalls = 0;
+let hookSettingsOptions: any[] = [];
 let resolveRunnerMcpServersCalls = 0;
 let resolveEffectiveCodingPromptCalls = 0;
 let loopCalls = 0;
@@ -160,6 +162,17 @@ vi.mock('@/backends/claude/utils/startHookServer', () => ({
   }),
 }));
 
+const hookTransportMock = vi.hoisted(() => {
+  const state = { transport: 'settings' as 'plugin-dir' | 'settings' };
+  return {
+    state,
+    resolveClaudeHookTransportSpy: vi.fn(async () => state.transport),
+  };
+});
+vi.mock('@/backends/claude/utils/resolveClaudeHookTransport', () => ({
+  resolveClaudeHookTransport: hookTransportMock.resolveClaudeHookTransportSpy,
+}));
+
 vi.mock('@/backends/claude/utils/generateHookSettings', () => ({
   generateHookSettingsFile: vi.fn(() => '/tmp/happier-hooks.json'),
   cleanupHookSettingsFile: vi.fn(),
@@ -167,11 +180,15 @@ vi.mock('@/backends/claude/utils/generateHookSettings', () => ({
 }));
 
 vi.mock('@/backends/claude/utils/generateHookSettingsFileWithEnsuredRuntime', () => ({
-  generateHookSettingsFileWithEnsuredRuntime: vi.fn(async () => {
+  generateHookSettingsFileWithEnsuredRuntime: vi.fn(async (_port: number, options: any) => {
     generateHookSettingsCalls += 1;
+    hookSettingsOptions.push(options);
     return '/tmp/happier-hooks.json';
   }),
-  generateHookPluginDirWithEnsuredRuntime: vi.fn(async () => null),
+  generateHookPluginDirWithEnsuredRuntime: vi.fn(async () => {
+    generateHookPluginDirCalls += 1;
+    return '/tmp/happier-hook-plugin';
+  }),
 }));
 
 vi.mock('@/runtime/js/ensureJavaScriptRuntimeExecutable', () => ({
@@ -292,6 +309,14 @@ describe('runClaude fast-start', () => {
     reloadConfiguration();
   });
 
+  beforeEach(() => {
+    hookTransportMock.state.transport = 'settings';
+    hookTransportMock.resolveClaudeHookTransportSpy.mockClear();
+    generateHookSettingsCalls = 0;
+    generateHookPluginDirCalls = 0;
+    hookSettingsOptions = [];
+  });
+
   afterAll(async () => {
     if (prevTiming === undefined) delete process.env.HAPPIER_STARTUP_TIMING_ENABLED;
     else process.env.HAPPIER_STARTUP_TIMING_ENABLED = prevTiming;
@@ -336,6 +361,52 @@ describe('runClaude fast-start', () => {
 	        `${e instanceof Error ? e.message : String(e)} | calls: readSettings=${readSettingsCalls}, initializeBackendApiContext=${initializeBackendApiContextCalls}, startHookServer=${startHookServerCalls}, generateHookSettings=${generateHookSettingsCalls}, resolveRunnerMcpServers=${resolveRunnerMcpServersCalls}, resolveEffectiveCodingPrompt=${resolveEffectiveCodingPromptCalls}, loop=${loopCalls}, initResolved=${initResolved}`,
 	      );
 	    } finally {
+      loopExit.resolve(0);
+      await runPromise;
+    }
+
+    if (testError) {
+      throw testError;
+    }
+  });
+
+  it('uses settings-carried hooks when Claude does not advertise plugin-dir support', async () => {
+    vi.resetModules();
+    loopStarted = createDeferred<void>();
+    loopExit = createDeferred<number>();
+    lastLoopOpts = null;
+    autoSessionReady = true;
+    initResolved = false;
+    backendInitDelayMs = 200;
+    hookTransportMock.state.transport = 'settings';
+
+    const { runClaude } = await import('./runClaude');
+
+    const credentials = createLegacyCredentials();
+    let testError: unknown = null;
+    const runPromise = runClaude(credentials, { startedBy: 'terminal', startingMode: 'local' }).catch((e) => {
+      testError = e;
+      loopStarted.resolve();
+    });
+
+    try {
+      await expect(waitFor(loopStarted.promise, loopStartWaitMs)).resolves.toBeUndefined();
+      if (testError) {
+        throw testError;
+      }
+      expect(hookTransportMock.resolveClaudeHookTransportSpy).toHaveBeenCalled();
+      expect(hookSettingsOptions).toEqual([
+        expect.objectContaining({
+          enableLocalPermissionBridge: true,
+          hookTransport: 'settings',
+        }),
+      ]);
+      expect(generateHookPluginDirCalls).toBe(0);
+      expect(lastLoopOpts?.hookSettingsPath).toBe('/tmp/happier-hooks.json');
+      expect(lastLoopOpts?.hookPluginDir).toBeNull();
+    } catch (e) {
+      testError = e;
+    } finally {
       loopExit.resolve(0);
       await runPromise;
     }
