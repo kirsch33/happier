@@ -45,6 +45,7 @@ import {
 import { cmdAuth, cmdListStacks, cmdRuntime, cmdService, cmdSrv, cmdTailscale, cmdWt } from './stack/delegated_script_commands.mjs';
 import { runStackDaemonCommand } from './stack/stack_daemon_command.mjs';
 import { runStackHappierPassthroughCommand } from './stack/stack_happier_passthrough_command.mjs';
+import { runStackFleetSupervisorCommand } from './stack/stack_fleet_supervisor_command.mjs';
 import { runStackMobileInstallCommand } from './stack/stack_mobile_install_command.mjs';
 import { runStackResumeCommand } from './stack/stack_resume_command.mjs';
 import { runStackStopCommand } from './stack/stack_stop_command.mjs';
@@ -2341,6 +2342,11 @@ async function main() {
   }
   if (cmd === 'resume') {
     await runStackResumeCommand({ rootDir, stackName, passthrough, json });
+    return;
+  }
+
+  if (cmd === 'fleet-supervisor') {
+    await runStackFleetSupervisorCommand({ rootDir, stackName, passthrough, json });
     return;
   }
 

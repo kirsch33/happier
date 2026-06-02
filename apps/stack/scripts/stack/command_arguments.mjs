@@ -28,6 +28,7 @@ const STACK_NAME_FIRST_SUPPORTED_COMMANDS = new Set([
   'mobile:install',
   'mobile-dev-client',
   'resume',
+  'fleet-supervisor',
   'stop',
   'code',
   'cursor',
