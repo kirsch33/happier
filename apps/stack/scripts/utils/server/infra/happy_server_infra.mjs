@@ -54,7 +54,7 @@ export async function stopHappyServerManagedInfra({ stackName, baseDir, removeVo
   return { ok: true, skipped: false, projectName, composePath };
 }
 
-function buildComposeYaml({
+export function buildComposeYaml({
   infraDir,
   pgPort,
   pgUser,
@@ -115,10 +115,11 @@ function buildComposeYaml({
     depends_on:
       - minio
     entrypoint: ["/bin/sh", "-lc"]
-    command: >
-      mc alias set local http://minio:9000 ${s3AccessKey} ${s3SecretKey} &&
-      mc mb -p local/${s3Bucket} || true &&
-      mc anonymous set download local/${s3Bucket} || true
+    command:
+      - >-
+        mc alias set local http://minio:9000 ${s3AccessKey} ${s3SecretKey} &&
+        mc mb -p local/${s3Bucket} || true &&
+        mc anonymous set download local/${s3Bucket} || true
     restart: "no"
 `;
 }
