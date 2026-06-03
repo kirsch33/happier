@@ -157,6 +157,32 @@ async function writeYarnBuildCreatesDistStub({ binDir, outputPath, cliDir }) {
   await writeFile(outputPath, '', 'utf-8');
 }
 
+async function writeYarnBuildEnvCreatesDistStub({ binDir, outputPath, cliDir }) {
+  await mkdir(binDir, { recursive: true });
+  const yarnPath = join(binDir, 'yarn');
+  await writeFile(
+    yarnPath,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'if [ "${1:-}" = "--version" ]; then',
+      '  echo "1.22.22"',
+      '  exit 0',
+      'fi',
+      'if [ "${1:-}" = "build" ]; then',
+      '  printf "NODE_OPTIONS=%s\\n" "${NODE_OPTIONS:-}" >> "${OUTPUT_PATH:?}"',
+      `  mkdir -p ${JSON.stringify(join(cliDir, 'dist'))}`,
+      `  echo "export const built = true;" > ${JSON.stringify(join(cliDir, 'dist', 'index.mjs'))}`,
+      '  exit 0',
+      'fi',
+      'exit 0',
+    ].join('\n') + '\n',
+    'utf-8'
+  );
+  await chmod(yarnPath, 0o755);
+  await writeFile(outputPath, '', 'utf-8');
+}
+
 async function writeYarnBuildCreatesPartialDistWithMissingChunkStub({ binDir, outputPath, cliDir }) {
   await mkdir(binDir, { recursive: true });
   const yarnPath = join(binDir, 'yarn');
@@ -1044,6 +1070,41 @@ test('ensureCliBuilt serializes concurrent rebuilds so dist is built once when t
     .filter((line) => line === 'build');
   assert.equal(buildInvocations.length, 1);
   assert.equal(await readFile(distIndex, 'utf-8'), 'export const built = true;\n');
+});
+
+test('ensureCliBuilt gives stack-managed CLI builds a larger Node heap', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-pm-cli-build-node-heap-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const cliDir = join(root, 'apps', 'cli');
+  await mkdir(cliDir, { recursive: true });
+  await writeFile(join(cliDir, 'package.json'), '{ "name": "cli-test" }\n', 'utf-8');
+  await writeFile(join(cliDir, 'yarn.lock'), '# yarn\n', 'utf-8');
+  await mkdir(join(cliDir, 'node_modules'), { recursive: true });
+  await writeFile(join(cliDir, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
+
+  const binDir = join(root, 'bin');
+  const outputPath = join(root, 'argv.txt');
+  await writeYarnBuildEnvCreatesDistStub({ binDir, outputPath, cliDir });
+
+  applyEnvOverrides(t, {
+    PATH: `${binDir}:/usr/bin:/bin`,
+    OUTPUT_PATH: outputPath,
+    HAPPIER_STACK_CLI_BUILD_MODE: 'always',
+    HAPPIER_STACK_HOME_DIR: join(root, 'home'),
+    HAPPIER_STACK_ENV_FILE: null,
+    NODE_OPTIONS: '--trace-warnings --max-old-space-size=2048',
+    HAPPIER_STACK_CLI_BUILD_MAX_OLD_SPACE_SIZE_MB: null,
+  });
+
+  await ensureCliBuilt(cliDir, { buildCli: true, quiet: true, env: process.env });
+
+  const out = await readFile(outputPath, 'utf-8');
+  assert.match(out, /NODE_OPTIONS=.*--trace-warnings/);
+  assert.match(out, /NODE_OPTIONS=.*--max-old-space-size=4096/);
+  assert.doesNotMatch(out, /--max-old-space-size=2048/);
 });
 
 test('ensureCliBuilt rebuilds after waiting in always mode when worktree changed during the earlier build', async (t) => {

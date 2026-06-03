@@ -18,8 +18,11 @@ import {
 import { resolveInstalledPath, resolveInstalledCliRoot } from '../paths/runtime.mjs';
 import { expandHome } from '../paths/canonical_home.mjs';
 import { withCliDistBuildLock } from './cliDistBuildLock.mjs';
+import { setOrReplaceMaxOldSpaceSizeFlag } from '../expo/expoNodeHeapEnv.mjs';
 
 export { isCliDistBuildLockActive } from './cliDistBuildLock.mjs';
+
+const DEFAULT_CLI_BUILD_MAX_OLD_SPACE_SIZE_MB = 4096;
 
 function sha256Hex(s) {
   return createHash('sha256').update(String(s ?? ''), 'utf-8').digest('hex');
@@ -250,6 +253,23 @@ async function preparePmEnv(dir, envIn = process.env) {
   } else {
     delete env.TSX_TSCONFIG_PATH;
   }
+  return env;
+}
+
+function resolveCliBuildMaxOldSpaceSizeMb(env = process.env) {
+  const raw = String(env?.HAPPIER_STACK_CLI_BUILD_MAX_OLD_SPACE_SIZE_MB ?? '').trim();
+  if (!raw) return DEFAULT_CLI_BUILD_MAX_OLD_SPACE_SIZE_MB;
+  if (raw === '0') return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_CLI_BUILD_MAX_OLD_SPACE_SIZE_MB;
+  return Math.floor(parsed);
+}
+
+function applyCliBuildNodeHeapEnv(baseEnv) {
+  const env = { ...(baseEnv ?? process.env) };
+  const sizeMb = resolveCliBuildMaxOldSpaceSizeMb(env);
+  if (sizeMb == null) return env;
+  env.NODE_OPTIONS = setOrReplaceMaxOldSpaceSizeFlag(env.NODE_OPTIONS ?? '', sizeMb);
   return env;
 }
 
@@ -936,7 +956,7 @@ export async function ensureCliBuilt(cliDir, { buildCli, quiet = false, env: env
       // eslint-disable-next-line no-console
       console.log('[local] building happier-cli...');
     }
-    const env = await preparePmEnv(cliDir, envIn);
+    const env = applyCliBuildNodeHeapEnv(await preparePmEnv(cliDir, envIn));
     const pm = await getComponentPm(cliDir, env);
     const hadDistBeforeBuild = await pathExists(distDir);
     if (hadDistBeforeBuild) {
