@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -761,6 +761,122 @@ test('ensureDepsInstalled skips monorepo refresh when node_modules is newer even
   await ensureDepsInstalled(join(root, 'apps', 'ui'), 'happier-ui', { quiet: true });
   const out = await readFile(outputPath, 'utf-8');
   assert.doesNotMatch(out, /\binstall\b/, `expected no yarn install when node_modules is already newer, got:\n${out}`);
+});
+
+test('ensureDepsInstalled refreshes monorepo dependencies when expected package bins are missing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-pm-happy-monorepo-missing-bin-refresh-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await mkdir(join(root, 'apps', 'ui'), { recursive: true });
+  await mkdir(join(root, 'apps', 'cli'), { recursive: true });
+  await mkdir(join(root, 'apps', 'server'), { recursive: true });
+  await writeFile(join(root, 'apps', 'ui', 'package.json'), '{}\n', 'utf-8');
+  await writeFile(
+    join(root, 'apps', 'cli', 'package.json'),
+    JSON.stringify({
+      name: '@happier-dev/cli',
+      scripts: { build: 'tsc --noEmit' },
+      devDependencies: { typescript: '5.9.3' },
+    }) + '\n',
+    'utf-8',
+  );
+  await writeFile(join(root, 'apps', 'server', 'package.json'), '{}\n', 'utf-8');
+  await writeFile(
+    join(root, 'package.json'),
+    JSON.stringify({
+      name: 'monorepo',
+      private: true,
+      workspaces: { packages: ['apps/ui', 'apps/cli', 'apps/server'] },
+    }) + '\n',
+    'utf-8',
+  );
+  await writeFile(join(root, 'yarn.lock'), '# yarn\n', 'utf-8');
+
+  await mkdir(join(root, 'node_modules', '@scope', 'pkg'), { recursive: true });
+  await writeFile(join(root, 'node_modules', '.yarn-integrity'), 'ok\n', 'utf-8');
+
+  const base = Date.now();
+  const older = new Date(base - 10_000);
+  const newer = new Date(base);
+  await Promise.all([
+    utimes(join(root, 'package.json'), older, older),
+    utimes(join(root, 'yarn.lock'), older, older),
+    utimes(join(root, 'apps', 'ui', 'package.json'), older, older),
+    utimes(join(root, 'apps', 'cli', 'package.json'), older, older),
+    utimes(join(root, 'apps', 'server', 'package.json'), older, older),
+    utimes(join(root, 'node_modules', '.yarn-integrity'), newer, newer),
+  ]);
+
+  const binDir = join(root, 'bin');
+  const outputPath = join(root, 'argv.txt');
+  await writeYarnArgDumpStub({ binDir, outputPath });
+
+  applyEnvOverrides(t, {
+    PATH: `${binDir}:/usr/bin:/bin`,
+    OUTPUT_PATH: outputPath,
+    HAPPIER_STACK_ENV_FILE: null,
+  });
+
+  await ensureDepsInstalled(join(root, 'apps', 'cli'), 'happier-cli', { quiet: true });
+  const out = await readFile(outputPath, 'utf-8');
+  assert.match(out, /\binstall\b/, `expected yarn install when tsc bin is missing, got:\n${out}`);
+});
+
+test('ensureDepsInstalled repairs foreign monorepo node_modules symlinks before refresh', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-pm-happy-monorepo-foreign-node-modules-'));
+  const foreign = await mkdtemp(join(tmpdir(), 'hs-pm-happy-monorepo-foreign-source-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(foreign, { recursive: true, force: true });
+  });
+
+  await mkdir(join(root, 'apps', 'ui'), { recursive: true });
+  await mkdir(join(root, 'apps', 'cli'), { recursive: true });
+  await mkdir(join(root, 'apps', 'server'), { recursive: true });
+  await writeFile(join(root, 'apps', 'ui', 'package.json'), '{}\n', 'utf-8');
+  await writeFile(
+    join(root, 'apps', 'cli', 'package.json'),
+    JSON.stringify({
+      name: '@happier-dev/cli',
+      scripts: { build: 'tsc --noEmit' },
+      devDependencies: { typescript: '5.9.3' },
+    }) + '\n',
+    'utf-8',
+  );
+  await writeFile(join(root, 'apps', 'server', 'package.json'), '{}\n', 'utf-8');
+  await writeFile(
+    join(root, 'package.json'),
+    JSON.stringify({
+      name: 'monorepo',
+      private: true,
+      workspaces: { packages: ['apps/ui', 'apps/cli', 'apps/server'] },
+    }) + '\n',
+    'utf-8',
+  );
+  await writeFile(join(root, 'yarn.lock'), '# yarn\n', 'utf-8');
+
+  await mkdir(join(foreign, 'node_modules'), { recursive: true });
+  await mkdir(join(foreign, 'apps', 'cli', 'node_modules'), { recursive: true });
+  await symlink(join(foreign, 'node_modules'), join(root, 'node_modules'));
+  await symlink(join(foreign, 'apps', 'cli', 'node_modules'), join(root, 'apps', 'cli', 'node_modules'));
+
+  const binDir = join(root, 'bin');
+  const outputPath = join(root, 'argv.txt');
+  await writeYarnArgDumpStub({ binDir, outputPath });
+
+  applyEnvOverrides(t, {
+    PATH: `${binDir}:/usr/bin:/bin`,
+    OUTPUT_PATH: outputPath,
+    HAPPIER_STACK_ENV_FILE: null,
+  });
+
+  await ensureDepsInstalled(join(root, 'apps', 'cli'), 'happier-cli', { quiet: true });
+  const out = await readFile(outputPath, 'utf-8');
+  assert.match(out, /\binstall\b/, `expected yarn install after repairing foreign node_modules symlinks, got:\n${out}`);
+  await assert.rejects(() => lstat(join(root, 'node_modules')));
+  await assert.rejects(() => lstat(join(root, 'apps', 'cli', 'node_modules')));
 });
 
 test('ensureDepsInstalled falls back to npm in binary mode when yarn is unavailable', async (t) => {

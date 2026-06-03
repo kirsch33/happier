@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
 import { pathExists } from '../fs/fs.mjs';
@@ -303,6 +303,99 @@ async function ensureServerGeneratedProviderOutputs(componentDir, installDir, { 
   });
 }
 
+async function isForeignNodeModulesSymlink(nodeModulesPath, allowedRoot) {
+  let linkStat = null;
+  try {
+    linkStat = await lstat(nodeModulesPath);
+  } catch {
+    return false;
+  }
+  if (!linkStat.isSymbolicLink()) {
+    return false;
+  }
+
+  let target = '';
+  try {
+    target = await realpath(nodeModulesPath);
+  } catch {
+    return true;
+  }
+  return !isPathInside(target, allowedRoot);
+}
+
+async function unlinkForeignNodeModulesSymlink(nodeModulesPath, allowedRoot) {
+  if (!(await isForeignNodeModulesSymlink(nodeModulesPath, allowedRoot))) {
+    return false;
+  }
+  await unlink(nodeModulesPath);
+  return true;
+}
+
+async function repairForeignMonorepoNodeModulesSymlinks({ monorepoRoot, installDir, componentDir }) {
+  let repaired = false;
+  repaired = await unlinkForeignNodeModulesSymlink(join(installDir, 'node_modules'), installDir) || repaired;
+
+  if (!monorepoRoot || installDir !== monorepoRoot) {
+    repaired = await unlinkForeignNodeModulesSymlink(join(componentDir, 'node_modules'), installDir) || repaired;
+    return repaired;
+  }
+
+  const workspacePkgJsonPaths = await collectWorkspacePackageJsonPaths(monorepoRoot);
+  const workspaceDirs = new Set([componentDir, ...workspacePkgJsonPaths.map((pkgJsonPath) => dirname(pkgJsonPath))]);
+  for (const workspaceDir of workspaceDirs) {
+    repaired = await unlinkForeignNodeModulesSymlink(join(workspaceDir, 'node_modules'), monorepoRoot) || repaired;
+  }
+  return repaired;
+}
+
+function packageHasDependency(pkgJson, name) {
+  return Boolean(
+    pkgJson?.dependencies?.[name] ||
+    pkgJson?.devDependencies?.[name] ||
+    pkgJson?.optionalDependencies?.[name],
+  );
+}
+
+function packageScriptsReferenceBin(pkgJson, binName) {
+  const escaped = String(binName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|[\\s;&|()])${escaped}(?=$|[\\s;&|()])`);
+  return Object.values(pkgJson?.scripts ?? {}).some((script) => re.test(String(script ?? '')));
+}
+
+function collectExpectedPackageManagerBins(pkgJson) {
+  const bins = new Set();
+  if (packageHasDependency(pkgJson, 'typescript') && packageScriptsReferenceBin(pkgJson, 'tsc')) {
+    bins.add('tsc');
+  }
+  if (packageHasDependency(pkgJson, 'expo') && packageScriptsReferenceBin(pkgJson, 'expo')) {
+    bins.add('expo');
+  }
+  return Array.from(bins);
+}
+
+async function collectMissingExpectedPackageManagerBins({ componentDir, installDir, componentPkg }) {
+  const expectedBins = collectExpectedPackageManagerBins(componentPkg);
+  if (expectedBins.length === 0) {
+    return [];
+  }
+
+  const binDirs = [join(componentDir, 'node_modules', '.bin'), join(installDir, 'node_modules', '.bin')];
+  const missing = [];
+  for (const bin of expectedBins) {
+    const candidates = [];
+    for (const binDir of binDirs) {
+      candidates.push(join(binDir, bin));
+      if (process.platform === 'win32') {
+        candidates.push(join(binDir, `${bin}.cmd`));
+      }
+    }
+    if (!candidates.some((candidate) => existsSync(candidate))) {
+      missing.push(bin);
+    }
+  }
+  return missing;
+}
+
 async function ensureYarnReady({ dir, env, quiet = false }) {
   const e = env && typeof env === 'object' ? env : process.env;
   // In stack mode we isolate HOME/cache; key by effective HOME+XDG cache so we only do this once.
@@ -445,6 +538,7 @@ export async function ensureDepsInstalled(dir, label, { quiet = false, env: envI
 
   const installPkgJson = join(installDir, 'package.json');
   const nodeModules = join(installDir, 'node_modules');
+  const componentPkg = await readPackageJsonIfExists(componentPkgJson);
   const stdio = quiet ? 'ignore' : 'inherit';
   const env = await preparePmEnv(installDir, envIn);
   const pm = await getComponentPm(installDir, env);
@@ -452,11 +546,19 @@ export async function ensureDepsInstalled(dir, label, { quiet = false, env: envI
     await ensureYarnReady({ dir: installDir, env, quiet });
   }
   const installArgs = pm.name === 'yarn' ? ['install', '--production=false'] : ['install'];
+  const skipRefresh =
+    String(env?.HAPPIER_STACK_SKIP_REFRESH_DEPS ?? '').trim() === '1' ||
+    String(env?.HAPPIER_STACK_DISABLE_REFRESH_DEPS ?? '').trim() === '1';
+  const allowRefresh =
+    String(env?.HAPPIER_STACK_SERVICE_ALLOW_REFRESH_DEPS ?? '').trim() === '1' ||
+    String(env?.HAPPIER_STACK_ALLOW_REFRESH_DEPS ?? '').trim() === '1';
+  const refreshBlockedByService = isServiceMode(env) && !allowRefresh;
+
+  if (!skipRefresh && !refreshBlockedByService) {
+    await repairForeignMonorepoNodeModulesSymlinks({ monorepoRoot, installDir, componentDir });
+  }
 
   if (await pathExists(nodeModules)) {
-    const skipRefresh =
-      String(env?.HAPPIER_STACK_SKIP_REFRESH_DEPS ?? '').trim() === '1' ||
-      String(env?.HAPPIER_STACK_DISABLE_REFRESH_DEPS ?? '').trim() === '1';
     if (skipRefresh) {
       await ensureServerGeneratedProviderOutputs(componentDir, installDir, { quiet, env, pm });
       return;
@@ -465,10 +567,7 @@ export async function ensureDepsInstalled(dir, label, { quiet = false, env: envI
     // In service contexts (launchd/systemd), avoid doing surprise dependency refreshes just because
     // files changed on disk. This keeps long-running stacks resilient even if the checkout becomes
     // temporarily un-buildable (e.g. mid-rebase / failing typecheck).
-    const allowRefresh =
-      String(env?.HAPPIER_STACK_SERVICE_ALLOW_REFRESH_DEPS ?? '').trim() === '1' ||
-      String(env?.HAPPIER_STACK_ALLOW_REFRESH_DEPS ?? '').trim() === '1';
-    if (isServiceMode(env) && !allowRefresh) {
+    if (refreshBlockedByService) {
       await ensureServerGeneratedProviderOutputs(componentDir, installDir, { quiet, env, pm });
       return;
     }
@@ -532,10 +631,21 @@ export async function ensureDepsInstalled(dir, label, { quiet = false, env: envI
       const intM = await mtimeMs(yarnIntegrity);
       const patchM = await patchesMtimeMs();
       const nodeModulesM = intM || await mtimeMs(nodeModules);
-      if (!nodeModulesM || lockM > nodeModulesM || pkgM > nodeModulesM || workspacePkgM > nodeModulesM || patchM > nodeModulesM) {
+      const missingBins = await collectMissingExpectedPackageManagerBins({ componentDir, installDir, componentPkg });
+      if (
+        !nodeModulesM ||
+        lockM > nodeModulesM ||
+        pkgM > nodeModulesM ||
+        workspacePkgM > nodeModulesM ||
+        patchM > nodeModulesM ||
+        missingBins.length > 0
+      ) {
         if (!quiet) {
           // eslint-disable-next-line no-console
-          console.log(`[local] refreshing ${label} dependencies (yarn.lock/package.json/workspace package.json/patches changed)...`);
+          const reason = missingBins.length > 0
+            ? `missing package-manager bins: ${missingBins.join(', ')}`
+            : 'yarn.lock/package.json/workspace package.json/patches changed';
+          console.log(`[local] refreshing ${label} dependencies (${reason})...`);
         }
         await run(pm.cmd, installArgs, { cwd: installDir, stdio, env });
       }
