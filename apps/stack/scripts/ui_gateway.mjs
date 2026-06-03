@@ -7,6 +7,32 @@ import { readFile, stat } from 'node:fs/promises';
 import { parseArgs } from './utils/cli/args.mjs';
 import { printResult, wantsHelp, wantsJson } from './utils/cli/cli.mjs';
 
+// Transient peer-disconnect error codes. A client/upstream dropping the
+// connection (reset/broken pipe/abort) must never be fatal to the gateway: an
+// unhandled 'error' on a raw socket/stream terminates the Node process, which
+// previously crash-looped the whole stack. Non-transient errors are re-thrown.
+const TRANSIENT_NET_CODES = new Set(['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ECANCELED']);
+
+function isTransientNetError(err) {
+  return Boolean(err) && TRANSIENT_NET_CODES.has(err.code);
+}
+
+// Attach an 'error' handler to a raw socket/stream so a transient peer
+// disconnect is logged-and-swallowed instead of crashing the process. Real
+// (non-transient) errors are re-thrown so they are never silently masked.
+function guardTransientStream(stream, context) {
+  if (!stream || typeof stream.on !== 'function') return stream;
+  stream.on('error', (err) => {
+    if (isTransientNetError(err)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[ui-gateway] transient ${err.code} on ${context} (ignored)`);
+      return;
+    }
+    throw err;
+  });
+  return stream;
+}
+
 function usage() {
   return [
     '[ui-gateway] usage:',
@@ -79,6 +105,8 @@ async function sendIndex({ uiRoot, res }) {
 }
 
 function proxyHttp({ target, req, res, rewritePath = (p) => p }) {
+  guardTransientStream(req, 'proxyHttp client req');
+  guardTransientStream(res, 'proxyHttp client res');
   const url = new URL(target);
   const method = req.method || 'GET';
   const headers = { ...req.headers };
@@ -95,6 +123,7 @@ function proxyHttp({ target, req, res, rewritePath = (p) => p }) {
       headers,
     },
     (up) => {
+      guardTransientStream(up, 'proxyHttp upstream res');
       res.writeHead(up.statusCode || 502, up.headers);
       up.pipe(res);
     }
@@ -107,6 +136,7 @@ function proxyHttp({ target, req, res, rewritePath = (p) => p }) {
 }
 
 function proxyUpgrade({ target, req, socket, head }) {
+  // The downstream client socket is already guarded at the server 'upgrade' seam.
   const url = new URL(target);
   const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
 
@@ -219,6 +249,7 @@ async function main() {
 
   server.on('upgrade', (req, socket, head) => {
     try {
+      guardTransientStream(socket, 'upgrade client socket');
       const url = req.url || '';
       // socket.io upgrades for realtime updates
       if (url.startsWith('/v1/updates')) {
@@ -232,6 +263,29 @@ async function main() {
       } catch {
         // ignore
       }
+    }
+  });
+
+  // Malformed/half-open client connections surface as 'clientError' on the HTTP
+  // server. Without a handler Node may emit a fatal socket error; respond 400
+  // for live sockets and swallow transient resets, re-throwing anything else.
+  server.on('clientError', (err, socket) => {
+    if (isTransientNetError(err)) {
+      try {
+        socket.destroy();
+      } catch {
+        // socket already gone
+      }
+      return;
+    }
+    if (socket.writable) {
+      socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+      return;
+    }
+    try {
+      socket.destroy();
+    } catch {
+      // socket already gone
     }
   });
 
