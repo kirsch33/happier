@@ -43,6 +43,10 @@ function isTouchOrCoarsePointer(nav: NavigatorLike | null): boolean {
     return typeof nav?.maxTouchPoints === 'number' && nav.maxTouchPoints > 0;
 }
 
+export function isWebTouchOrCoarsePointerHost(): boolean {
+    return isTouchOrCoarsePointer(readNavigator());
+}
+
 export function isWebMobileLikeViewport(params: Readonly<{ width: number; height: number }>): boolean {
     const width = Number(params.width);
     const height = Number(params.height);

@@ -64,7 +64,7 @@ describe('materializeClaudeWorkspaceTrust', () => {
     });
   });
 
-  it('respects an explicit user distrust decision in the source config', async () => {
+  it('does not copy a source false trust state into the managed connected-service home', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-trust-home-'));
     const sourceDir = await mkdtemp(join(tmpdir(), 'happier-claude-trust-source-'));
     const targetDir = await mkdtemp(join(tmpdir(), 'happier-claude-trust-target-'));
@@ -88,11 +88,12 @@ describe('materializeClaudeWorkspaceTrust', () => {
       sessionDirectory,
     });
 
-    const written = await readFile(join(targetDir, '.claude.json'), 'utf8').catch(() => null);
-    if (written !== null) {
-      const parsed = JSON.parse(written) as { projects?: Record<string, { hasTrustDialogAccepted?: boolean }> };
-      expect(parsed.projects?.[sessionDirectory]?.hasTrustDialogAccepted).not.toBe(true);
-    }
+    const written = JSON.parse(await readFile(join(targetDir, '.claude.json'), 'utf8')) as Record<string, unknown>;
+    expect(written.projects).toEqual({
+      [sessionDirectory]: {
+        hasTrustDialogAccepted: true,
+      },
+    });
   });
 
   it('merges the trust projection into an existing target project entry without dropping claude-written state', async () => {

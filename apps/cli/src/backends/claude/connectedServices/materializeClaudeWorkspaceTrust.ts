@@ -74,7 +74,7 @@ function readProjectTrustProjection(
     return { hasExplicitTrustState: false, projection: null };
   }
   if (projectConfig.hasTrustDialogAccepted !== true) {
-    return { hasExplicitTrustState: true, projection: null };
+    return { hasExplicitTrustState: false, projection: null };
   }
   return {
     hasExplicitTrustState: true,
@@ -98,20 +98,16 @@ async function resolveWorkspaceTrustProjection(params: Readonly<{
     if (!rootConfig) continue;
     const result = readProjectTrustProjection(rootConfig, params.sessionDirectory);
     if (result.projection) return result.projection;
-    if (result.hasExplicitTrustState && index === 0 && resolveClaudeConfigDirOverride(params.sourceEnv)) {
-      return null;
-    }
-    if (result.hasExplicitTrustState) {
-      // The user explicitly declined trust for this directory in their own config — respect it.
-      return null;
-    }
   }
   // QAC-1: no source config carries any trust state for this directory (typical for new
   // directories, worktrees, and scratch workspaces never opened with native claude). Creating a
   // Happier session in a directory IS the user's trust decision, and Claude Code's interactive
   // TUI silently skips EXECUTING all hooks (SessionStart/Stop/PreToolUse/...) in untrusted
   // workspaces — which kills session-id persistence, lifecycle detection, and permission hooks.
-  // Default to trusting the session directory in the Happier-managed materialized home.
+  // Claude also persists `hasTrustDialogAccepted: false` as a default/unaccepted project state.
+  // Copying that state into a Happier-managed isolated home makes every connected-service session
+  // appear healthy in the terminal while silently disabling the hooks Happier needs. Treat only a
+  // positive source trust as authoritative and otherwise grant trust for this managed launch.
   return { hasTrustDialogAccepted: true };
 }
 

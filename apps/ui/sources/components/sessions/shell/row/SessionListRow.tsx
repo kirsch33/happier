@@ -4,6 +4,7 @@ import Animated from 'react-native-reanimated';
 import { GestureDetector } from 'react-native-gesture-handler';
 
 import type { TreeDropOverlaySharedValues } from '@/components/ui/treeDragDrop';
+import { isWebTouchOrCoarsePointerHost } from '@/utils/platform/webMobileHeuristics';
 import { SessionItem, type SessionItemProps } from '../SessionItem';
 import {
     useSessionInlineDrag,
@@ -107,7 +108,8 @@ export const SessionListRow = React.memo(function SessionListRow(props: SessionL
 
     const isWeb = Platform.OS === 'web';
     const isIos = Platform.OS === 'ios';
-    const inlineDragEnabled = isWeb || isIos;
+    const isWebTouchOrCoarsePointer = isWeb && isWebTouchOrCoarsePointerHost();
+    const inlineDragEnabled = (isWeb && !isWebTouchOrCoarsePointer) || isIos;
     const rowDragEnabled = inlineDragEnabled && dragEnabled;
     const onNativeContextMenuOpenChange = itemProps.onNativeContextMenuOpenChange;
     const handleLongPressActivated = React.useCallback(() => {

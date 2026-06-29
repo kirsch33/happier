@@ -230,6 +230,7 @@ describe('SessionListRow reorder handle', () => {
         standardCleanup();
         navigateToSessionSpy.mockClear();
         vi.useRealTimers();
+        vi.unstubAllGlobals();
     });
 
     it('commits a handle drag without allowing the release press to open the source session', async () => {
@@ -326,6 +327,72 @@ describe('SessionListRow reorder handle', () => {
 
         expect(navigateToSessionSpy).toHaveBeenCalledTimes(1);
         expect(navigateToSessionSpy).toHaveBeenCalledWith('sess_source', { serverId: 'server_a' });
+    });
+
+    it('does not render or attach the reorder handle on coarse-pointer web hosts', async () => {
+        vi.stubGlobal('navigator', {
+            maxTouchPoints: 5,
+            userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        } as any);
+        vi.stubGlobal('window', {
+            matchMedia: (query: string) => ({
+                matches:
+                    query.includes('pointer: coarse')
+                    || query.includes('any-pointer: coarse')
+                    || query.includes('hover: none')
+                    || query.includes('any-hover: none'),
+            }),
+        } as any);
+
+        const { SessionListRow } = await import('./SessionListRow');
+        const session = createSessionFixture({
+            id: 'sess_source',
+            active: true,
+            metadata: null,
+        });
+        const onDragStart = vi.fn();
+
+        const screen = await renderScreen(
+            <SessionListRow
+                session={session}
+                rowModel={createSessionItemTestRowModel({
+                    session,
+                    serverId: 'server_a',
+                    serverName: 'Server A',
+                    showServerBadge: true,
+                })}
+                serverId="server_a"
+                serverName="Server A"
+                showServerBadge={true}
+                selected={false}
+                isFirst={true}
+                isLast={false}
+                isSingle={false}
+                variant="default"
+                compact={false}
+                sessionKey="sess_source"
+                treeRowId="session:server_a:sess_source"
+                groupKey="workspace-root:server_a"
+                onDragStart={onDragStart}
+                resolveDropResult={() => lineResolved()}
+                onDropResult={vi.fn()}
+                onDragCancel={vi.fn()}
+                isDragActive={false}
+                isBeingDragged={false}
+                dataIndex={0}
+                overlayShared={overlayShared()}
+                onRegisterTreeRowBounds={vi.fn()}
+                onUnregisterTreeRowBounds={vi.fn()}
+            />,
+        );
+
+        const rightArea = requireTestInstance(screen.findByTestId('session-item-right-area'), 'session item right area');
+        await act(async () => {
+            triggerHoverEnter(rightArea);
+        });
+
+        expect(screen.findByTestId('session-item-reorder-handle')).toBeNull();
+        expect(onDragStart).not.toHaveBeenCalled();
     });
 
     it('does not render or attach the reorder handle when drag affordance is disabled', async () => {
