@@ -173,6 +173,26 @@ describe('parseClaudeScreenState — dialogs and editors', () => {
     expect(state.permissionPromptVisible).toBe(true);
   });
 
+  it('does not mistake assistant option prose for a native permission prompt', () => {
+    const state = parseClaudeScreenState([
+      'How do you want to proceed?',
+      '',
+      '<options>',
+      '<option>Re-post the full R1-R5 detail</option>',
+      '<option>Go one-by-one, starting fresh at R1</option>',
+      '</options>',
+      '',
+      '────────────────────────────────────────────────',
+      '❯ Go one-by-one, starting fresh at R1',
+      '────────────────────────────────────────────────',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.permissionPromptVisible).toBe(false);
+    expect(state.userDraftPresent).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('user_draft');
+  });
+
   it('recognizes the /permissions editor screen (veto target, never a mode setter)', () => {
     const state = parseClaudeScreenState(CLAUDE_2_1_170.permissionsEditor);
     expect(state.permissionEditorOpen).toBe(true);

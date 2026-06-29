@@ -96,7 +96,9 @@ const EFFORT_CHANGE_DIALOG = /change effort level\?/i;
 // match when the prompt itself starts with `<digit>.` — accepted false-positive toward safety.
 const NUMBERED_SELECTION_OPTION = /(?:^|\n)[^\S\n]*❯[^\S\n]*\d+\./u;
 const EFFORT_CHANGE_DIALOG_TARGET = /switching to\s+([a-z]+)\s+means the full history/i;
-const PERMISSION_PROMPT = /do you want to proceed\?/i;
+const PERMISSION_PROMPT_HEAD = /(?:^|\n)[^\S\n]*do you want to proceed\?[^\S\n]*(?:\n|$)/i;
+const PERMISSION_PROMPT_REJECT_OPTION =
+  /(?:^|\n)[^\S\n]*(?:\d+\.[^\S\n]*)?no,\s*tell claude what to do differently\b/i;
 // Legacy wording plus the real 2.1.170 `/permissions` editor tab row
 // ("Permissions  Recently denied  Allow  Ask  Deny  Workspace"). The "Recently denied" + "Deny" tab
 // pair is unique to the editor and never appears together in normal output.
@@ -394,7 +396,9 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     ? (EFFORT_CHANGE_DIALOG_TARGET.exec(text)?.[1]?.toLowerCase() ?? null)
     : null;
   const trustFolderPromptVisible = TRUST_FOLDER_PROMPT.test(text);
-  const permissionPromptVisible = !trustFolderPromptVisible && PERMISSION_PROMPT.test(text);
+  const permissionPromptVisible = !trustFolderPromptVisible
+    && PERMISSION_PROMPT_HEAD.test(text)
+    && PERMISSION_PROMPT_REJECT_OPTION.test(text);
   const permissionEditorOpen = PERMISSION_EDITOR.test(text) || PERMISSION_EDITOR_HEADER.test(text);
   const queuedMessageBannerVisible = QUEUED_MESSAGE_BANNER.test(text);
   const generating = ESC_TO_INTERRUPT.test(text) || GENERATING_SPINNER_LINE.test(text) || queuedMessageBannerVisible;

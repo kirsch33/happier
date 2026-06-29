@@ -44,6 +44,20 @@ const UNRECOGNIZED_DIALOG = [
   '  2. No, go back',
 ].join('\n');
 
+const ASSISTANT_OPTIONS_WITH_DRAFT = [
+  'How do you want to proceed?',
+  '',
+  '<options>',
+  '<option>Re-post the full R1-R5 detail</option>',
+  '<option>Go one-by-one, starting fresh at R1</option>',
+  '</options>',
+  '',
+  '────────────────────────────────────────────────',
+  '❯ Go one-by-one, starting fresh at R1',
+  '────────────────────────────────────────────────',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n');
+
 const TRANSCRIPT_ONLY = [
   'Claude finished the previous answer.',
   'No composer visible in this capture.',
@@ -126,6 +140,21 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
 
     expect(result).toMatchObject({ status: 'failed', reason: 'clear_failed' });
     expect(port.sentKeys).toEqual(['Escape', 'Escape']);
+  });
+
+  it('clears a draft below assistant option prose that says "How do you want to proceed?"', async () => {
+    const port = createFakeControlPort({
+      captures: [ASSISTANT_OPTIONS_WITH_DRAFT, EMPTY_COMPOSER],
+    });
+
+    const result = await clearUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(port.sentKeys).toEqual(['Escape']);
   });
 
   it('refuses to clear while Claude is generating because Escape would interrupt the turn', async () => {
