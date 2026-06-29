@@ -64,13 +64,17 @@ export function deriveSessionRuntimePresentationState(
         && isFreshTimestamp(thinkingAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS)
         && !blocksLegacyThinking;
     const freshInProgress = freshInProgressSignals.length > 0;
-    const working = freshInProgress || freshThinking;
-    const runtimeActivelyWorking = isLiveRuntime && working;
     const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
     const hasFreshPendingRequest =
         pendingRequestObservedAt !== null
         && isFreshTimestamp(pendingRequestObservedAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS);
     const hasKnownPendingRequest = pendingRequestObservedAt !== null;
+    const hasLivePendingRuntimeRequest =
+        isLiveRuntime
+        && (input.hasPendingPermissionRequests === true || input.hasPendingUserActionRequests === true)
+        && (hasFreshPendingRequest || hasKnownPendingRequest);
+    const working = (freshInProgress || freshThinking) && !hasLivePendingRuntimeRequest;
+    const runtimeActivelyWorking = isLiveRuntime && working;
 
     return {
         isOnline,
