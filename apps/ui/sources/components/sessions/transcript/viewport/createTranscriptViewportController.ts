@@ -43,6 +43,16 @@ export function createTranscriptViewportController(): TranscriptViewportControll
                         force: true,
                         animated: true,
                     };
+                case 'jump-to-top':
+                    mode = 'jump-to-top';
+                    return {
+                        kind: 'scroll-offset',
+                        sessionId: input.sessionId,
+                        reason: 'jump-to-top',
+                        mode,
+                        offsetY: 0,
+                        animated: true,
+                    };
                 case 'pin-bottom':
                     mode = input.mode;
                     return {

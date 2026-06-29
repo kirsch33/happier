@@ -1408,7 +1408,7 @@ describe('useSessionStatus', () => {
         }
     });
 
-    it('refreshes when a fresh pending request expires without a storage update', async () => {
+    it('keeps a live pending request actionable after the freshness window expires', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(1_000_000);
         try {
@@ -1428,7 +1428,7 @@ describe('useSessionStatus', () => {
 
             await flushHookEffects({ cycles: 1, turns: 0, advanceTimersMs: 5 });
 
-            expect(hook.getCurrent().state).toBe('waiting');
+            expect(hook.getCurrent().state).toBe('permission_required');
         } finally {
             vi.useRealTimers();
         }

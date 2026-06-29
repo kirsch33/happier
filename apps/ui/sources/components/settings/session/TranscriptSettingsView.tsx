@@ -870,14 +870,10 @@ export const TranscriptSettingsView = React.memo(function TranscriptSettingsView
                         <Switch
                             value={transcriptScrollJumpToBottomEnabled === true}
                             onValueChange={(v) => setTranscriptScrollJumpToBottomEnabled(Boolean(v) as any)}
-                            disabled={transcriptScrollPinEnabled !== true}
                         />
                     }
                     showChevron={false}
-                    onPress={() => {
-                        if (transcriptScrollPinEnabled !== true) return;
-                        setTranscriptScrollJumpToBottomEnabled((transcriptScrollJumpToBottomEnabled !== true) as any);
-                    }}
+                    onPress={() => setTranscriptScrollJumpToBottomEnabled((transcriptScrollJumpToBottomEnabled !== true) as any)}
                 />
 
                 <Item

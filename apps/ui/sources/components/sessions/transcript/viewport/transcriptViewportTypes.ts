@@ -5,6 +5,7 @@ export type TranscriptViewportMode =
     | 'restore-distance'
     | 'user-unpinned'
     | 'jump-to-bottom'
+    | 'jump-to-top'
     | 'jump-to-seq';
 
 export type TranscriptViewportPlatform = 'web' | 'ios' | 'android' | 'native-other';
@@ -19,6 +20,7 @@ export type TranscriptViewportScrollReason =
     | 'entry-restore'
     | 'prepend-restore'
     | 'jump-to-bottom'
+    | 'jump-to-top'
     | 'jump-to-seq'
     | 'stream-append'
     | 'mount-settle'
@@ -75,6 +77,10 @@ export type TranscriptViewportControllerInput =
     }>
     | Readonly<{
         type: 'jump-to-bottom';
+        sessionId: string;
+    }>
+    | Readonly<{
+        type: 'jump-to-top';
         sessionId: string;
     }>
     | Readonly<{

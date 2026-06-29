@@ -63,6 +63,28 @@ describe('projectSessionListPlacement', () => {
         });
     });
 
+    it('promotes a stale live pending user action as action-required instead of working', () => {
+        const nowMs = 1_000_000;
+
+        expect(projectSessionListPlacement({
+            nowMs,
+            session: makeSession({
+                active: true,
+                activeAt: nowMs - 1_000,
+                presence: 'online',
+                latestTurnStatus: 'in_progress',
+                latestTurnStatusObservedAt: nowMs - 130_000,
+                hasPendingUserActionRequests: true,
+                pendingRequestObservedAt: nowMs - 130_000,
+                lastRuntimeIssue: null,
+            }),
+        })).toEqual({
+            kind: 'action_required',
+            timestamp: nowMs - 130_000,
+            retainedWorking: false,
+        });
+    });
+
     it('keeps terminal turn projection authoritative over fresh legacy thinking evidence', () => {
         const nowMs = 10_000;
 

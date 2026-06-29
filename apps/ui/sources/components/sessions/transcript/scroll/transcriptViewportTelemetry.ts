@@ -366,6 +366,7 @@ const SCROLL_REASONS = new Set<TranscriptViewportTelemetryScrollReason>([
     'entry-restore',
     'prepend-restore',
     'jump-to-bottom',
+    'jump-to-top',
     'jump-to-seq',
     'stream-append',
     'mount-settle',
@@ -532,6 +533,7 @@ const MODES = new Set<TranscriptViewportMode>([
     'restore-distance',
     'user-unpinned',
     'jump-to-bottom',
+    'jump-to-top',
     'jump-to-seq',
 ]);
 

@@ -104,6 +104,40 @@ function shouldEnableFallbackTextNativeSelection(platformOS: typeof Platform.OS)
   return platformOS !== 'ios';
 }
 
+function readWebCoarsePointer(): boolean {
+  if (Platform.OS !== 'web') return false;
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(hover: none)').matches || window.matchMedia('(pointer: coarse)').matches;
+}
+
+function useWebCoarsePointer(): boolean {
+  const [hasCoarsePointer, setHasCoarsePointer] = React.useState(readWebCoarsePointer);
+  React.useEffect(() => {
+    if (Platform.OS !== 'web') return undefined;
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const queries = [window.matchMedia('(hover: none)'), window.matchMedia('(pointer: coarse)')];
+    const update = () => setHasCoarsePointer(queries.some((query) => query.matches));
+    update();
+    for (const query of queries) {
+      if (typeof query.addEventListener === 'function') {
+        query.addEventListener('change', update);
+      } else if (typeof query.addListener === 'function') {
+        query.addListener(update);
+      }
+    }
+    return () => {
+      for (const query of queries) {
+        if (typeof query.removeEventListener === 'function') {
+          query.removeEventListener('change', update);
+        } else if (typeof query.removeListener === 'function') {
+          query.removeListener(update);
+        }
+      }
+    };
+  }, []);
+  return hasCoarsePointer;
+}
+
 function normalizeStreamSegmentStateForRendering(value: unknown): StreamSegmentStateForRendering | null {
   return value === 'streaming' || value === 'complete' || value === 'interrupted' ? value : null;
 }
@@ -332,6 +366,7 @@ function UserTextBlock(props: {
   const [isMessageHovered, setIsMessageHovered] = React.useState(false);
   const [isCopyButtonHovered, setIsCopyButtonHovered] = React.useState(false);
   const isWeb = Platform.OS === 'web';
+  const hasCoarsePointer = useWebCoarsePointer();
   const router = useRouter();
   const pathname = usePathname();
   const isDiscarded = isCommittedMessageDiscarded(props.metadata, props.message.localId);
@@ -414,8 +449,9 @@ function UserTextBlock(props: {
   const selectionEnabled = props.messageDisplayCommon.transcriptMessageSelectionEnabled === true && selectableMessage != null;
   const selectionRow = useOptionalTranscriptSelectionRow(props.message.id);
   const selectionModeActionsVisible = selectionEnabled && selectionRow.isSelectionMode;
-  const showCopyButton = shouldShowMessageCopyButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
-  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
+  const actionVisibilityInput = { platformOS: Platform.OS, hasCoarsePointer, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible };
+  const showCopyButton = shouldShowMessageCopyButton(actionVisibilityInput);
+  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton(actionVisibilityInput);
   const showMessageActions = showCopyButton || showSelectButton;
   const copyText = selectableMessage?.text ?? (isStructuredOnly ? props.message.text : (markdownText ?? props.message.displayText ?? props.message.text));
   const actionPointerEvents = resolveMessageActionPointerEvents({ showActions: showMessageActions });
@@ -697,6 +733,7 @@ function AgentTextBlock(props: {
   const [isMessageHovered, setIsMessageHovered] = React.useState(false);
   const [isCopyButtonHovered, setIsCopyButtonHovered] = React.useState(false);
   const isWeb = Platform.OS === 'web';
+  const hasCoarsePointer = useWebCoarsePointer();
   const fallbackTextSelectable = shouldEnableFallbackTextNativeSelection(Platform.OS);
   const router = useRouter();
   const pathname = usePathname();
@@ -788,8 +825,9 @@ function AgentTextBlock(props: {
     return null;
   }
 
-  const showCopyButton = shouldShowMessageCopyButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
-  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton({ platformOS: Platform.OS, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible });
+  const actionVisibilityInput = { platformOS: Platform.OS, hasCoarsePointer, isMessageHovered, isCopyButtonHovered, selectionModeActive: selectionModeActionsVisible };
+  const showCopyButton = shouldShowMessageCopyButton(actionVisibilityInput);
+  const showSelectButton = selectionEnabled && shouldShowMessageSelectButton(actionVisibilityInput);
   const showMessageActions = showCopyButton || showSelectButton;
   const actionPointerEvents = resolveMessageActionPointerEvents({ showActions: showMessageActions });
   const timestampPresentation = resolveMessageTimestampPresentation({

@@ -70,6 +70,7 @@ export function deriveSessionRuntimePresentationState(
     const hasFreshPendingRequest =
         pendingRequestObservedAt !== null
         && isFreshTimestamp(pendingRequestObservedAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS);
+    const hasKnownPendingRequest = pendingRequestObservedAt !== null;
 
     return {
         isOnline,
@@ -84,11 +85,11 @@ export function deriveSessionRuntimePresentationState(
         freshPermissionRequired:
             input.hasPendingPermissionRequests === true
             && isLiveRuntime
-            && (working || hasFreshPendingRequest),
+            && (working || hasFreshPendingRequest || hasKnownPendingRequest),
         freshActionRequired:
             input.hasPendingUserActionRequests === true
             && isLiveRuntime
-            && (working || hasFreshPendingRequest),
+            && (working || hasFreshPendingRequest || hasKnownPendingRequest),
     };
 }
 

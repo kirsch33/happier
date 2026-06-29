@@ -51,6 +51,7 @@ import { SyncPerformanceReactProfiler } from '@/components/ui/performance/SyncPe
 import { TranscriptFirstPaintPlaceholder } from '@/components/sessions/transcript/TranscriptFirstPaintPlaceholder';
 import { resolveTranscriptToolCallsCollapsedPreviewCount } from '@/sync/domains/settings/transcriptToolCallsCollapsedPreviewCount';
 import { JumpToBottomButton } from '@/components/sessions/transcript/scroll/JumpToBottomButton';
+import { JumpToTopButton } from '@/components/sessions/transcript/scroll/JumpToTopButton';
 import { resolveJumpToBottomAffordanceState } from '@/components/sessions/transcript/scroll/jumpToBottomAffordanceState';
 import { resolveNextJumpToBottomDistanceVisibilityState } from '@/components/sessions/transcript/scroll/jumpToBottomVisibilityDistanceState';
 import {
@@ -642,7 +643,11 @@ export type ChatListBottomNotice = {
     body: string;
 };
 
-function readSessionViewportForEntry(sessionId: string) {
+function readSessionViewportForEntry(
+    sessionId: string,
+    options?: Readonly<{ jumpToSeq?: number | null; platformOS?: typeof Platform.OS }>,
+) {
+    if (options?.platformOS === 'web' && options.jumpToSeq == null) return null;
     return typeof sync.getSessionViewport === 'function' ? sync.getSessionViewport(sessionId) : null;
 }
 
@@ -1565,7 +1570,7 @@ const ChatListInternal = React.memo((props: {
     const lastScrollOffsetForIntentRef = React.useRef<number | null>(null);
     const bottomFollowModeStateRef = React.useRef<TranscriptBottomFollowModeState>({
         dragSession: null,
-        mode: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId))
+        mode: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId, { platformOS: Platform.OS, jumpToSeq: props.jumpToSeq }))
             ? 'following'
             : 'released',
     });
@@ -2026,7 +2031,7 @@ const ChatListInternal = React.memo((props: {
     const transcriptToolCallsCollapsedPreviewCountSetting = useSetting('transcriptToolCallsCollapsedPreviewCount');
 
     const [scrollPin, setScrollPin] = React.useState<TranscriptScrollPinState>(() => ({
-        isPinned: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId)),
+        isPinned: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId, { platformOS: Platform.OS, jumpToSeq: props.jumpToSeq })),
         newActivityCount: 0,
         lastActivityKey: null,
     }));
@@ -2053,6 +2058,8 @@ const ChatListInternal = React.memo((props: {
     }, [commitScrollPinState]);
     const [jumpToBottomDistanceFromBottom, setJumpToBottomDistanceFromBottom] = React.useState(0);
     const jumpToBottomDistanceFromBottomRef = React.useRef(0);
+    const [jumpToTopVisible, setJumpToTopVisible] = React.useState(false);
+    const jumpToTopVisibleRef = React.useRef(false);
     const isPinnedRef = React.useRef(true);
     const sessionEntryViewportRef = React.useRef<{
         sessionId: string;
@@ -2064,7 +2071,7 @@ const ChatListInternal = React.memo((props: {
         anchor: SessionViewportAnchorSnapshot | null;
     } | null>(null);
     if (sessionEntryViewportRef.current?.sessionId !== props.sessionId) {
-        const sessionViewport = readSessionViewportForEntry(props.sessionId);
+        const sessionViewport = readSessionViewportForEntry(props.sessionId, { platformOS: Platform.OS, jumpToSeq: props.jumpToSeq });
         const shouldFollowBottom = resolveSessionEntryBottomFollow(sessionViewport);
         // Persisted viewports are untrusted input: a non-finite stored offsetY must read as
         // "no remembered offset" everywhere downstream (entry restore, exit-flush fallback).
@@ -2547,6 +2554,8 @@ const ChatListInternal = React.memo((props: {
         setScrollPin(nextScrollPinState);
         jumpToBottomDistanceFromBottomRef.current = offsetY;
         setJumpToBottomDistanceFromBottom(offsetY);
+        jumpToTopVisibleRef.current = false;
+        setJumpToTopVisible(false);
         emitViewportChange({
             isPinned: shouldFollowBottom,
             offsetY,
@@ -2587,6 +2596,7 @@ const ChatListInternal = React.memo((props: {
             ? Math.max(0, Math.min(TRANSCRIPT_SCROLL_JUMP_TO_BOTTOM_REVEAL_VIEWPORT_RATIO_MAX, transcriptScrollJumpToBottomRevealViewportRatio))
             : settingsDefaults.transcriptScrollJumpToBottomRevealViewportRatio;
     const jumpRevealOffsetThresholdPx = Math.max(pinThresholdPx, Math.trunc(listLayoutHeight * jumpRevealViewportRatio));
+    const jumpToTopRevealOffsetThresholdPx = Math.max(pinThresholdPx, Math.trunc(listLayoutHeight * 0.25));
     const commitJumpToBottomDistanceForVisibility = React.useCallback((distanceFromBottom: number) => {
         jumpToBottomDistanceFromBottomRef.current = distanceFromBottom;
         setJumpToBottomDistanceFromBottom((previousCommittedDistance) =>
@@ -2597,6 +2607,12 @@ const ChatListInternal = React.memo((props: {
             })
         );
     }, [jumpRevealOffsetThresholdPx]);
+    const commitJumpToTopOffsetForVisibility = React.useCallback((offsetFromTop: number) => {
+        const nextVisible = Math.max(0, Math.trunc(offsetFromTop)) > jumpToTopRevealOffsetThresholdPx;
+        if (jumpToTopVisibleRef.current === nextVisible) return;
+        jumpToTopVisibleRef.current = nextVisible;
+        setJumpToTopVisible(nextVisible);
+    }, [jumpToTopRevealOffsetThresholdPx]);
     const canAutoFollowForReason = React.useCallback((
         reason: TranscriptViewportTelemetryScrollReason,
         options?: Readonly<{ explicit?: boolean }>,
@@ -8171,6 +8187,56 @@ const ChatListInternal = React.memo((props: {
             usesNativeFlashListBottomMaintenance,
         ]);
 
+    const jumpToTop = React.useCallback(() => {
+        preemptEntryRestoreTransaction();
+        const prependTransaction = nativePrependTransactionRef.current;
+        if (prependTransaction && !prependTransaction.isClosed()) {
+            prependTransaction.onTrustedUserScroll();
+            finishNativePrependTransaction(prependTransaction);
+        }
+        const command = resolveViewportCommand({
+            type: 'jump-to-top',
+            sessionId: props.sessionId,
+        });
+        const executed = executeViewportCommand(withTranscriptViewportCommandAnimation(command, jumpAnimateScroll));
+        if (!executed && Platform.OS === 'web') {
+            const metrics = resolveWebScrollMetrics();
+            if (metrics) {
+                metrics.element.scrollTop = 0;
+                lastObservedWebScrollTopRef.current = metrics.element.scrollTop;
+            }
+        }
+        wantsPinnedRef.current = false;
+        isPinnedRef.current = false;
+        commitBottomFollowModeState(resolveTranscriptBottomFollowMode(bottomFollowModeStateRef.current, {
+            type: 'jump-to-top',
+        }));
+        viewportAnchorCaptureGenerationRef.current += 1;
+        cancelScheduledViewportAnchorCapture();
+        commitJumpToTopOffsetForVisibility(0);
+        const metrics = Platform.OS === 'web' ? resolveWebScrollMetrics() : null;
+        const distanceFromBottom = metrics
+            ? getWebTranscriptDistanceFromBottom(metrics)
+            : Math.max(0, Math.trunc(listContentHeightRef.current - listLayoutHeightRef.current));
+        commitJumpToBottomDistanceForVisibility(distanceFromBottom);
+        commitScrollPinState({ ...scrollPinRef.current, isPinned: false });
+        emitViewportChange({ isPinned: false, offsetY: distanceFromBottom, shouldRestoreViewport: true });
+    }, [
+        cancelScheduledViewportAnchorCapture,
+        commitBottomFollowModeState,
+        commitJumpToBottomDistanceForVisibility,
+        commitJumpToTopOffsetForVisibility,
+        commitScrollPinState,
+        emitViewportChange,
+        executeViewportCommand,
+        finishNativePrependTransaction,
+        jumpAnimateScroll,
+        preemptEntryRestoreTransaction,
+        props.sessionId,
+        resolveViewportCommand,
+        resolveWebScrollMetrics,
+    ]);
+
     React.useLayoutEffect(() => {
         const followBottomIntentKey = props.followBottomIntentKey ?? null;
         if (followBottomIntentKey == null) return;
@@ -9161,6 +9227,7 @@ const ChatListInternal = React.memo((props: {
                     scheduleViewportAnchorCapture(viewportState, {
                         suppressAnchorCapture: shouldRecordPassiveNativeMovement,
                     });
+                    commitJumpToTopOffsetForVisibility(y);
                     commitJumpToBottomDistanceForVisibility(distanceFromBottom);
                     commitScrollPinEvent({
                         type: 'scroll',
@@ -9801,6 +9868,7 @@ const ChatListInternal = React.memo((props: {
                                     // write / mode change: release attribution stays with the away-gesture.
                                     if (listOrientationRef.current !== 'inverted') {
                                         lastPinOffsetForIntentRef.current = effectiveDistanceFromBottom;
+                                        commitJumpToTopOffsetForVisibility(effectiveScrollOffset);
                                         commitJumpToBottomDistanceForVisibility(effectiveDistanceFromBottom);
                                         commitScrollPinEvent({
                                             type: 'scroll',
@@ -9862,6 +9930,7 @@ const ChatListInternal = React.memo((props: {
                                     // Plan P3: also record the observed distance so the exit-flush
                                     // live-tail fallback sees the visible bottom truth.
                                     lastPinOffsetForIntentRef.current = followIntent.nextDistanceFromBottom;
+                                    commitJumpToTopOffsetForVisibility(effectiveScrollOffset);
                                     commitJumpToBottomDistanceForVisibility(followIntent.nextDistanceFromBottom);
                                     commitScrollPinEvent({
                                         type: 'scroll',
@@ -9935,6 +10004,7 @@ const ChatListInternal = React.memo((props: {
                                     suppressAnchorCapture:
                                         shouldRecordPassiveNativeMovement && !momentumCarriesUserAttribution,
                                 });
+                                commitJumpToTopOffsetForVisibility(effectiveScrollOffset);
                                 commitJumpToBottomDistanceForVisibility(effectiveDistanceFromBottom);
                                 commitScrollPinEvent({
                                     type: 'scroll',
@@ -10039,6 +10109,18 @@ const ChatListInternal = React.memo((props: {
               ) : null}
               {(olderPagination.isLoadingOlder || isLoadingOlder) && !showFirstPaintPlaceholder ? (
                   <OlderLoadProgressOverlay />
+              ) : null}
+              {jumpToTopVisible ? (
+                  <ComposerKeyboardFloatingInset
+                      testID="transcript-jump-to-top-keyboard-offset"
+                      baseBottom={jumpToBottomAffordance.isVisible ? 60 : 12}
+                      style={{ position: 'absolute', right: 12 }}
+                  >
+                      <JumpToTopButton
+                          testID="transcript-jump-to-top"
+                          onPress={jumpToTop}
+                      />
+                  </ComposerKeyboardFloatingInset>
               ) : null}
               {jumpToBottomAffordance.isVisible ? (
                   <ComposerKeyboardFloatingInset

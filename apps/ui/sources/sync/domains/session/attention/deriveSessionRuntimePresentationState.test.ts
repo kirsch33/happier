@@ -108,6 +108,26 @@ describe('deriveSessionRuntimePresentationState', () => {
         expect(runtimeState.freshActionRequired).toBe(false);
     });
 
+    it('keeps live pending user actions actionable until the request resolves', () => {
+        const nowMs = 1_000_000;
+        const runtimeState = deriveSessionRuntimePresentationState({
+            active: true,
+            activeAt: nowMs - 1_000,
+            presence: 'online',
+            thinking: false,
+            thinkingAt: 0,
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: nowMs - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS - 1_000,
+            hasPendingPermissionRequests: false,
+            hasPendingUserActionRequests: true,
+            pendingRequestObservedAt: nowMs - SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS - 1_000,
+        }, nowMs);
+
+        expect(runtimeState.working).toBe(false);
+        expect(runtimeState.freshPermissionRequired).toBe(false);
+        expect(runtimeState.freshActionRequired).toBe(true);
+    });
+
     it('extends stale in-progress projection from a fresh active heartbeat', () => {
         const nowMs = 1_000_000;
         const runtimeState = deriveSessionRuntimePresentationState({

@@ -42,4 +42,16 @@ describe('message action visibility', () => {
         expect(shouldShowMessageCopyButton(input)).toBe(true);
         expect(shouldShowMessageSelectButton(input)).toBe(true);
     });
+
+    it('shows copy and select actions on touch-first web where hover is unavailable', () => {
+        const input = {
+            platformOS: 'web' as const,
+            hasCoarsePointer: true,
+            isMessageHovered: false,
+            isCopyButtonHovered: false,
+        };
+
+        expect(shouldShowMessageCopyButton(input)).toBe(true);
+        expect(shouldShowMessageSelectButton(input)).toBe(true);
+    });
 });

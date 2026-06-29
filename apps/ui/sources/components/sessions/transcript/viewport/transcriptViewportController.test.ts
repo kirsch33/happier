@@ -135,6 +135,25 @@ describe('transcript viewport controller', () => {
         expect(controller.getMode()).toBe('jump-to-bottom');
     });
 
+    it('resolves jump to top as an explicit top offset command', () => {
+        const controller = createTranscriptViewportController();
+
+        const command = controller.resolve({
+            type: 'jump-to-top',
+            sessionId: 'session-a',
+        });
+
+        expect(command).toEqual({
+            kind: 'scroll-offset',
+            sessionId: 'session-a',
+            reason: 'jump-to-top',
+            mode: 'jump-to-top',
+            offsetY: 0,
+            animated: true,
+        });
+        expect(controller.getMode()).toBe('jump-to-top');
+    });
+
     it('resolves fallback bottom pins through the controller', () => {
         const controller = createTranscriptViewportController();
 

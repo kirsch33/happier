@@ -21,6 +21,7 @@ export type TranscriptBottomFollowModeEvent =
     | { type: 'drag-end'; distanceFromBottom: number | null; pinThresholdPx: number; sawAwayMovement: boolean }
     | { type: 'momentum-settle'; distanceFromBottom: number | null; pinThresholdPx: number }
     | { type: 'jump-to-bottom' }
+    | { type: 'jump-to-top' }
     | { type: 'follow-bottom-intent' }
     | { type: 'content-growth' };
 
@@ -184,6 +185,11 @@ export function resolveTranscriptBottomFollowMode(
             return {
                 dragSession: null,
                 mode: 'following',
+            };
+        case 'jump-to-top':
+            return {
+                dragSession: null,
+                mode: 'released',
             };
         case 'content-growth':
             return state;

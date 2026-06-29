@@ -2,6 +2,7 @@ import type { PlatformOSType } from 'react-native';
 
 export type MessageActionVisibilityInput = {
     platformOS: PlatformOSType;
+    hasCoarsePointer?: boolean;
     isMessageHovered: boolean;
     isCopyButtonHovered: boolean;
     selectionModeActive?: boolean;
@@ -11,6 +12,7 @@ function shouldShowHoveredMessageAction(input: MessageActionVisibilityInput): bo
     if (input.selectionModeActive === true) return true;
     if (input.platformOS === 'ios' || input.platformOS === 'android') return true;
     if (input.platformOS !== 'web') return true;
+    if (input.hasCoarsePointer === true) return true;
     return input.isMessageHovered || input.isCopyButtonHovered;
 }
 

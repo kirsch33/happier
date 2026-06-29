@@ -55,6 +55,7 @@ function resolveTranscriptViewportWriteOwner(
         case 'prepend-restore':
             return 'prepend';
         case 'jump-to-bottom':
+        case 'jump-to-top':
         case 'jump-to-seq':
             return 'explicit';
         case 'initial-open':

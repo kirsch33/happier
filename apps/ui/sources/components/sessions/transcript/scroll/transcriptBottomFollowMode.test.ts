@@ -167,6 +167,13 @@ describe('transcript bottom-follow mode', () => {
             mode: 'following',
         });
 
+        expect(resolveTranscriptBottomFollowMode(state({ mode: 'following' }), {
+            type: 'jump-to-top',
+        })).toMatchObject({
+            dragSession: null,
+            mode: 'released',
+        });
+
         expect(resolveTranscriptBottomFollowMode(state({ mode: 'released' }), {
             distanceFromBottom: 40,
             movedTowardBottom: true,
