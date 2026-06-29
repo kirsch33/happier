@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 
+import { logger } from '@/ui/logger';
 import { startHookServer } from './startHookServer';
 
 async function postSessionHook(params: {
@@ -165,6 +166,7 @@ describe('startHookServer (permission hook)', () => {
   });
 
   it('times out permission hook requests using permissionRequestTimeoutMs', async () => {
+    const debugSpy = vi.spyOn(logger, 'debug');
     const onPermissionHook = vi.fn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       return {
@@ -177,21 +179,27 @@ describe('startHookServer (permission hook)', () => {
       };
     });
 
-    const server = await startHookServer({
-      onSessionHook: () => {},
-      onPermissionHook,
-      permissionHookSecret: 'secret-2',
-      permissionRequestTimeoutMs: 20,
-    });
-    servers.push(server);
+    try {
+      const server = await startHookServer({
+        onSessionHook: () => {},
+        onPermissionHook,
+        permissionHookSecret: 'secret-2',
+        permissionRequestTimeoutMs: 20,
+      });
+      servers.push(server);
 
-    const res = await postPermissionHook({
-      port: server.port,
-      secret: 'secret-2',
-      body: { tool_use_id: 'toolu_2', tool_name: 'Bash' },
-    });
+      const res = await postPermissionHook({
+        port: server.port,
+        secret: 'secret-2',
+        body: { tool_use_id: 'toolu_2', tool_name: 'Bash' },
+      });
 
-    expect(res.status).toBe(408);
+      expect(res.status).toBe(408);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(debugSpy.mock.calls.some((call) => String(call[0]).includes('Error handling permission hook'))).toBe(false);
+    } finally {
+      debugSpy.mockRestore();
+    }
   });
 
   it('returns the onPermissionHook response when it completes before timeout', async () => {

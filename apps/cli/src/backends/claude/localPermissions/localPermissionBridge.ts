@@ -215,20 +215,31 @@ export class ClaudeLocalPermissionBridge {
     async handlePermissionHook(data: PermissionHookData): Promise<PermissionHookResponse> {
         this.syncPermissionModeFromMetadataSnapshot();
         const hookRequestId = this.resolveRequestId(data);
-        const transcriptRequestId = !hookRequestId ? await this.resolveRequestIdFromTranscript(data) : null;
-        const requestId = hookRequestId ?? transcriptRequestId ?? this.generateRequestId();
+        const toolName = this.resolveToolName(data);
+        const toolInput = this.resolveToolInput(data);
+        const pendingRequestId = !hookRequestId
+            ? this.resolvePendingRequestIdByToolFacts({ toolName, toolInput })
+            : null;
+        const transcriptRequestId = !hookRequestId && !pendingRequestId
+            ? await this.resolveRequestIdFromTranscript(data)
+            : null;
+        const requestId = hookRequestId ?? pendingRequestId ?? transcriptRequestId ?? this.generateRequestId();
 
-        if (!hookRequestId && transcriptRequestId) {
+        if (!hookRequestId && pendingRequestId) {
+            logger.debug(`[claude-local-permissions] Permission hook missing tool_use_id; reused pending request ${pendingRequestId} by tool facts`);
+        } else if (!hookRequestId && transcriptRequestId) {
             logger.debug(`[claude-local-permissions] Permission hook missing tool_use_id; recovered ${transcriptRequestId} from transcript`);
-        } else if (!hookRequestId && !transcriptRequestId) {
+        } else if (!hookRequestId && !pendingRequestId && !transcriptRequestId) {
             logger.debug(`[claude-local-permissions] Permission hook missing tool_use_id; generated request id ${requestId}`);
         }
 
-        const toolName = this.resolveToolName(data);
-        const toolInput = this.resolveToolInput(data);
         const permissionSuggestions = this.resolvePermissionSuggestions(data);
         const existing = this.pendingRequests.get(requestId);
-        const hookEventName = existing?.hookEventName ?? readPermissionHookEventName(data);
+        const incomingHookEventName = readPermissionHookEventName(data);
+        if (existing && !hookRequestId && incomingHookEventName !== existing.hookEventName) {
+            existing.hookEventName = incomingHookEventName;
+        }
+        const hookEventName = existing?.hookEventName ?? incomingHookEventName;
         const createdAt = existing?.createdAt ?? Date.now();
 
         // If we already have an allowlist rule for this tool call, respond immediately without surfacing a prompt.
@@ -699,6 +710,41 @@ export class ClaudeLocalPermissionBridge {
         }
 
         return match;
+    }
+
+    private resolvePendingRequestIdByToolFacts(params: { toolName: string; toolInput: unknown }): string | null {
+        if (params.toolName === 'unknown_tool') return null;
+
+        const matches = new Set<string>();
+        const maybeAddMatch = (requestId: string, toolName: unknown, toolInput: unknown) => {
+            if (typeof toolName !== 'string') return;
+            if (toolName !== params.toolName) return;
+            if (!deepEqual(toolInput, params.toolInput)) return;
+            matches.add(requestId);
+        };
+
+        for (const [requestId, pending] of this.pendingRequests.entries()) {
+            maybeAddMatch(requestId, pending.toolName, pending.toolInput);
+        }
+
+        const snapshot = (this.session.client as any).getAgentStateSnapshot?.() ?? null;
+        const requests = snapshot?.requests;
+        if (requests && typeof requests === 'object') {
+            for (const [requestId, request] of Object.entries(requests as Record<string, unknown>)) {
+                if (!isClaudeLocalPermissionBridgeAgentStateRequest(request)) continue;
+                const entry = request as { tool?: unknown; arguments?: unknown };
+                maybeAddMatch(requestId, entry.tool, entry.arguments);
+            }
+        }
+
+        if (matches.size !== 1) {
+            if (matches.size > 1) {
+                logger.debug('[claude-local-permissions] Permission hook missing tool_use_id matched multiple pending requests by tool facts; generating a new request id');
+            }
+            return null;
+        }
+
+        return [...matches][0] ?? null;
     }
 
     private matchesPendingToolHook(data: ClaudeToolHookData, pending: PendingPermissionRequest): boolean {

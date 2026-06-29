@@ -313,7 +313,7 @@ export async function startHookServer(options: HookServerOptions): Promise<HookS
                 const responseTimeout = permissionRequestTimeoutMs === null
                     ? null
                     : setTimeout(() => {
-                        if (!res.headersSent) {
+                        if (!res.headersSent && !res.writableEnded) {
                             logger.debug('[hookServer] Permission hook request timeout');
                             res.writeHead(408).end('timeout');
                         }
@@ -321,7 +321,7 @@ export async function startHookServer(options: HookServerOptions): Promise<HookS
                 responseTimeout?.unref?.();
 
                 const readTimeout = setTimeout(() => {
-                    if (!res.headersSent) {
+                    if (!res.headersSent && !res.writableEnded) {
                         logger.debug('[hookServer] Permission hook request read timeout');
                         res.writeHead(408).end('timeout');
                     }
@@ -365,6 +365,9 @@ export async function startHookServer(options: HookServerOptions): Promise<HookS
                     if (responseTimeout) {
                         clearTimeout(responseTimeout);
                     }
+                    if (res.headersSent || res.writableEnded) {
+                        return;
+                    }
                     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(response));
                 } catch (error) {
                     clearTimeout(readTimeout);
@@ -372,7 +375,7 @@ export async function startHookServer(options: HookServerOptions): Promise<HookS
                         clearTimeout(responseTimeout);
                     }
                     logger.debug('[hookServer] Error handling permission hook:', error);
-                    if (!res.headersSent) {
+                    if (!res.headersSent && !res.writableEnded) {
                         res.writeHead(200, { 'Content-Type': 'application/json' }).end(
                             JSON.stringify(buildDefaultPermissionHookResponse()),
                         );

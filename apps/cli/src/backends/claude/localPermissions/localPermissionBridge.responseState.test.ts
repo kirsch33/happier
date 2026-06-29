@@ -375,6 +375,55 @@ describe('ClaudeLocalPermissionBridge (response state)', () => {
     bridge.dispose();
   });
 
+  it('reuses an existing AskUserQuestion request when a later duplicate hook lacks tool_use_id', async () => {
+    const { session, client } = createPermissionHandlerSessionStub('session-ask-duplicate-missing-id');
+    const bridge = new ClaudeLocalPermissionBridge(session, { responseTimeoutMs: null });
+    bridge.activate();
+
+    const toolInput = { questions: [{ question: 'Pick a color', options: ['Red', 'Blue'] }] };
+    const first = bridge.handlePermissionHook({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_input: toolInput,
+      tool_use_id: 'toolu_ask_duplicate_1',
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.agentState.requests.toolu_ask_duplicate_1).toBeDefined();
+
+    const duplicate = bridge.handlePermissionHook({
+      hook_event_name: 'PermissionRequest',
+      tool_name: 'AskUserQuestion',
+      tool_input: toolInput,
+      transcript_path: '/tmp/happier-missing-ask-user-question-transcript.jsonl',
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.keys(client.agentState.requests)).toEqual(['toolu_ask_duplicate_1']);
+    expect(Object.keys(client.agentState.requests).some((id) => id.startsWith('perm_'))).toBe(false);
+
+    const permissionHandler = client.rpcHandlerManager.getHandler('permission');
+    expect(permissionHandler).toBeDefined();
+    const answer = await permissionHandler?.({
+      id: 'toolu_ask_duplicate_1',
+      approved: true,
+      answers: { 'Pick a color': 'Blue' },
+    });
+
+    expect(answer).toEqual({ ok: true });
+    await expect(duplicate).resolves.toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: {
+          behavior: 'allow',
+          updatedInput: { ...toolInput, answers: { 'Pick a color': 'Blue' } },
+        },
+      },
+    });
+    await expect(first).resolves.toMatchObject({ hookSpecificOutput: { hookEventName: 'PermissionRequest' } });
+    bridge.dispose();
+  });
+
   it('returns a typed expired result for a late ExitPlanMode answer after the provider hook timeout', async () => {
     const { session, client } = createPermissionHandlerSessionStub('session-exit-plan-expired');
     const bridge = new ClaudeLocalPermissionBridge(session, { responseTimeoutMs: 5_000 });
