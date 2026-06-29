@@ -116,7 +116,11 @@ describe('createClaudeUnifiedInFlightSteerEvaluator', () => {
       cursor: { x: 27, y: 2 },
       reason: 'user_draft',
     },
-    { label: 'permission prompt', screen: 'Do you want to proceed?\n❯ 1. Yes\n  2. No', reason: 'permission_prompt' },
+    {
+      label: 'permission prompt',
+      screen: 'Do you want to proceed?\n❯ 1. Yes\n  2. No, tell Claude what to do differently',
+      reason: 'permission_prompt',
+    },
     { label: 'trust folder prompt', screen: 'Do you trust the files in this folder?\n❯ 1. Yes, proceed', reason: 'trust_prompt' },
     { label: 'switch model dialog', screen: 'Switch model?\n❯ 1. Sonnet\n  2. Opus', reason: 'switch_model_dialog' },
     { label: 'slash picker', screen: '╭──╮\n│ > /mod │\n╰──╮\n  /model — switch the active model', reason: 'slash_picker' },
@@ -274,12 +278,13 @@ describe('createClaudeUnifiedInFlightSteerEvaluator', () => {
     expect(hiddenCustody).not.toHaveBeenCalled();
   });
 
-  it('does not report terminal custody when the queued banner is visible but the composer still has a draft', async () => {
+  it('reports terminal custody when the queued banner is visible even if the queued text still renders in the composer', async () => {
     const custody = vi.fn();
+    const batch = pendingBatch('queued text may remain editable');
     const harness = createHarness({ screen: queuedBannerScreenWithDraft, onPromptCustodyByTerminal: custody });
 
     harness.wiring.observeInjectedPrompt(
-      pendingBatch('not actually queued yet'),
+      batch,
       { acceptedAs: 'in_flight_steer', turnStateAtInjection: 'running' },
     );
 
@@ -293,7 +298,8 @@ describe('createClaudeUnifiedInFlightSteerEvaluator', () => {
         }),
       });
     });
-    expect(custody).not.toHaveBeenCalled();
+    expect(custody).toHaveBeenCalledTimes(1);
+    expect(custody).toHaveBeenCalledWith(batch);
   });
 
   it('does not run a queued-banner check once disposed', async () => {

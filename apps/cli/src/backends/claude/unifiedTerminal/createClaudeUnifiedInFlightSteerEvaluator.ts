@@ -396,7 +396,7 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
               queuedBannerVisible: screen.queuedMessageBannerVisible,
               composerDraftPresent: screen.userDraftPresent,
             });
-            if (screen.queuedMessageBannerVisible && !screen.userDraftPresent) {
+            if (screen.queuedMessageBannerVisible) {
               await opts.onPromptCustodyByTerminal?.(batch);
             }
           } catch {
