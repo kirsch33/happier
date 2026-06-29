@@ -649,6 +649,39 @@ function readRecord(value: unknown): Record<string, unknown> | null {
     return value as Record<string, unknown>;
 }
 
+function readErrorSearchText(error: unknown): string {
+    const parts: string[] = [];
+    if (error instanceof Error) {
+        parts.push(error.message);
+    } else {
+        parts.push(String(error ?? ''));
+    }
+    const data = readRecord(error)?.data;
+    if (typeof data === 'string') {
+        parts.push(data);
+    } else if (data !== undefined) {
+        try {
+            parts.push(JSON.stringify(data));
+        } catch {
+            // Ignore unserializable diagnostic data.
+        }
+    }
+    return parts.join('\n');
+}
+
+function isCodexAppServerPoisonedThreadHistoryTurnStartError(error: unknown): boolean {
+    const record = readRecord(error);
+    const method = trimStringValue(record?.method);
+    if (method && method !== 'turn/start') return false;
+    const code = typeof record?.code === 'number' && Number.isFinite(record.code) ? record.code : null;
+    const text = readErrorSearchText(error);
+    if (code !== -32600 && !/invalid[_\s-]*request/i.test(text)) return false;
+    if (!/property_name_above_max_length|invalid\s+property\s+name/i.test(text)) return false;
+    if (!/\.arguments\b|\barguments\b/i.test(text)) return false;
+    const matches = [...text.matchAll(/input\[(\d+)\]/gi)];
+    return matches.some((match) => Number(match[1]) >= 2);
+}
+
 function mergeSparseCodexSnapshotUpdate(previous: unknown, next: unknown): unknown {
     const previousRecord = readRecord(previous);
     const nextRecord = readRecord(next);
@@ -3877,6 +3910,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
         sendPrompt: async (prompt: string, options?: CodexAppServerPromptOptions) => {
             let recoveredContextWindowExhaustion = false;
             let recoveredTemporaryRecoverableTurnFailure = false;
+            let recoveredPoisonedThreadHistory = false;
             let originalContextWindowExhaustionFailure: Error | null = null;
             let originalTemporaryRecoverableTurnFailure: Error | null = null;
             let promptForAttempt = prompt;
@@ -3974,6 +4008,21 @@ export function createCodexAppServerRuntime(params: Readonly<{
                             promptForAttempt = contextWindowRecoveryConfig.continuationPrompt;
                             optionsForAttempt = undefined;
                         }
+                        continue;
+                    }
+                    if (
+                        !recoveredPoisonedThreadHistory
+                        && !failedTurnHadMeaningfulActivity
+                        && isCodexAppServerPoisonedThreadHistoryTurnStartError(failure)
+                    ) {
+                        recoveredPoisonedThreadHistory = true;
+                        logger.warn('[codex-app-server] turn/start rejected existing thread history; starting replacement thread and retrying prompt', {
+                            threadId: activeThreadId,
+                            error: readErrorSearchText(failure),
+                        });
+                        await startOrLoad({});
+                        promptForAttempt = prompt;
+                        optionsForAttempt = options;
                         continue;
                     }
                     if (isCodexAppServerTemporaryRecoverableTurnFailureError(failure)) {

@@ -131,6 +131,56 @@ describe('AgentInputAttentionRequests', () => {
         expect(screen.findByTestId('agentInput.permissionRequests.divider:approval:a1')).toBeTruthy();
     });
 
+    it('renders live user-action requests as inline prompt cards', async () => {
+        const { AgentInputAttentionRequests } = await import('./AgentInputPermissionRequests');
+        const UntypedAgentInputAttentionRequests = AgentInputAttentionRequests as React.ComponentType<any>;
+        capturedPermissionPromptCardProps.length = 0;
+        capturedUserActionPromptCardProps.length = 0;
+        capturedApprovalPromptCardProps.length = 0;
+
+        const screen = await renderScreen(React.createElement(UntypedAgentInputAttentionRequests, {
+            sessionId: 's1',
+            permissionRequests: [],
+            userActionRequests: [
+                {
+                    id: 'resume_choice',
+                    kind: 'user_action',
+                    tool: 'AskUserQuestion',
+                    arguments: {
+                        questions: [{
+                            header: 'Claude resume',
+                            question: 'How should Claude resume this session?',
+                            options: [
+                                { label: 'Resume from summary', description: 'Use the saved summary.' },
+                                { label: 'Resume full session', description: 'Load full context.' },
+                            ],
+                            multiSelect: false,
+                        }],
+                    },
+                    createdAt: null,
+                },
+            ],
+            approvalRequests: [],
+            permissionLocationsById: new Map([
+                ['resume_choice', { kind: 'top' as const, messageId: 'tool:question-1', seq: 11 }],
+            ]),
+            metadata: null,
+            canApprovePermissions: true,
+            maxHeightPx: 200,
+            onContentSizeChange: () => {},
+            onLayout: () => {},
+            onScroll: () => {},
+            fadeVisibility: { top: false, bottom: false },
+        }));
+
+        expect(screen.findByTestId('agentInput.permissionRequests.chrome')).toBeTruthy();
+        expect(capturedPermissionPromptCardProps).toHaveLength(0);
+        expect(capturedUserActionPromptCardProps).toHaveLength(1);
+        expect(capturedUserActionPromptCardProps[0].chrome).toBe('inline');
+        expect(capturedUserActionPromptCardProps[0].location).toEqual({ kind: 'top', messageId: 'tool:question-1', seq: 11 });
+        expect(capturedApprovalPromptCardProps).toHaveLength(0);
+    });
+
     it('passes resolved tool locations to approval prompt cards', async () => {
         const { AgentInputAttentionRequests } = await import('./AgentInputPermissionRequests');
         capturedApprovalPromptCardProps.length = 0;
@@ -303,7 +353,7 @@ describe('AgentInputAttentionRequests', () => {
         expect(capturedPermissionPromptCardProps).toHaveLength(0);
     });
 
-    it('ignores legacy user action requests without an explicit user action kind', async () => {
+    it('renders legacy AskUserQuestion user actions without an explicit user action kind', async () => {
         const { AgentInputAttentionRequests } = await import('./AgentInputPermissionRequests');
         const UntypedAgentInputAttentionRequests = AgentInputAttentionRequests as React.ComponentType<any>;
         capturedPermissionPromptCardProps.length = 0;
@@ -329,7 +379,7 @@ describe('AgentInputAttentionRequests', () => {
             fadeVisibility: { top: false, bottom: false },
         }));
 
-        expect(screen.findByTestId('agentInput.permissionRequests.chrome')).toBeNull();
-        expect(capturedUserActionPromptCardProps).toHaveLength(0);
+        expect(screen.findByTestId('agentInput.permissionRequests.chrome')).toBeTruthy();
+        expect(capturedUserActionPromptCardProps).toHaveLength(1);
     });
 });

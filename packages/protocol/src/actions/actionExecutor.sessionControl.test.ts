@@ -601,6 +601,7 @@ describe('createActionExecutor (session control)', () => {
       {
         path: '/repo',
         backendTargetKey: 'agent:claude',
+        profileId: 'greatwhiteclaude',
         title: 'My title',
         tag: 'tag-1',
         initialMessage: 'Hello',
@@ -612,6 +613,7 @@ describe('createActionExecutor (session control)', () => {
     expect(sessionSpawnNew).toHaveBeenCalledWith(expect.objectContaining({
       path: '/repo',
       backendTargetKey: 'agent:claude',
+      profileId: 'greatwhiteclaude',
       title: 'My title',
       tag: 'tag-1',
       initialMessage: 'Hello',

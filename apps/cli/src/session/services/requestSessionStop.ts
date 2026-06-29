@@ -1,4 +1,6 @@
 import type { Credentials } from '@/persistence';
+import { deliverSessionEndMutation } from '@/api/session/mutations/deliverSessionEndMutation';
+import { createSessionEndMutation } from '@/api/session/mutations/sessionMutationTypes';
 import { stopDaemonSession } from '@/daemon/controlClient';
 import { listSessionMarkers, removeSessionMarker } from '@/daemon/sessionRegistry';
 import { createStopSession } from '@/daemon/sessions/stopSession';
@@ -67,6 +69,29 @@ async function cleanupStoppedSessionMarkersBestEffort(sessionId: string): Promis
   );
 }
 
+async function deliverSessionEndForStaleActiveSessionBestEffort(params: Readonly<{
+  token: string;
+  sessionId: string;
+}>): Promise<boolean> {
+  try {
+    const result = await deliverSessionEndMutation({
+      token: params.token,
+      socket: {
+        connected: false,
+        emit: () => undefined,
+      },
+      mutation: createSessionEndMutation({
+        sessionId: params.sessionId,
+        observedAt: Date.now(),
+        exit: { reason: 'cli-stop-no-local-runner', code: null, signal: 'SIGTERM' },
+      }),
+    });
+    return result.status === 'delivered';
+  } catch {
+    return false;
+  }
+}
+
 export async function requestSessionStop(params: Readonly<{
   credentials: Credentials;
   idOrPrefix: string;
@@ -91,10 +116,22 @@ export async function requestSessionStop(params: Readonly<{
     if (!daemonStopped) {
       await stopSessionViaMarkersBestEffort(resolved.sessionId).catch(() => false);
     }
-    const stopped = await waitForSessionStopResult({
+    let stopped = await waitForSessionStopResult({
       token: params.credentials.token,
       sessionId: resolved.sessionId,
     });
+    if (!stopped) {
+      const deliveredEnd = await deliverSessionEndForStaleActiveSessionBestEffort({
+        token: params.credentials.token,
+        sessionId: resolved.sessionId,
+      });
+      if (deliveredEnd) {
+        stopped = await waitForSessionStopResult({
+          token: params.credentials.token,
+          sessionId: resolved.sessionId,
+        });
+      }
+    }
     if (stopped) {
       await cleanupStoppedSessionMarkersBestEffort(resolved.sessionId).catch(() => undefined);
     }

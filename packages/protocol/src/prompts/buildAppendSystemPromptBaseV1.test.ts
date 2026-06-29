@@ -70,6 +70,7 @@ describe('buildAppendSystemPromptBaseV1', () => {
     expect(out).not.toContain('# Session title');
     expect(out).not.toContain('change_title');
     expect(out).toContain('# Options');
+    expect(out).toContain('use that tool instead of writing visible XML options into the transcript');
     expect(out).toContain('# Attachments');
   });
 

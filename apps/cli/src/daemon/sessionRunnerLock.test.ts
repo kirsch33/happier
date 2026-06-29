@@ -4,7 +4,7 @@ import { basename, dirname, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { acquireSessionRunnerLock, releaseSessionRunnerLock, sessionRunnerLockPathForSessionId } from './sessionRunnerLock';
+import { acquireSessionRunnerLock, pruneStaleSessionRunnerLocks, releaseSessionRunnerLock, sessionRunnerLockPathForSessionId } from './sessionRunnerLock';
 
 describe('sessionRunnerLock', () => {
   it('acquires and releases a new lock', async () => {
@@ -395,4 +395,85 @@ describe('sessionRunnerLock', () => {
     const raw = await readFile(lockPath, 'utf8');
     expect(JSON.parse(raw).pid).toBe(123);
   });
+
+  it('prunes dead and zombie runner locks without waiting for the next acquisition', async () => {
+    const happyHomeDir = await mkdtemp(join(tmpdir(), 'happier-session-runner-lock-'));
+    const deadLockPath = sessionRunnerLockPathForSessionId({ happyHomeDir, sessionId: 'sess_dead' });
+    const zombieLockPath = sessionRunnerLockPathForSessionId({ happyHomeDir, sessionId: 'sess_zombie' });
+    expect(deadLockPath).not.toBeNull();
+    expect(zombieLockPath).not.toBeNull();
+    if (!deadLockPath || !zombieLockPath) return;
+
+    await mkdir(dirname(deadLockPath), { recursive: true });
+    await writeFile(
+      deadLockPath,
+      JSON.stringify({ sessionId: 'sess_dead', pid: 111, acquiredAtMs: 1, processCommandHash: 'a'.repeat(64) }, null, 2),
+      'utf8',
+    );
+    await writeFile(
+      zombieLockPath,
+      JSON.stringify({ sessionId: 'sess_zombie', pid: 222, acquiredAtMs: 1, processCommandHash: 'b'.repeat(64) }, null, 2),
+      'utf8',
+    );
+
+    const result = await pruneStaleSessionRunnerLocks({
+      happyHomeDir,
+      readProcessRunState: async (pid) => (pid === 222 ? 'zombie' : 'dead'),
+    });
+
+    expect(result).toEqual(expect.objectContaining({ scanned: 2, removed: 2, retained: 0 }));
+    expect(result.removedLocks.map((lock) => lock.reason).sort()).toEqual(['dead', 'zombie']);
+    await expect(readFile(deadLockPath, 'utf8')).rejects.toThrow();
+    await expect(readFile(zombieLockPath, 'utf8')).rejects.toThrow();
+  });
+
+  it('prunes runner locks whose pid was reused by a different process', async () => {
+    const happyHomeDir = await mkdtemp(join(tmpdir(), 'happier-session-runner-lock-'));
+    const lockPath = sessionRunnerLockPathForSessionId({ happyHomeDir, sessionId: 'sess_reused' });
+    expect(lockPath).not.toBeNull();
+    if (!lockPath) return;
+
+    await mkdir(dirname(lockPath), { recursive: true });
+    await writeFile(
+      lockPath,
+      JSON.stringify({ sessionId: 'sess_reused', pid: 333, acquiredAtMs: 1, processCommandHash: 'a'.repeat(64) }, null, 2),
+      'utf8',
+    );
+
+    const result = await pruneStaleSessionRunnerLocks({
+      happyHomeDir,
+      readProcessRunState: async () => 'servable',
+      getCurrentProcessCommandHash: async () => 'b'.repeat(64),
+    });
+
+    expect(result).toEqual(expect.objectContaining({ scanned: 1, removed: 1, retained: 0 }));
+    expect(result.removedLocks[0]).toEqual(expect.objectContaining({ sessionId: 'sess_reused', pid: 333, reason: 'pid_reused' }));
+    await expect(readFile(lockPath, 'utf8')).rejects.toThrow();
+  });
+
+  it('retains live runner locks when process identity cannot prove staleness', async () => {
+    const happyHomeDir = await mkdtemp(join(tmpdir(), 'happier-session-runner-lock-'));
+    const lockPath = sessionRunnerLockPathForSessionId({ happyHomeDir, sessionId: 'sess_live_unknown' });
+    expect(lockPath).not.toBeNull();
+    if (!lockPath) return;
+
+    await mkdir(dirname(lockPath), { recursive: true });
+    await writeFile(
+      lockPath,
+      JSON.stringify({ sessionId: 'sess_live_unknown', pid: 444, acquiredAtMs: 1, processCommandHash: 'a'.repeat(64) }, null, 2),
+      'utf8',
+    );
+
+    const result = await pruneStaleSessionRunnerLocks({
+      happyHomeDir,
+      readProcessRunState: async () => 'servable',
+      getCurrentProcessCommandHash: async () => {
+        throw new Error('identity unavailable');
+      },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ scanned: 1, removed: 0, retained: 1 }));
+    expect(JSON.parse(await readFile(lockPath, 'utf8')).pid).toBe(444);
+  });
+
 });

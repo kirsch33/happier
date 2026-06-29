@@ -73,6 +73,7 @@ describe('daemon control server: /spawn-session', () => {
           sessionId: 'explicit-session',
           spawnNonce: 'spawn-nonce-1',
           backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+          profileId: 'profile-greatwhite',
           experimentalCodexAcp: true,
           transcriptStorage: 'direct',
           mcpSelection: {
@@ -87,6 +88,7 @@ describe('daemon control server: /spawn-session', () => {
           },
           environmentVariables: {
             FOO: 'bar',
+            IS_SANDBOX: '1',
             TMUX_SESSION_NAME: 'legacy-ignored',
           },
           connectedServices: {
@@ -111,6 +113,7 @@ describe('daemon control server: /spawn-session', () => {
         sessionId: 'explicit-session',
         spawnNonce: 'spawn-nonce-1',
         backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        profileId: 'profile-greatwhite',
         codexBackendMode: 'acp',
         transcriptStorage: 'direct',
         mcpSelection: {
@@ -125,6 +128,7 @@ describe('daemon control server: /spawn-session', () => {
         },
         environmentVariables: {
           FOO: 'bar',
+          IS_SANDBOX: '1',
           TMUX_SESSION_NAME: 'legacy-ignored',
         },
         connectedServices: {

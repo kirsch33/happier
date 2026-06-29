@@ -107,6 +107,7 @@ export type ActionExecutorDeps = Readonly<{
     agentId?: string;
     modelId?: string;
     backendTargetKey?: string;
+    profileId?: string;
     title?: string;
     path?: string;
     host?: string;
@@ -1323,6 +1324,7 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
             ...(((parsed.data as any).agentId) ? { agentId: String((parsed.data as any).agentId) } : {}),
             ...(((parsed.data as any).modelId) ? { modelId: String((parsed.data as any).modelId) } : {}),
             ...(((parsed.data as any).backendTargetKey) ? { backendTargetKey: String((parsed.data as any).backendTargetKey) } : {}),
+            ...(((parsed.data as any).profileId) ? { profileId: String((parsed.data as any).profileId) } : {}),
             ...(((parsed.data as any).title) ? { title: String((parsed.data as any).title) } : {}),
             ...(((parsed.data as any).path) ? { path: String((parsed.data as any).path) } : {}),
             ...(((parsed.data as any).host) ? { host: String((parsed.data as any).host) } : {}),

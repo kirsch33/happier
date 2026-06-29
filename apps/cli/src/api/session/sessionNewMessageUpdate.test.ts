@@ -574,6 +574,61 @@ describe('handleSessionNewMessageUpdate', () => {
     expect(emitted.some((e: any) => e.event === 'user-message')).toBe(true);
   });
 
+  it('delivers iOS UI prompts even when old local echo-suppression markers are present', () => {
+    const delivered: any[] = [];
+    const emitted: any[] = [];
+
+    const update = {
+      id: 'u-ios-resume',
+      createdAt: Date.now(),
+      body: {
+        t: 'new-message',
+        sid: 'sess_1',
+        message: {
+          id: 'm-ios-resume',
+          seq: 7,
+          content: {
+            t: 'plain',
+            v: {
+              role: 'user',
+              content: { type: 'text', text: 'resume and answer the operator' },
+              localId: 'ios-local-1',
+              meta: { source: 'ui', sentFrom: 'ios' },
+            },
+          },
+          localId: 'ios-local-1',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      },
+    } as unknown as Update;
+
+    handleSessionNewMessageUpdate({
+      update,
+      sessionId: 'sess_1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      receivedMessageIds: new Set<string>(),
+      lastObservedMessageSeq: 0,
+      lastObservedUserMessageSeq: 0,
+      hasSelfEchoSuppressedLocalId: () => true,
+      hasAgentQueueEchoSuppressedLocalId: () => true,
+      markAgentQueueEchoSuppressedLocalId: () => void 0,
+      hasPendingQueueMaterializedLocalId: () => false,
+      deleteMaterializedLocalId: () => void 0,
+      pendingMessageCallback: (message, info) => delivered.push({ message, info }),
+      pendingMessages: [],
+      emit: (event, payload) => emitted.push({ event, payload }),
+      debug: () => void 0,
+      debugLargeJson: () => void 0,
+    });
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.message?.content?.text).toBe('resume and answer the operator');
+    expect(delivered[0]?.info).toEqual({ seq: 7 });
+    expect(emitted.some((e: any) => e.event === 'user-message')).toBe(true);
+  });
+
   it('suppresses passive committed transcript writes with non-cli metadata even when a live callback is attached', () => {
     const delivered: any[] = [];
     const provenSeqs: number[] = [];

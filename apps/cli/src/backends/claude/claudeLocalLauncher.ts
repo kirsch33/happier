@@ -171,6 +171,10 @@ export async function claudeLocalLauncher(
     const lifecycleHookCallback = (data: SessionHookData) => {
         lifecycleTracker.observeHook(data);
     };
+    const transcriptHookCallback = (data: SessionHookData) => {
+        transcriptProjector.observeHook(data);
+    };
+    session.addClaudeSessionHookCallback(transcriptHookCallback);
     session.addClaudeSessionHookCallback(lifecycleHookCallback);
 
     // Handle abort
@@ -480,6 +484,7 @@ export async function claudeLocalLauncher(
         // Remove session found callback
         session.removeSessionFoundCallback(scannerSessionCallback);
         session.removeClaudeSessionHookCallback(lifecycleHookCallback);
+        session.removeClaudeSessionHookCallback(transcriptHookCallback);
         pendingQueueWatcher?.stop();
         deferredRemoteSwitch?.dispose();
         turnLifecycle.dispose();

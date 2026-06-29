@@ -295,6 +295,45 @@ describe('createStopSession', () => {
     expect(killSpy).toHaveBeenCalledWith(333, 'SIGTERM');
   });
 
+  it("kills the recorded tmux terminal host for a reattached terminal-hosted session", async () => {
+    const { createStopSession } = await import("./stopSession");
+
+    tmuxKillWindow.mockReset();
+    tmuxExecuteTmuxCommand.mockReset();
+    tmuxCtorCalls.length = 0;
+
+    readTerminalAttachmentInfo.mockResolvedValueOnce({
+      version: 1,
+      sessionId: "sess-tmux",
+      terminal: {
+        mode: "tmux",
+        tmux: {
+          target: "happy-reattached:window-1",
+          tmpDir: "/tmp/happy-reattached-tmux",
+        },
+      },
+      updatedAt: 1,
+    });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true as any);
+
+    const pidToTrackedSession = new Map<number, any>([
+      [333, { startedBy: "terminal", pid: 333, happySessionId: "sess-tmux", processCommandHash: "h3" }],
+    ]);
+
+    const stop = createStopSession({ pidToTrackedSession });
+    const ok = await stop("sess-tmux");
+
+    expect(ok).toBe(true);
+    expect(tmuxCtorCalls.length).toBe(1);
+    expect(tmuxCtorCalls[0]?.env).toEqual({ TMUX_TMPDIR: "/tmp/happy-reattached-tmux" });
+    expect(tmuxExecuteTmuxCommand).toHaveBeenCalled();
+    const tmuxCall = tmuxExecuteTmuxCommand.mock.calls[0];
+    expect(tmuxCall?.[0]).toEqual(["kill-session"]);
+    expect(tmuxCall?.[1]).toBe("happy-reattached");
+    expect(tmuxKillWindow).not.toHaveBeenCalled();
+    expect(killSpy).toHaveBeenCalledWith(333, "SIGTERM");
+  });
+
   it('stops daemon-spawned tmux sessions using a tmux socket derived from the tracked tmpDir', async () => {
     const { createStopSession } = await import('./stopSession');
 

@@ -5,6 +5,7 @@ import type { EnhancedMode } from '../loop';
 import type { Session } from '../session';
 import type { LauncherResult } from '../claudeLocalLauncher';
 import { createClaudeSessionTranscriptProjector } from '../localControl/createClaudeSessionTranscriptProjector';
+import type { SessionHookData } from '../utils/startHookServer';
 import type { NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
 import { adoptClaudePermissionModeFromMetadata } from '../utils/syncPermissionModeFromMetadata';
 import {
@@ -240,6 +241,10 @@ export async function claudeUnifiedTerminalLauncher(
   const initialPrompt = extractClaudeTerminalInitialPrompt(session.claudeArgs);
   let initialPromptPending = typeof initialPrompt.prompt === 'string';
   const transcriptProjector = createClaudeSessionTranscriptProjector({ session, logPrefix: '[unified]' });
+  const transcriptHookCallback = (data: SessionHookData) => {
+    transcriptProjector.observeHook(data);
+  };
+  session.addClaudeSessionHookCallback(transcriptHookCallback);
   let lastSurfacedRuntimeAuthFailureAtMs: number | null = null;
   const readyHandler = createClaudeReadyHandler({
     session: session.client,
@@ -765,5 +770,6 @@ export async function claudeUnifiedTerminalLauncher(
     resumeChoiceBroker.dispose();
     inFlightSteerCapabilityPublisher.dispose();
     removeExternalAbortListener?.();
+    session.removeClaudeSessionHookCallback(transcriptHookCallback);
   }
 }

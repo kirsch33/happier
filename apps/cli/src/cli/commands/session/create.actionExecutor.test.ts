@@ -23,7 +23,7 @@ describe('happier session create (action executor)', () => {
       });
 
       expect(execute).not.toHaveBeenCalled();
-      expect(output.text()).toContain('happier session create [--path <path>] [--backend <backend-target>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]');
+      expect(output.text()).toContain('happier session create [--path <path>] [--backend <backend-target>] [--profile <id-or-name>] [--title <title>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]');
     } finally {
       output.restore();
     }
@@ -45,7 +45,7 @@ describe('happier session create (action executor)', () => {
     const output = captureConsoleJsonOutput();
     try {
       await handleSessionCommand(
-        ['create', '--path', '/tmp', '--backend', 'agent:claude', '--title', 'My title', '--tag', 'tag-1', '--prompt', 'Hello', '--json'],
+        ['create', '--path', '/tmp', '--backend', 'agent:claude', '--profile', 'greatwhiteclaude', '--title', 'My title', '--tag', 'tag-1', '--prompt', 'Hello', '--json'],
         {
           readCredentialsFn: async () => ({
             token: 'token_test',
@@ -60,6 +60,7 @@ describe('happier session create (action executor)', () => {
         {
           path: '/tmp',
           backendTargetKey: 'agent:claude',
+          profileId: 'greatwhiteclaude',
           title: 'My title',
           tag: 'tag-1',
           initialMessage: 'Hello',

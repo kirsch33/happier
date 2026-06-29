@@ -48,16 +48,26 @@ describe('happier session stop (integration)', () => {
   let happyHomeDir = '';
   let sessionActive = true;
   let sessionStatusFetchCount = 0;
+  let sessionEndPostCount = 0;
   let sessionStatusShouldFail = false;
 
   beforeEach(async () => {
     happyHomeDir = await createTempDir('happier-cli-session-stop-');
     sessionActive = true;
     sessionStatusFetchCount = 0;
+    sessionEndPostCount = 0;
     sessionStatusShouldFail = false;
 
     server = createServer((req, res) => {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+      if (req.method === 'POST' && /^\/v1\/sessions\/[^/]+\/end$/.test(url.pathname)) {
+        sessionEndPostCount += 1;
+        sessionActive = false;
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
       if (req.method === 'GET' && url.pathname.startsWith('/v2/sessions/')) {
         const sessionId = url.pathname.slice('/v2/sessions/'.length).trim();
         sessionStatusFetchCount += 1;
@@ -185,7 +195,7 @@ describe('happier session stop (integration)', () => {
     }
   });
 
-  it('reports stopped false when the daemon stop path is unavailable instead of falling back to session-end', async () => {
+  it('marks a stale-active session inactive through session-end when no local runner is found', async () => {
     const sessionId = 'sess_integration_stop_timeout';
     const emitSpy = vi.fn((...args: any[]) => {
       const cb = args[2];
@@ -220,13 +230,14 @@ describe('happier session stop (integration)', () => {
 
       expect(stopDaemonSessionMock).toHaveBeenCalledWith(sessionId);
       expect(emitSpy).not.toHaveBeenCalled();
+      expect(sessionEndPostCount).toBe(1);
       expect(sessionStatusFetchCount).toBeGreaterThanOrEqual(2);
 
       const parsed = output.json();
       expect(parsed.ok).toBe(true);
       expect(parsed.kind).toBe('session_stop');
       expect(parsed.data?.sessionId).toBe(sessionId);
-      expect(parsed.data?.stopped).toBe(false);
+      expect(parsed.data?.stopped).toBe(true);
     } finally {
       delete process.env.HAPPIER_SESSION_STOP_TIMEOUT_MS;
       delete process.env.HAPPIER_SESSION_STOP_POLL_INTERVAL_MS;

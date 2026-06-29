@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createSpawnRequestCoalescer, computeDaemonSpawnRequestKey } from './spawnRequestCoalescer';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
+import { SPAWN_SESSION_ERROR_CODES } from '@/rpc/handlers/registerSessionHandlers';
 
 describe('computeDaemonSpawnRequestKey', () => {
   it('is stable for equivalent inputs with different object key order', () => {
@@ -329,5 +330,52 @@ describe('createSpawnRequestCoalescer', () => {
     const r4 = await coalescer.run(key, work);
     expect(work).toHaveBeenCalledTimes(2);
     expect(r4).toEqual({ type: 'success', sessionId: 'sess_new' });
+  });
+
+  it('times out waiters for a stuck in-flight request and lets later callers retry', async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 10_000;
+      const nowMs = () => now;
+      const coalescer = createSpawnRequestCoalescer({
+        nowMs,
+        recentSuccessTtlMs: 2_000,
+        inFlightWaitTimeoutMs: 100,
+      });
+      const key = { kind: 'existing' as const, key: 'existing:sess_stuck' };
+
+      let releaseOriginal: ((result: { type: 'success'; sessionId: string }) => void) | null = null;
+      const originalWork = vi.fn(async () => new Promise<{ type: 'success'; sessionId: string }>((resolve) => {
+        releaseOriginal = resolve;
+      }));
+      const retryWork = vi.fn(async () => ({ type: 'success' as const, sessionId: 'sess_retry' }));
+
+      const original = coalescer.run(key, originalWork);
+      expect(originalWork).toHaveBeenCalledTimes(1);
+
+      now += 50;
+      const waiter = coalescer.run(key, retryWork);
+      expect(retryWork).not.toHaveBeenCalled();
+
+      now += 50;
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(waiter).resolves.toEqual({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: expect.stringContaining('Timed out waiting 100ms'),
+      });
+      expect(retryWork).not.toHaveBeenCalled();
+
+      now += 1;
+      await expect(coalescer.run(key, retryWork)).resolves.toEqual({ type: 'success', sessionId: 'sess_retry' });
+      expect(retryWork).toHaveBeenCalledTimes(1);
+
+      const release = releaseOriginal as ((result: { type: 'success'; sessionId: string }) => void) | null;
+      if (!release) throw new Error('original work resolver was not captured');
+      release({ type: 'success', sessionId: 'sess_late' });
+      await expect(original).resolves.toEqual({ type: 'success', sessionId: 'sess_late' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

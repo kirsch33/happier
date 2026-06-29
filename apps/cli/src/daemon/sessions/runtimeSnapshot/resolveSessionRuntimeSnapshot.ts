@@ -30,6 +30,7 @@ export type SessionRuntimeSnapshot = Readonly<{
   connectedServices: ConnectedServiceBindingsV1 | null;
   connectedServicesUpdatedAt: number | null;
   connectedServiceMaterializationIdentityV1: ConnectedServiceMaterializationIdentityV1 | null;
+  profileId: string | null;
   permissionMode: SnapshotValue<PermissionMode> | null;
   agentModeId: SnapshotValue<string> | null;
   modelId: SnapshotValue<string> | null;
@@ -170,6 +171,22 @@ function chooseTimestamped<T extends string>(
   return { value: chosen.value, updatedAt: chosen.updatedAt };
 }
 
+function chooseUntimestampedString(candidates: ReadonlyArray<Readonly<{
+  source: CandidateSource;
+  value: string | null;
+}> | null>): string | null {
+  const valid = candidates.filter((candidate): candidate is Readonly<{
+    source: CandidateSource;
+    value: string;
+  }> => candidate !== null && candidate.value !== null);
+  if (valid.length < 1) return null;
+  return [...valid].sort((left, right) => SOURCE_PRIORITY[right.source] - SOURCE_PRIORITY[left.source])[0].value;
+}
+
+function readProfileIdFromOptions(options: SpawnSessionOptions | null | undefined): string | null {
+  return normalizeNonEmptyString(options?.profileId);
+}
+
 function readPermissionFromOptions(
   options: SpawnSessionOptions | null | undefined,
   source: CandidateSource,
@@ -292,6 +309,10 @@ function applySnapshotToSpawnOptions(
     next.connectedServiceMaterializationIdentityV1 = snapshot.connectedServiceMaterializationIdentityV1;
   }
 
+  if (snapshot.profileId) {
+    next.profileId = snapshot.profileId;
+  }
+
   if (snapshot.permissionMode) {
     next.permissionMode = snapshot.permissionMode.value;
     next.permissionModeUpdatedAt = snapshot.permissionMode.updatedAt;
@@ -345,6 +366,11 @@ export function resolveSessionRuntimeSnapshot(
       readMaterializationIdentityFromOptionsEnv(params.trackedSpawnOptions),
       readMaterializationIdentityCandidate(params.incomingOptions.connectedServiceMaterializationIdentityV1),
     ])?.value ?? null,
+    profileId: chooseUntimestampedString([
+      { source: 'persisted', value: normalizeNonEmptyString(params.persistedMetadata?.profileId) },
+      { source: 'tracked', value: readProfileIdFromOptions(params.trackedSpawnOptions) },
+      { source: 'incoming', value: readProfileIdFromOptions(params.incomingOptions) },
+    ]),
     permissionMode: chooseTimestamped([
       readPermissionFromMetadata(params.persistedMetadata),
       readPermissionFromOptions(params.trackedSpawnOptions, 'tracked'),

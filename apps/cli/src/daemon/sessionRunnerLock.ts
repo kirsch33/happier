@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { configuration } from '@/configuration';
@@ -309,4 +309,107 @@ export async function readSessionRunnerLockStatus(params: Readonly<{ sessionId: 
     if (e?.code === 'ENOENT') return { ok: false, reason: 'not_found' };
     return { ok: false, reason: 'io_error', errorMessage: e instanceof Error ? e.message : String(e) };
   }
+}
+
+
+export type PruneStaleSessionRunnerLocksResult = Readonly<{
+  scanned: number;
+  removed: number;
+  retained: number;
+  removedLocks: ReadonlyArray<Readonly<{ sessionId: string; pid: number; path: string; reason: 'invalid' | 'dead' | 'zombie' | 'pid_reused' }>>;
+  errors: ReadonlyArray<Readonly<{ path: string; errorMessage: string }>>;
+}>;
+
+export async function pruneStaleSessionRunnerLocks(params: Readonly<{
+  happyHomeDir?: string;
+  readProcessRunState?: (pid: number) => Promise<ProcessRunState>;
+  getCurrentProcessCommandHash?: SessionRunnerProcessCommandHashReader;
+}> = {}): Promise<PruneStaleSessionRunnerLocksResult> {
+  const happyHomeDir = String(params.happyHomeDir ?? configuration.happyHomeDir).trim();
+  const locksDir = sessionRunnerLocksDir(happyHomeDir);
+  const readProcessRunState = params.readProcessRunState ?? readProcessRunStateDefault;
+  const removedLocks: Array<{ sessionId: string; pid: number; path: string; reason: 'invalid' | 'dead' | 'zombie' | 'pid_reused' }> = [];
+  const errors: Array<{ path: string; errorMessage: string }> = [];
+  let scanned = 0;
+  let retained = 0;
+
+  let entries: Array<{ isFile: () => boolean; name: string }>;
+  try {
+    entries = await readdir(locksDir, { withFileTypes: true });
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') {
+      return { scanned: 0, removed: 0, retained: 0, removedLocks: [], errors: [] };
+    }
+    return {
+      scanned: 0,
+      removed: 0,
+      retained: 0,
+      removedLocks: [],
+      errors: [{ path: locksDir, errorMessage: e instanceof Error ? e.message : String(e) }],
+    };
+  }
+
+  const removeLock = async (path: string, lock: LockPayload | null, reason: 'invalid' | 'dead' | 'zombie' | 'pid_reused') => {
+    try {
+      await unlink(path);
+      removedLocks.push({
+        sessionId: lock?.sessionId ?? '',
+        pid: lock?.pid ?? 0,
+        path,
+        reason,
+      });
+    } catch (e) {
+      errors.push({ path, errorMessage: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const lockPath = join(locksDir, entry.name);
+    scanned += 1;
+
+    let existing: LockPayload | null = null;
+    try {
+      existing = safeParseLockPayload(await readFile(lockPath, 'utf8'));
+    } catch (e) {
+      errors.push({ path: lockPath, errorMessage: e instanceof Error ? e.message : String(e) });
+      retained += 1;
+      continue;
+    }
+
+    if (!existing) {
+      await removeLock(lockPath, null, 'invalid');
+      continue;
+    }
+
+    const holderState = await readProcessRunState(existing.pid).catch<ProcessRunState>(() => 'servable');
+    if (holderState === 'dead' || holderState === 'zombie') {
+      await removeLock(lockPath, existing, holderState);
+      continue;
+    }
+
+    if (existing.processCommandHash) {
+      const currentIdentity = await readSessionRunnerProcessIdentity({
+        pid: existing.pid,
+        getProcessCommandHash: params.getCurrentProcessCommandHash,
+      });
+      if (storedProcessHashProvesPidReuse({
+        storedProcessCommandHash: existing.processCommandHash,
+        currentIdentity,
+      })) {
+        await removeLock(lockPath, existing, 'pid_reused');
+        continue;
+      }
+    }
+
+    retained += 1;
+  }
+
+  return {
+    scanned,
+    removed: removedLocks.length,
+    retained,
+    removedLocks,
+    errors,
+  };
 }

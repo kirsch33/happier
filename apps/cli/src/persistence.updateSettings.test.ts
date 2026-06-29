@@ -244,4 +244,51 @@ describe('updateSettings', () => {
     };
     expect(persisted.onboardingCompleted).toBe(true);
   });
+
+  it('falls back to copying settings on persistent Windows rename EPERM', async () => {
+    const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+    if (!originalPlatformDescriptor?.configurable) {
+      throw new Error('Expected process.platform to be configurable for this test');
+    }
+    Object.defineProperty(process, 'platform', { ...originalPlatformDescriptor, value: 'win32' });
+
+    vi.doMock('node:fs/promises', async () => {
+      const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+
+      return {
+        ...actual,
+        rename: async (...args: Parameters<typeof actual.rename>) => {
+          const [from, to] = args;
+          if (String(from).endsWith('settings.json.tmp') && String(to).endsWith('settings.json')) {
+            const error = Object.assign(
+              new Error('EPERM: operation not permitted, rename settings.json.tmp -> settings.json'),
+              { code: 'EPERM' as const },
+            );
+            throw error;
+          }
+          return actual.rename(...args);
+        },
+      };
+    });
+
+    try {
+      const { configuration } = await import('@/configuration');
+      const { updateSettings } = await import('@/persistence');
+
+      const updated = await updateSettings((current) => ({
+        ...current,
+        onboardingCompleted: true,
+      }));
+
+      expect(updated.onboardingCompleted).toBe(true);
+      expect(existsSync(`${configuration.settingsFile}.tmp`)).toBe(false);
+      const persisted = JSON.parse(await readFile(configuration.settingsFile, 'utf8')) as {
+        onboardingCompleted?: boolean;
+      };
+      expect(persisted.onboardingCompleted).toBe(true);
+    } finally {
+      Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+    }
+  });
+
 });

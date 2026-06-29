@@ -230,6 +230,30 @@ function readRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
 }
 
+function previewJson(value: unknown, maxLength = 500): string {
+  try {
+    const json = JSON.stringify(value, (key, child) => {
+      if (/authorization|token|secret|credential|key/i.test(key)) return '[redacted]';
+      return child;
+    });
+    if (!json) return String(value);
+    return json.length > maxLength ? json.slice(0, maxLength) + '...' : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function readCreateSessionResponseSession(responseData: unknown, status: number | undefined): CreateSessionResponse['session'] {
+  const session = readRecord(readRecord(responseData)?.session);
+  const id = typeof session?.id === 'string' && session.id.trim().length > 0 ? session.id.trim() : null;
+  if (!session || !id) {
+    throw new Error(
+      `Unexpected /v1/sessions response (status ${status ?? 'unknown'}): missing session object; body=${previewJson(responseData)}`,
+    );
+  }
+  return session as CreateSessionResponse['session'];
+}
+
 function readResponseErrorCode(value: unknown): string | null {
   const error = readRecord(value)?.error;
   return typeof error === 'string' ? error : null;
@@ -350,8 +374,8 @@ export class ApiClient {
           }
         )
 
-        logger.debug(`Session created/loaded: ${response.data.session.id} (tag: ${opts.tag})`)
-        let raw = response.data.session;
+        let raw = readCreateSessionResponseSession(response.data, response.status);
+        logger.debug(`Session created/loaded: ${raw.id} (tag: ${opts.tag})`)
 
       const sessionEncryptionMode: 'e2ee' | 'plain' =
         (raw as any)?.encryptionMode === 'plain' ? 'plain' : 'e2ee';

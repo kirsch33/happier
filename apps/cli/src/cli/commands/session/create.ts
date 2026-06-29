@@ -21,13 +21,14 @@ export async function cmdSessionCreate(
   });
   const tag = (readFlagValue(argv, '--tag') ?? '').trim();
   const title = (readFlagValue(argv, '--title') ?? '').trim();
+  const profileId = (readFlagValue(argv, '--profile') ?? '').trim();
   const initialPrompt = (readFlagValue(argv, '--message') ?? readFlagValue(argv, '--prompt') ?? '').trim();
   const backendRaw = (readFlagValue(argv, '--backend') ?? readFlagValue(argv, '--agent') ?? '').trim();
   const backendTargetKeys = normalizeBackendTargetKeysFromCsv(backendRaw);
   const backendTargetKey = backendTargetKeys.length === 1 ? backendTargetKeys[0] : null;
   if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
     throw new Error(
-      'Usage: happier session create [--path <path>] [--backend <backend-target>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
+      'Usage: happier session create [--path <path>] [--backend <backend-target>] [--profile <id-or-name>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
     );
   }
 
@@ -43,7 +44,7 @@ export async function cmdSessionCreate(
 
   if (backendRaw && !backendTargetKey) {
     throw new Error(
-      'Usage: happier session create [--path <path>] [--backend <backend-target>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
+      'Usage: happier session create [--path <path>] [--backend <backend-target>] [--profile <id-or-name>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
     );
   }
 
@@ -55,6 +56,7 @@ export async function cmdSessionCreate(
       {
         path,
         ...(backendTargetKey ? { backendTargetKey } : { agentId: DEFAULT_CATALOG_AGENT_ID }),
+        ...(profileId ? { profileId } : {}),
         ...(title ? { title } : {}),
         ...(tag ? { tag } : {}),
         ...(initialPrompt ? { initialMessage: initialPrompt } : {}),

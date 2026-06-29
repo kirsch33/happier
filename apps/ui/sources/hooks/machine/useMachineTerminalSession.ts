@@ -199,10 +199,9 @@ export function useMachineTerminalSession(params: Readonly<{
                 failTerminalSession('terminal_rpc_target_unavailable');
                 return;
             }
-            if (params.machineReachable === false) {
-                failTerminalSession('terminal_machine_unreachable');
-                return;
-            }
+            // Cached machine presence can be stale on mobile/self-hosted relay paths.
+            // Try the daemon RPC when we have a concrete target and let the transport
+            // return terminal_machine_unreachable if the machine is truly unavailable.
             if (!initialTerminalSize) {
                 setStatus('connecting');
                 return;

@@ -21,6 +21,56 @@ function toAgentSdkPermissionResult(result: PermissionResult): any {
   };
 }
 
+const INTERACTIVE_AGENT_TOOL_NAMES = new Set([
+  'AskUserQuestion',
+  'ask_user_question',
+  'ExitPlanMode',
+  'exit_plan_mode',
+]);
+
+function isInteractiveAgentTool(toolName: string): boolean {
+  return INTERACTIVE_AGENT_TOOL_NAMES.has(toolName);
+}
+
+function getPreToolUseToolUseId(input: any, hookToolUseId: unknown): string | null {
+  if (typeof hookToolUseId === 'string' && hookToolUseId.length > 0) return hookToolUseId;
+  if (input && typeof input.tool_use_id === 'string' && input.tool_use_id.length > 0) return input.tool_use_id;
+  if (input && typeof input.toolUseID === 'string' && input.toolUseID.length > 0) return input.toolUseID;
+  return null;
+}
+
+function toPreToolUseDecision(result: PermissionResult): any {
+  if (result.behavior === 'allow') {
+    const updatedInput =
+      result.updatedInput && typeof result.updatedInput === 'object' && !Array.isArray(result.updatedInput)
+        ? result.updatedInput
+        : undefined;
+    return {
+      continue: true,
+      suppressOutput: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        ...(updatedInput ? { updatedInput } : {}),
+        ...(typeof result.updatedPermissions !== 'undefined' ? { updatedPermissions: result.updatedPermissions } : {}),
+      },
+    };
+  }
+
+  return {
+    continue: true,
+    suppressOutput: true,
+    ...(typeof result.message === 'string' && result.message.length > 0 ? { systemMessage: result.message } : {}),
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      ...(typeof result.message === 'string' && result.message.length > 0
+        ? { permissionDecisionReason: result.message }
+        : {}),
+    },
+  };
+}
+
 export function buildClaudeAgentSdkHooks(params: Readonly<{
   cwd: string;
   claudeConfigDir: string | null;
@@ -73,17 +123,27 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
     PreToolUse: [
       {
         hooks: [
-          async (input: any) => {
+          async (input: any, toolUseID?: string, options?: { signal?: AbortSignal }) => {
             if (!input || typeof input !== 'object') {
               return { continue: true, suppressOutput: true };
             }
 
             const toolName = typeof input.tool_name === 'string' ? input.tool_name : '';
+            const toolInput = (input as any).tool_input;
+            if (isInteractiveAgentTool(toolName)) {
+              const fallbackController = new AbortController();
+              const result = await params.canCallTool(toolName, toolInput, params.getMode(), {
+                signal: options?.signal ?? fallbackController.signal,
+                toolUseId: getPreToolUseToolUseId(input, toolUseID),
+                suggestions: (input as any).permission_suggestions,
+              });
+              return toPreToolUseDecision(result);
+            }
+
             if (toolName !== 'Bash') {
               return { continue: true, suppressOutput: true };
             }
 
-            const toolInput = (input as any).tool_input;
             if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
               return { continue: true, suppressOutput: true };
             }

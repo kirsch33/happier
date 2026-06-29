@@ -383,6 +383,7 @@ interface AgentInputProps {
     onAttachmentsAdded?: (files: readonly File[]) => void;
     hasSendableAttachments?: boolean;
     permissionRequests?: ReadonlyArray<PendingPermissionRequest>;
+    userActionRequests?: ReadonlyArray<PendingPermissionRequest>;
     approvalRequests?: ReadonlyArray<OpenApprovalArtifactForSession>;
     canApprovePermissions?: boolean;
     permissionDisabledReason?: 'public' | 'readOnly' | 'notGranted' | 'inactive';
@@ -394,15 +395,22 @@ function AgentInputAttentionRequestsWithLocations(
     const { ids: committedMessageIdsOldestFirst } = useSessionTranscriptIds(props.sessionId);
     const committedMessagesById = useSessionMessagesById(props.sessionId);
     const committedMessagesReducerState = useSessionMessagesReducerState(props.sessionId);
-    const permissionLocationVersion = useSessionMessagesVersion(props.sessionId, props.permissionRequests.length > 0);
+    const permissionLocationVersion = useSessionMessagesVersion(
+        props.sessionId,
+        props.permissionRequests.length > 0 || (props.userActionRequests?.length ?? 0) > 0,
+    );
     const approvalLocationVersion = useSessionMessagesVersion(props.sessionId, (props.approvalRequests?.length ?? 0) > 0);
 
     const permissionLocationsById = React.useMemo(() => {
-        if (props.permissionRequests.length === 0) {
+        const userActionRequests = props.userActionRequests ?? [];
+        if (props.permissionRequests.length === 0 && userActionRequests.length === 0) {
             return EMPTY_PERMISSION_LOCATIONS_BY_ID;
         }
 
-        const ids = props.permissionRequests.map((request) => request.id);
+        const ids = [
+            ...props.permissionRequests.map((request) => request.id),
+            ...userActionRequests.map((request) => request.id),
+        ];
         return new Map(
             resolvePermissionToolCallLocations({
                 permissionIds: ids,
@@ -422,6 +430,7 @@ function AgentInputAttentionRequestsWithLocations(
         committedMessagesReducerState,
         permissionLocationVersion,
         props.permissionRequests,
+        props.userActionRequests,
     ]);
 
     const approvalLocationsByArtifactId = React.useMemo(() => {
@@ -1200,6 +1209,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const [fileDragActive, setFileDragActive] = React.useState(false);
 
     const pendingPermissionRequests = props.permissionRequests ?? [];
+    const pendingUserActionRequests = props.userActionRequests ?? [];
     const pendingApprovalRequests = props.approvalRequests ?? [];
     const canApprovePermissions = props.canApprovePermissions ?? true;
     const permissionPromptSurface = useSetting('permissionPromptSurface');
@@ -1214,6 +1224,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         && showComposerPermissionCards
         && (
             composerPermissionRequests.length > 0
+            || pendingUserActionRequests.length > 0
             || pendingApprovalRequests.length > 0
         ),
     );
@@ -2778,6 +2789,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     <AgentInputAttentionRequestsWithLocations
                         sessionId={props.sessionId}
                         permissionRequests={composerPermissionRequests}
+                        userActionRequests={pendingUserActionRequests}
                         approvalRequests={pendingApprovalRequests}
                         metadata={props.metadata || null}
                         canApprovePermissions={canApprovePermissions}
@@ -2798,6 +2810,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     <AgentInputAttentionRequests
                         sessionId={props.sessionId}
                         permissionRequests={composerPermissionRequests}
+                        userActionRequests={pendingUserActionRequests}
                         approvalRequests={pendingApprovalRequests}
                         permissionLocationsById={EMPTY_PERMISSION_LOCATIONS_BY_ID}
                         approvalLocationsByArtifactId={EMPTY_PERMISSION_LOCATIONS_BY_ID}

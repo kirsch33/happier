@@ -59,6 +59,7 @@ describe('resolveSessionRuntimeSnapshot', () => {
       connectedServices: persistedConnectedServices,
       connectedServicesUpdatedAt: null,
       connectedServiceMaterializationIdentityV1: null,
+      profileId: null,
       permissionMode: { value: 'yolo', updatedAt: 200 },
       agentModeId: { value: 'plan', updatedAt: 210 },
       modelId: { value: 'claude-opus-4-7', updatedAt: 220 },
@@ -224,6 +225,36 @@ describe('resolveSessionRuntimeSnapshot', () => {
       modelUpdatedAt: 420,
       resume: 'tracked-resume',
     });
+  });
+
+  it('restores the persisted profile id so resumed sessions load profile environment', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions(),
+      persistedMetadata: {
+        profileId: ' greatwhiteclaude ',
+      },
+    });
+
+    expect(result.snapshot.profileId).toBe('greatwhiteclaude');
+    expect(result.spawnOptions.profileId).toBe('greatwhiteclaude');
+  });
+
+  it('prefers explicit incoming profile id over tracked and persisted profile ids', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions({
+        profileId: 'incoming-profile',
+      }),
+      persistedMetadata: {
+        profileId: 'persisted-profile',
+      },
+      trackedSpawnOptions: {
+        directory: '/tmp/repo',
+        profileId: 'tracked-profile',
+      },
+    });
+
+    expect(result.snapshot.profileId).toBe('incoming-profile');
+    expect(result.spawnOptions.profileId).toBe('incoming-profile');
   });
 
   it('restores the vendor resume id from persisted provider metadata when respawn options omit resume', () => {

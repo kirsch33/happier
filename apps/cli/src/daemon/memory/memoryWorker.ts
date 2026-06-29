@@ -186,6 +186,18 @@ export async function startMemoryWorker(params: Readonly<{
     return resolution;
   };
 
+  const refreshEmbeddingsDiagnosticsForSettingsLoad = async (): Promise<void> => {
+    const embeddings = resolveOperationalMemoryEmbeddingsSettings(settings.embeddings);
+    if (embeddings?.providerKind !== 'local_transformers') {
+      await refreshEmbeddingsDiagnostics();
+      return;
+    }
+
+    // Local Transformers initializes a native model runtime and can retain gigabytes on small hosts.
+    // Keep status/config visible, but defer loading until indexing actually has chunks to embed.
+    embeddingsDiagnostics = buildUnavailableMemoryEmbeddingsDiagnostics(settings.embeddings);
+  };
+
   const hasCustomDeps = Boolean(params.deps);
   const deps =
     params.deps ??
@@ -444,7 +456,6 @@ export async function startMemoryWorker(params: Readonly<{
     if (sessionIds.length === 0) return;
 
     const embeddings = resolveOperationalMemoryEmbeddingsSettings(settings.embeddings);
-    const embeddingsResolution = await refreshEmbeddingsDiagnostics();
 
     await syncDeepIndexForSessionsOnce({
       sessionIds,
@@ -467,7 +478,10 @@ export async function startMemoryWorker(params: Readonly<{
       },
       now: () => Date.now(),
       fetchDecryptedTranscriptPageAfterSeq: deps.fetchDecryptedTranscriptPageAfterSeq,
-      ...(embeddingsResolution?.provider ? { embedDocuments: embeddingsResolution.provider.embedDocuments } : {}),
+      resolveEmbedDocuments: async () => {
+        const embeddingsResolution = await refreshEmbeddingsDiagnostics();
+        return embeddingsResolution?.provider?.embedDocuments ?? null;
+      },
     });
   };
 
@@ -541,7 +555,7 @@ export async function startMemoryWorker(params: Readonly<{
       deep = null;
     }
 
-    await refreshEmbeddingsDiagnostics();
+    await refreshEmbeddingsDiagnosticsForSettingsLoad();
 
     // Background indexing runs only in daemon mode.
     if (configuration.isDaemonProcess) {

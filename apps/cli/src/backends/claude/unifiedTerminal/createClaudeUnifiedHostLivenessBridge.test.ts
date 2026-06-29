@@ -51,6 +51,49 @@ describe('createClaudeUnifiedHostLivenessBridge', () => {
     abortController.abort();
   });
 
+  it('treats a live tmux pane that returned to shell as a dead Claude host', async () => {
+    vi.useFakeTimers();
+    let nowMs = 100;
+    const evaluateLiveness = vi
+      .fn()
+      .mockResolvedValueOnce({ paneAlive: true, paneDead: false, paneCurrentCommand: 'bash', observedAt: 110 })
+      .mockResolvedValueOnce({ paneAlive: true, paneDead: false, paneCurrentCommand: 'bash', observedAt: 111 });
+    const onHostDead = vi.fn(async () => undefined);
+    const bridge = createClaudeUnifiedHostLivenessBridge({
+      hostAdapter: { evaluateLiveness },
+      handle: { ...handle, kind: 'tmux' },
+      onHostDead,
+      pollIntervalMs: 30_000,
+      pollJitterMs: 0,
+      startupGraceMs: 0,
+      startupGraceActive: () => false,
+      nowMs: () => nowMs,
+    });
+    const abortController = new AbortController();
+
+    bridge.start({ abortSignal: abortController.signal });
+
+    nowMs += 30_000;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(onHostDead).not.toHaveBeenCalled();
+
+    nowMs += 1_000;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onHostDead).toHaveBeenCalledTimes(1);
+    const firstDeadArg = (
+      onHostDead.mock.calls as unknown as Array<[{ liveness?: unknown }]>
+    )[0]?.[0];
+    expect(firstDeadArg?.liveness).toEqual(expect.objectContaining({
+      paneAlive: false,
+      paneDead: true,
+      paneCurrentCommand: 'bash',
+      paneScreenDumpError: 'terminal host returned to shell (bash)',
+    }));
+
+    bridge.dispose();
+    abortController.abort();
+  });
+
   it('settles the monitor promise on abort without waiting out the steady-state poll timer', async () => {
     vi.useFakeTimers();
     const evaluateLiveness = vi.fn(async () => ({ paneAlive: true, observedAt: 0 }));

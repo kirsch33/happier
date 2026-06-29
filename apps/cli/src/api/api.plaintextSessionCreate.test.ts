@@ -18,6 +18,7 @@ vi.mock('@/configuration', () => ({
   configuration: {
     serverUrl: 'https://api.example.com',
     apiServerUrl: 'https://api.example.com',
+    daemonReattachCatchUpConcurrency: 0,
   },
 }));
 
@@ -178,5 +179,60 @@ describe('ApiClient.getOrCreateSession (plaintext sessions)', () => {
 
     expect(session).not.toBeNull();
     expect(session?.metadata.path).toBe('/tmp');
+  });
+
+  it('reports malformed create-session responses instead of throwing a property access TypeError', async () => {
+    const credential = {
+      token: 'token-test',
+      encryption: {
+        type: 'legacy' as const,
+        secret: new Uint8Array(32).fill(7),
+      },
+    };
+
+    vi.stubGlobal('fetch', vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : String((input as any)?.url ?? input);
+      if (url.endsWith('/v1/features')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            features: {},
+            capabilities: {
+              encryption: {
+                storagePolicy: 'plaintext_only',
+                allowAccountOptOut: false,
+                defaultAccountMode: 'e2ee',
+              },
+            },
+          }),
+        } as any;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as any);
+
+    mockPost.mockResolvedValue({
+      status: 200,
+      data: {
+        usage_limit: {
+          kind: 'daily',
+          token: 'must-not-log',
+        },
+      },
+    });
+
+    const api = await ApiClient.create(credential as any);
+    await expect(api.getOrCreateSession({
+      tag: 'tag-plain',
+      metadata: {
+        path: '/tmp',
+        host: 'localhost',
+        homeDir: '/home/user',
+        happyHomeDir: '/home/user/.happy',
+        happyLibDir: '/home/user/.happy/lib',
+        happyToolsDir: '/home/user/.happy/tools',
+      },
+      state: null,
+    })).rejects.toThrow(/Unexpected \/v1\/sessions response .*missing session object/);
   });
 });

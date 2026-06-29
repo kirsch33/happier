@@ -5,7 +5,7 @@
  */
 
 import { FileHandle } from 'node:fs/promises'
-import { readFile, writeFile, mkdir, open, unlink, rename, stat, chmod, readdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, open, unlink, rename, stat, chmod, readdir, copyFile } from 'node:fs/promises'
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { constants } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -491,10 +491,16 @@ export async function updateSettings(
         await rename(sourcePath, targetPath);
         return;
       } catch (error) {
-        if (
-          !isTransientSettingsRenameError(error)
-          || attempt >= MAX_RENAME_ATTEMPTS - 1
-        ) {
+        if (!isTransientSettingsRenameError(error)) {
+          throw error;
+        }
+
+        if (attempt >= MAX_RENAME_ATTEMPTS - 1) {
+          if (process.platform === 'win32') {
+            await copyFile(sourcePath, targetPath);
+            await unlink(sourcePath).catch(() => { });
+            return;
+          }
           throw error;
         }
       }

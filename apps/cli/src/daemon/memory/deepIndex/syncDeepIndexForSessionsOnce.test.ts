@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { openSummaryShardIndexDb } from '../summaryShardIndexDb';
 import { openDeepIndexDb } from './deepIndexDb';
@@ -288,6 +288,58 @@ describe('syncDeepIndexForSessionsOnce', () => {
         keys: [{ sessionId: 'sess-1', seqFrom: 1, seqTo: 2 }],
       });
       expect(embeddingMap.get('sess-1:1-2')).toBeTruthy();
+
+      deep.close();
+      tier1.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not resolve an embeddings provider when no chunks need embeddings', async () => {
+    const dir = await mkdtemp(join(os.tmpdir(), 'happier-memory-deep-sync-no-emb-work-'));
+    try {
+      const tier1Path = join(dir, 'memory.sqlite');
+      const deepPath = join(dir, 'deep.sqlite');
+      const tier1 = openSummaryShardIndexDb({ dbPath: tier1Path });
+      tier1.init();
+      const deep = openDeepIndexDb({ dbPath: deepPath });
+      deep.init();
+      const resolveEmbedDocuments = vi.fn(async () => {
+        throw new Error('embedding provider should not be resolved without embedding work');
+      });
+
+      await (syncDeepIndexForSessionsOnce as any)({
+        sessionIds: ['sess-1'],
+        tier1,
+        deep,
+        now: () => 10_000,
+        settings: {
+          enabled: true,
+          indexMode: 'deep',
+          deep: {
+            maxChunkChars: 8000,
+            maxChunkMessages: 20,
+            minChunkMessages: 1,
+            includeAssistantAcpMessage: true,
+            failureBackoffBaseMs: 0,
+            failureBackoffMaxMs: 0,
+          },
+          embeddings: {
+            enabled: true,
+            mode: 'custom',
+            presetId: null,
+            providerKind: 'test',
+            modelId: 'm1',
+            blend: { ftsWeight: 0.7, embeddingWeight: 0.3 },
+            providerConfig: null,
+          },
+        },
+        resolveEmbedDocuments,
+        fetchDecryptedTranscriptPageAfterSeq: async () => [],
+      });
+
+      expect(resolveEmbedDocuments).not.toHaveBeenCalled();
 
       deep.close();
       tier1.close();

@@ -688,7 +688,7 @@ describe('createCliActionExecutor', () => {
         },
       },
     });
-    bootstrapAccountSettingsContext.mockResolvedValueOnce({
+    bootstrapAccountSettingsContext.mockResolvedValue({
       source: 'network',
       settings: accountSettingsParse({
         connectedServicesDefaultAuthByAgentIdV1: {
@@ -706,6 +706,19 @@ describe('createCliActionExecutor', () => {
             },
           },
         },
+        profiles: [
+          {
+            id: 'profile-greatwhite',
+            name: 'greatwhiteclaude',
+            compatibilityByTargetKey: { 'agent:claude': true },
+            environmentVariables: [{ name: 'IS_SANDBOX', value: '1' }],
+            envVarRequirements: [],
+            isBuiltIn: false,
+            createdAt: 0,
+            updatedAt: 0,
+            version: '1.0.0',
+          },
+        ],
       }),
       settingsVersion: 7,
       loadedAtMs: 1234,
@@ -750,6 +763,7 @@ describe('createCliActionExecutor', () => {
         tag: 'voice-qa',
         agentId: 'claude',
         modelId: 'gpt-5',
+        profileId: 'greatwhiteclaude',
         initialMessage: 'Hello from CLI action',
       },
       { surface: 'cli', defaultSessionId: 'sess-1' },
@@ -760,6 +774,8 @@ describe('createCliActionExecutor', () => {
       directory: '/repo/current',
       machineId: 'machine-1',
       backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      profileId: 'profile-greatwhite',
+      environmentVariables: { IS_SANDBOX: '1' },
       modelId: 'gpt-5',
       initialPrompt: 'Hello from CLI action',
       connectedServices: {

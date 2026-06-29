@@ -623,6 +623,17 @@ vi.mock('./connectedServices/quotas/resolveConnectedServicesQuotasDaemonEnabled'
 }));
 
 describe('startDaemon spawn resume wiring (integration)', () => {
+  async function waitForSpawnSessionRegistration() {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const spawnSession = harness.getSpawnSession();
+      if (spawnSession) {
+        return spawnSession;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    throw new Error('Expected spawnSession to be registered');
+  }
+
   afterEach(() => {
     vi.restoreAllMocks();
     harness.resetControlRefs();
@@ -2209,10 +2220,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       const run = startDaemon();
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      const spawnSession = harness.getSpawnSession();
-      if (!spawnSession) {
-        throw new Error('Expected spawnSession to be registered');
-      }
+      const spawnSession = await waitForSpawnSessionRegistration();
       if (!trackedSessionCapture.current) {
         throw new Error('Expected tracked session map from webhook wiring');
       }
@@ -2352,10 +2360,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       const run = startDaemon();
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      const spawnSession = harness.getSpawnSession();
-      if (!spawnSession) {
-        throw new Error('Expected spawnSession to be registered');
-      }
+      const spawnSession = await waitForSpawnSessionRegistration();
       if (!trackedSessionCapture.current) {
         throw new Error('Expected tracked session map from webhook wiring');
       }
@@ -2679,6 +2684,87 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       vi.mocked(isSessionRunnerActive).mockResolvedValue(false);
       guardedRpcMock.mockReset();
       guardedRpcMock.mockResolvedValue({
+        ok: true,
+        didMaterialize: false,
+        result: { type: 'no_pending' },
+      });
+      if (retryAttemptsOriginal === undefined) {
+        delete process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_ATTEMPTS;
+      } else {
+        process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_ATTEMPTS = retryAttemptsOriginal;
+      }
+      if (retryDelayOriginal === undefined) {
+        delete process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_DELAY_MS;
+      } else {
+        process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_DELAY_MS = retryDelayOriginal;
+      }
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('does not retire a freshly attached existing session while its pending queue RPC is still warming up', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    const retryAttemptsOriginal = process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_ATTEMPTS;
+    const retryDelayOriginal = process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_DELAY_MS;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_ATTEMPTS = '3';
+    process.env.HAPPIER_DAEMON_ATTACH_PENDING_QUEUE_NUDGE_RETRY_DELAY_MS = '1';
+    vi.mocked(isSessionRunnerActive).mockResolvedValue(false);
+
+    const guardedRpcMock = vi.mocked(callSessionRpc);
+    guardedRpcMock.mockRejectedValue({
+      rpcErrorCode: 'RPC_METHOD_NOT_AVAILABLE',
+      message: 'RPC method not available: sess_plain:session.pendingQueue.materializeNext',
+    });
+
+    try {
+      const { startDaemon } = await import('./startDaemon');
+
+      const run = startDaemon();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const spawnSession = await waitForSpawnSessionRegistration();
+
+      const result = await spawnSession({
+        directory: '/tmp',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        existingSessionId: 'sess_plain',
+        token: 'token-from-spawn-options',
+        codexBackendMode: 'appServer',
+      });
+
+      expect(result).toEqual({ type: 'success', sessionId: 'sess_plain' });
+      expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        if (guardedRpcMock.mock.calls.length >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+
+      expect(stopSessionMocks.stopSession).not.toHaveBeenCalledWith('sess_plain');
+      expect(guardedRpcMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(guardedRpcMock).toHaveBeenCalledWith({
+        token: 'token-daemon',
+        sessionId: 'sess_plain',
+        mode: 'plain',
+        ctx: pendingMaterializationRpcMocks.ctx,
+        method: 'sess_plain:session.pendingQueue.materializeNext',
+        request: { reconcileWhenEmpty: 'force' },
+      });
+      expect(materializeNextPendingQueueV2MessageViaHttp).not.toHaveBeenCalled();
+
+      harness.requestShutdown('happier-cli');
+      await run;
+    } finally {
+      vi.mocked(isSessionRunnerActive).mockResolvedValue(false);
+      vi.mocked(callSessionRpc).mockReset();
+      vi.mocked(callSessionRpc).mockResolvedValue({
         ok: true,
         didMaterialize: false,
         result: { type: 'no_pending' },

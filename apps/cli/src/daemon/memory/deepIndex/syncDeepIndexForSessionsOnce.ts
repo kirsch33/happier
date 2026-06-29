@@ -55,6 +55,7 @@ export async function syncDeepIndexForSessionsOnce(params: Readonly<{
   now: () => number;
   fetchDecryptedTranscriptPageAfterSeq: (args: Readonly<{ sessionId: string; afterSeq: number; limit: number }>) => Promise<DecryptedTranscriptRow[]>;
   embedDocuments?: (texts: readonly string[]) => Promise<Float32Array[]>;
+  resolveEmbedDocuments?: () => Promise<((texts: readonly string[]) => Promise<Float32Array[]>) | null | undefined>;
 }>): Promise<void> {
   if (!params.settings.enabled) return;
   if (params.settings.indexMode !== 'deep') return;
@@ -141,7 +142,7 @@ export async function syncDeepIndexForSessionsOnce(params: Readonly<{
       const emb = params.settings.embeddings;
       const provider = String(emb?.providerKind ?? '').trim();
       const modelId = String(emb?.modelId ?? '').trim();
-      if (emb?.enabled === true && typeof params.embedDocuments === 'function' && provider && modelId) {
+      if (emb?.enabled === true && provider && modelId) {
         const chunksToEmbed = params.deep.listChunksWithoutEmbeddings({
           sessionId,
           provider,
@@ -149,32 +150,38 @@ export async function syncDeepIndexForSessionsOnce(params: Readonly<{
           limit: Math.max(1, Math.max(chunks.length, pageLimit)),
         });
         if (chunksToEmbed.length > 0) {
-          try {
-            const vectors = await params.embedDocuments(chunksToEmbed.map((chunk) => chunk.text));
-            if (Array.isArray(vectors) && vectors.length === chunksToEmbed.length) {
-              for (let i = 0; i < chunksToEmbed.length; i += 1) {
-                const chunk = chunksToEmbed[i]!;
-                const vec = vectors[i]!;
-                if (!(vec instanceof Float32Array) || vec.length === 0) continue;
-                params.deep.upsertEmbedding({
-                  sessionId: chunk.sessionId,
-                  seqFrom: chunk.seqFrom,
-                  seqTo: chunk.seqTo,
-                  provider,
-                  modelId,
-                  embedding: vec,
-                  updatedAtMs: nowMs,
-                });
+          const embedDocuments =
+            typeof params.embedDocuments === 'function'
+              ? params.embedDocuments
+              : await params.resolveEmbedDocuments?.();
+          if (typeof embedDocuments === 'function') {
+            try {
+              const vectors = await embedDocuments(chunksToEmbed.map((chunk) => chunk.text));
+              if (Array.isArray(vectors) && vectors.length === chunksToEmbed.length) {
+                for (let i = 0; i < chunksToEmbed.length; i += 1) {
+                  const chunk = chunksToEmbed[i]!;
+                  const vec = vectors[i]!;
+                  if (!(vec instanceof Float32Array) || vec.length === 0) continue;
+                  params.deep.upsertEmbedding({
+                    sessionId: chunk.sessionId,
+                    seqFrom: chunk.seqFrom,
+                    seqTo: chunk.seqTo,
+                    provider,
+                    modelId,
+                    embedding: vec,
+                    updatedAtMs: nowMs,
+                  });
+                }
               }
+            } catch (error) {
+              logger.debug('[memoryWorker] Missing chunk embeddings backfill failed (best-effort)', {
+                sessionId,
+                provider,
+                modelId,
+                chunkCount: chunksToEmbed.length,
+                message: error instanceof Error ? error.message : String(error),
+              });
             }
-          } catch (error) {
-            logger.debug('[memoryWorker] Missing chunk embeddings backfill failed (best-effort)', {
-              sessionId,
-              provider,
-              modelId,
-              chunkCount: chunksToEmbed.length,
-              message: error instanceof Error ? error.message : String(error),
-            });
           }
         }
       }

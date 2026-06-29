@@ -124,6 +124,53 @@ describe('memoryWorker', () => {
     worker.stop();
   });
 
+  it('does not initialize local transformer embeddings during settings reload', async () => {
+    const resolveEmbeddingsProvider = vi.fn(async () => {
+      throw new Error('local transformer provider should be lazy');
+    });
+    vi.doMock('./deepIndex/embeddings/resolveEmbeddingsProvider', () => ({
+      resolveEmbeddingsProvider,
+    }));
+
+    const { writeMemorySettingsToDisk } = await import('@/settings/memorySettings');
+    await writeMemorySettingsToDisk({
+      v: 1,
+      enabled: true,
+      indexMode: 'deep',
+      embeddings: {
+        mode: 'custom',
+        custom: {
+          kind: 'local_transformers',
+          modelId: 'Xenova/all-MiniLM-L6-v2',
+        },
+      },
+    });
+
+    const { startMemoryWorker } = await import('./memoryWorker');
+
+    const credentials: Credentials = { token: 't', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) } };
+    const worker = await startMemoryWorker({
+      credentials,
+      machineId: 'machine_1',
+      deps: {
+        fetchDecryptedTranscriptPageAfterSeq: async () => [],
+      },
+    });
+
+    await worker.reloadSettings();
+
+    expect(resolveEmbeddingsProvider).not.toHaveBeenCalled();
+    expect(worker.getEmbeddingsDiagnostics()).toMatchObject({
+      mode: 'custom',
+      providerKind: 'local_transformers',
+      modelId: 'Xenova/all-MiniLM-L6-v2',
+      runtimeState: 'unavailable',
+      usingFallback: false,
+    });
+
+    worker.stop();
+  });
+
   it('deletes DBs when disabled with deleteOnDisable=true', async () => {
     const { writeMemorySettingsToDisk } = await import('@/settings/memorySettings');
     await writeMemorySettingsToDisk({ v: 1, enabled: true, indexMode: 'hints' });

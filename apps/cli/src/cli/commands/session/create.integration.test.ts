@@ -368,7 +368,7 @@ describe('happier session create (integration)', () => {
       expect(parsed.kind).toBe('session_create');
       expect(parsed.error?.code).toBe('invalid_arguments');
       expect(parsed.error?.message).toBe(
-        'Usage: happier session create [--path <path>] [--backend <backend-target>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
+        'Usage: happier session create [--path <path>] [--backend <backend-target>] [--profile <id-or-name>] [--title <text>] [--tag <tag>] [--prompt <text>|--message <text>] [--json]',
       );
     } finally {
       output.restore();

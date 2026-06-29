@@ -401,7 +401,7 @@ describe('AgentInput (permission prompt surface)', () => {
         act(() => tree.unmount());
     });
 
-    it('does not show user action cards in the composer when surface is composer', async () => {
+    it('shows user action cards in the composer when surface is composer', async () => {
         permissionPromptSurfaceSetting.value = 'composer';
         const { AgentInput } = await import('./AgentInput');
         let tree!: renderer.ReactTestRenderer;
@@ -417,8 +417,7 @@ describe('AgentInput (permission prompt surface)', () => {
                     connectionStatus={null as any}
                 />)).tree;
 
-        expect(tree.findAllByType('UserActionPromptCard' as any)).toHaveLength(0);
-        expect(tree.root.findAllByProps({ testID: 'agentInput.permissionRequests.chrome' })).toHaveLength(0);
+        expect(tree.findAllByType('UserActionPromptCard' as any)).toHaveLength(1);
         act(() => tree.unmount());
     });
 

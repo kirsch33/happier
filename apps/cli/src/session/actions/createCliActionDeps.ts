@@ -31,6 +31,9 @@ import type { Credentials } from '@/persistence';
 import { readSettings } from '@/persistence';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
 import { createSpawnedSession } from '@/session/services/createSpawnedSession';
+import { buildProfileEnvOverlay } from '@/settings/profiles/buildProfileEnvOverlay';
+import { readProfilesFromAccountSettings } from '@/settings/profiles/readProfilesFromAccountSettings';
+import { resolveProfileForAgent } from '@/settings/profiles/resolveProfileForAgent';
 import {
   agentSupportsSpawnConnectedServicesDefaults,
   resolveSpawnConnectedServicesDefaults,
@@ -383,6 +386,51 @@ async function resolveSpawnConnectedServicesDefaultPayload(params: Readonly<{
   }
 }
 
+async function resolveSpawnProfilePayload(params: Readonly<{
+  backendTarget: BackendTargetRefV1;
+  credentials: Credentials;
+  profileQuery: string;
+}>): Promise<Readonly<{
+  profileId: string;
+  environmentVariables?: Record<string, string>;
+}> | null> {
+  const normalizedProfileQuery = params.profileQuery.trim();
+  if (!normalizedProfileQuery) return null;
+
+  if (params.backendTarget.kind !== 'builtInAgent') {
+    return { profileId: normalizedProfileQuery };
+  }
+
+  const agentId = params.backendTarget.agentId;
+  if (!AGENT_IDS.includes(agentId as AgentId)) {
+    return { profileId: normalizedProfileQuery };
+  }
+
+  const accountSettingsContext = await bootstrapAccountSettingsContext({
+    credentials: params.credentials,
+    mode: 'blocking',
+    deps: { applySideEffects: () => undefined },
+  });
+  const { customProfiles } = readProfilesFromAccountSettings(accountSettingsContext.settings as any);
+  const profile = resolveProfileForAgent({
+    agentId: agentId as AgentId,
+    query: normalizedProfileQuery,
+    customProfiles,
+  });
+  const overlay = await buildProfileEnvOverlay({
+    agentId: agentId as AgentId,
+    profile,
+    accountSettings: accountSettingsContext.settings as any,
+    credentials: params.credentials,
+    processEnv: process.env,
+    promptSecretFn: null,
+    startedBy: 'daemon',
+  });
+  return {
+    profileId: overlay.profileId,
+    environmentVariables: overlay.envOverlayExpanded,
+  };
+}
 export function createCliActionInventoryDeps(params: Readonly<{
   token: string;
   credentials?: Credentials;
@@ -1088,7 +1136,7 @@ export function createCliActionDeps(params: Readonly<{
     sessionOpen: async () => notSupported(),
     sessionFork: async () => notSupported(),
     sessionRollback: async () => notSupported(),
-    sessionSpawnNew: async ({ tag, agentId, modelId, backendTargetKey, title, path, host, initialMessage }) => {
+    sessionSpawnNew: async ({ tag, agentId, modelId, backendTargetKey, profileId, title, path, host, initialMessage }) => {
       if (!params.credentials) {
         notSupported();
       }
@@ -1132,10 +1180,15 @@ export function createCliActionDeps(params: Readonly<{
         return { type: 'error', errorCode: 'agent_not_found', errorMessage: 'agent_not_found' };
       }
       const normalizedTitle = typeof title === 'string' ? title.trim() : '';
+      const normalizedProfileId = typeof profileId === 'string' ? profileId.trim() : '';
       const connectedServicesDefaults = await resolveSpawnConnectedServicesDefaultPayload({
         credentials: params.credentials,
         backendTarget,
       });
+      const profilePayload = normalizedProfileId
+        ? await resolveSpawnProfilePayload({ backendTarget, credentials: params.credentials, profileQuery: normalizedProfileId })
+        : null;
+
 
       const created = await createSpawnedSession({
         credentials: params.credentials,
@@ -1143,6 +1196,8 @@ export function createCliActionDeps(params: Readonly<{
         ...(currentMachineId ? { machineId: currentMachineId } : {}),
         backendTarget,
         ...(connectedServicesDefaults ?? {}),
+        ...(profilePayload?.profileId ? { profileId: profilePayload.profileId } : normalizedProfileId ? { profileId: normalizedProfileId } : {}),
+        ...(profilePayload?.environmentVariables ? { environmentVariables: profilePayload.environmentVariables } : {}),
         ...(typeof tag === 'string' && tag.trim().length > 0 ? { tag: tag.trim() } : {}),
         ...(normalizedTitle ? { title: normalizedTitle } : {}),
         ...(typeof initialMessage === 'string' && initialMessage.trim().length > 0 ? { initialMessage: initialMessage.trim() } : {}),

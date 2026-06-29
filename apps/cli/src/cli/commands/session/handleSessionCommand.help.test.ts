@@ -12,7 +12,7 @@ describe('handleSessionCommand help output', () => {
 
       expect(output.text()).toContain('happier session list [--active] [--archived] [--limit N] [--cursor C] [--include-system] [--resumable] [--plain] [--json]');
       expect(output.text()).toContain('happier session status <session-id-or-prefix> [--live] [--json]');
-      expect(output.text()).toContain('happier session create [--path <path>] [--backend <backend-target>] [--tag <tag>] [--title <title>] [--prompt <text>|--message <text>] [--json]');
+      expect(output.text()).toContain('happier session create [--path <path>] [--backend <backend-target>] [--profile <id-or-name>] [--tag <tag>] [--title <title>] [--prompt <text>|--message <text>] [--json]');
       expect(output.text()).toContain('happier session send <session-id-or-prefix> <message> [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]');
       expect(output.text()).toContain('happier session wait <session-id-or-prefix> [--timeout <seconds>] [--json]');
       expect(output.text()).toContain('happier session stop <session-id-or-prefix> [--json]');

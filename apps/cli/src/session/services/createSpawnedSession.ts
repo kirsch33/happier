@@ -16,7 +16,9 @@ type CreateSpawnedSessionParams = Readonly<{
   machineId?: string;
   backendTarget: BackendTargetRefV1;
   modelId?: string;
+  profileId?: string;
   title?: string;
+  environmentVariables?: Record<string, string>;
   tag?: string;
   initialMessage?: string;
   connectedServices?: ConnectedServiceBindingsV1;
@@ -111,6 +113,8 @@ export async function createSpawnedSession(
     spawnNonce,
     ...(params.machineId ? { machineId: params.machineId } : {}),
     backendTarget: params.backendTarget,
+    ...(params.profileId ? { profileId: params.profileId } : {}),
+    ...(params.environmentVariables ? { environmentVariables: params.environmentVariables } : {}),
     ...(params.modelId ? { modelId: params.modelId, modelUpdatedAt: Date.now() } : {}),
     ...(typeof params.initialMessage === 'string' && params.initialMessage.trim().length > 0
       ? { initialPrompt: params.initialMessage }

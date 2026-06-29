@@ -224,6 +224,44 @@ function buildDaemonServiceProgramArgs(params: Readonly<{ nodePath: string; entr
   return [nodePath, 'daemon', 'start-sync', '--takeover'];
 }
 
+
+function psSingleQuoted(value: string): string {
+  return `'${String(value ?? '').replace(/'/g, "''")}'`;
+}
+
+function renderWindowsDefaultFollowingDaemonWrapperPs1(params: Readonly<{
+  workingDirectory: string;
+  nodePath: string;
+  fallbackEntryPath: string;
+  env: Record<string, string>;
+  stdoutPath: string;
+  stderrPath: string;
+}>): string {
+  const envLines = Object.entries(params.env)
+    .filter(([key]) => String(key ?? '').trim())
+    .map(([key, value]) => `$env:${String(key).trim()} = ${psSingleQuoted(value)}`)
+    .join('\n');
+
+  return [
+    '$ErrorActionPreference = "Stop"',
+    `Set-Location -LiteralPath ${psSingleQuoted(params.workingDirectory)}`,
+    envLines,
+    '$versionFile = Join-Path $env:HAPPIER_HOME_DIR \'cli-dev\\current.version\'',
+    `$entrypoint = ${psSingleQuoted(params.fallbackEntryPath)}`,
+    'if (Test-Path -LiteralPath $versionFile) {',
+    '  $version = (Get-Content -LiteralPath $versionFile -TotalCount 1).Trim()',
+    '  if ($version) {',
+    '    $candidate = Join-Path $env:HAPPIER_HOME_DIR ("cli-dev\\versions\\{0}\\package-dist\\index.mjs" -f $version)',
+    '    if (Test-Path -LiteralPath $candidate) { $entrypoint = $candidate }',
+    '  }',
+    '}',
+    `& ${psSingleQuoted(params.nodePath)} $entrypoint 'daemon' 'start-sync' '--takeover' 1>> ${psSingleQuoted(params.stdoutPath)} 2>> ${psSingleQuoted(params.stderrPath)}`,
+    '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 export function planDaemonServiceInstall(params: Readonly<{
   platform: DaemonServicePlatform;
   mode?: DaemonServiceMode;
@@ -336,16 +374,26 @@ export function planDaemonServiceInstall(params: Readonly<{
       targetMode,
     });
 
-    const wrapper = renderWindowsScheduledTaskWrapperPs1({
-      workingDirectory: params.userHomeDir,
-      programArgs,
-      env: {
-        ...baseEnv,
-        ...pinnedTargetEnv,
-      },
-      stdoutPath,
-      stderrPath,
-    });
+    const wrapperEnv = {
+      ...baseEnv,
+      ...pinnedTargetEnv,
+    };
+    const wrapper = targetMode === 'default-following' && params.entryPath
+      ? renderWindowsDefaultFollowingDaemonWrapperPs1({
+        workingDirectory: params.userHomeDir,
+        nodePath: params.nodePath,
+        fallbackEntryPath: params.entryPath,
+        env: wrapperEnv,
+        stdoutPath,
+        stderrPath,
+      })
+      : renderWindowsScheduledTaskWrapperPs1({
+        workingDirectory: params.userHomeDir,
+        programArgs,
+        env: wrapperEnv,
+        stdoutPath,
+        stderrPath,
+      });
 
     const taskName = resolveWindowsDaemonTaskName({ instanceId, channel, targetMode });
     const basePlan = planServiceAction({

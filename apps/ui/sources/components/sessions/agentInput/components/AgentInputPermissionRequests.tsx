@@ -6,6 +6,7 @@ import { ScrollEdgeFades } from '@/components/ui/scroll/ScrollEdgeFades';
 import { ScrollEdgeIndicators } from '@/components/ui/scroll/ScrollEdgeIndicators';
 import { PermissionPromptCard } from '@/components/tools/shell/permissions/PermissionPromptCard';
 import { ApprovalPromptCard } from '@/components/tools/shell/approvals/ApprovalPromptCard';
+import { UserActionPromptCard } from '@/components/tools/shell/userActions/UserActionPromptCard';
 import { Typography } from '@/constants/Typography';
 import type { PendingPermissionRequest } from '@/utils/sessions/sessionUtils';
 import type { PermissionToolCallMessageLocation } from '@/utils/sessions/permissions/permissionToolCallLocationTypes';
@@ -43,12 +44,15 @@ const stylesheet = StyleSheet.create((theme) => ({
 
 type AttentionRequest =
     | Readonly<{ kind: 'provider_permission'; id: string; request: PendingPermissionRequest }>
+    | Readonly<{ kind: 'user_action'; id: string; request: PendingPermissionRequest }>
     | Readonly<{ kind: 'action_approval'; id: string; request: OpenApprovalArtifactForSession }>;
 
 function getAttentionRequestKey(request: AttentionRequest): string {
     switch (request.kind) {
         case 'provider_permission':
             return `permission:${request.id}`;
+        case 'user_action':
+            return `user-action:${request.id}`;
         case 'action_approval':
             return `approval:${request.id}`;
     }
@@ -57,6 +61,7 @@ function getAttentionRequestKey(request: AttentionRequest): string {
 export const AgentInputAttentionRequests = React.memo(function AgentInputAttentionRequests(props: Readonly<{
     sessionId: string;
     permissionRequests: readonly PendingPermissionRequest[];
+    userActionRequests?: readonly PendingPermissionRequest[];
     approvalRequests?: readonly OpenApprovalArtifactForSession[];
     permissionLocationsById: ReadonlyMap<string, PermissionToolCallMessageLocation | null>;
     approvalLocationsByArtifactId?: ReadonlyMap<string, PermissionToolCallMessageLocation | null>;
@@ -83,13 +88,20 @@ export const AgentInputAttentionRequests = React.memo(function AgentInputAttenti
                 }))),
             ...(props.disabledReason === 'inactive'
                 ? []
+                : (props.userActionRequests ?? []).map((request): AttentionRequest => ({
+                    kind: 'user_action',
+                    id: request.id,
+                    request,
+                }))),
+            ...(props.disabledReason === 'inactive'
+                ? []
                 : (props.approvalRequests ?? []).map((request): AttentionRequest => ({
                     kind: 'action_approval',
                     id: request.artifact.id,
                     request,
                 }))),
         ];
-    }, [props.approvalRequests, props.disabledReason, props.permissionRequests]);
+    }, [props.approvalRequests, props.disabledReason, props.permissionRequests, props.userActionRequests]);
     const scrollStyle = React.useMemo(() => ({ maxHeight: props.maxHeightPx }), [props.maxHeightPx]);
 
     if (attentionRequests.length === 0) {
@@ -122,6 +134,16 @@ export const AgentInputAttentionRequests = React.memo(function AgentInputAttenti
                                     ) : null}
                                     {entry.kind === 'provider_permission' ? (
                                         <PermissionPromptCard
+                                            chrome="inline"
+                                            request={entry.request}
+                                            location={props.permissionLocationsById.get(entry.request.id) ?? null}
+                                            sessionId={props.sessionId}
+                                            metadata={props.metadata}
+                                            canApprovePermissions={props.canApprovePermissions}
+                                            disabledReason={props.disabledReason}
+                                        />
+                                    ) : entry.kind === 'user_action' ? (
+                                        <UserActionPromptCard
                                             chrome="inline"
                                             request={entry.request}
                                             location={props.permissionLocationsById.get(entry.request.id) ?? null}

@@ -2990,6 +2990,179 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         );
     });
 
+    it('routes native AskUserQuestion PreToolUse through canCallTool so Happier can render options', async () => {
+        const askInput = {
+            questions: [
+                {
+                    question: 'Pick a fork',
+                    options: [
+                        { label: 'Option A' },
+                        { label: 'Option B' },
+                    ],
+                    multiSelect: false,
+                },
+            ],
+        };
+        const canCallTool = vi.fn(async () => ({
+            behavior: 'allow' as const,
+            updatedInput: {
+                ...askInput,
+                answers: [{ question: 'Pick a fork', answer: 'Option A' }],
+            },
+        }));
+
+        let capturedHooks: any = null;
+        const createQuery = vi.fn((_params: any) => {
+            capturedHooks = _params.options?.hooks;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        const nextMessage = vi.fn(async () => {
+            if (didSendFirst) return null;
+            didSendFirst = true;
+            return { message: 'hello', mode: makeMode() };
+        });
+
+        await claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeArgs: [],
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool,
+            isAborted: () => false,
+            nextMessage,
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            createQuery,
+        } as any);
+
+        const signal = new AbortController().signal;
+        const suggestions = [{ type: 'setMode', mode: 'default', destination: 'session' }];
+        const output = await capturedHooks.PreToolUse[0].hooks[0](
+            {
+                hook_event_name: 'PreToolUse',
+                session_id: 'sess_1',
+                transcript_path: '/tmp/sess_1.jsonl',
+                cwd: '/tmp',
+                tool_name: 'AskUserQuestion',
+                tool_input: askInput,
+                tool_use_id: 'toolu_ask_1',
+                permission_suggestions: suggestions,
+            },
+            undefined,
+            { signal },
+        );
+
+        expect(canCallTool).toHaveBeenCalledWith(
+            'AskUserQuestion',
+            askInput,
+            expect.anything(),
+            expect.objectContaining({
+                signal,
+                toolUseId: 'toolu_ask_1',
+                suggestions,
+            }),
+        );
+        expect(output).toEqual(
+            expect.objectContaining({
+                continue: true,
+                suppressOutput: true,
+                hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'allow',
+                    updatedInput: {
+                        ...askInput,
+                        answers: [{ question: 'Pick a fork', answer: 'Option A' }],
+                    },
+                },
+            }),
+        );
+    });
+
+    it('returns a PreToolUse denial for rejected native interactive tools', async () => {
+        const canCallTool = vi.fn(async () => ({ behavior: 'deny' as const, message: 'Need operator approval' }));
+
+        let capturedHooks: any = null;
+        const createQuery = vi.fn((_params: any) => {
+            capturedHooks = _params.options?.hooks;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: 'result' } as any;
+                },
+                close: vi.fn(),
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        const nextMessage = vi.fn(async () => {
+            if (didSendFirst) return null;
+            didSendFirst = true;
+            return { message: 'hello', mode: makeMode() };
+        });
+
+        await claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeArgs: [],
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool,
+            isAborted: () => false,
+            nextMessage,
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            createQuery,
+        } as any);
+
+        const output = await capturedHooks.PreToolUse[0].hooks[0]({
+            hook_event_name: 'PreToolUse',
+            session_id: 'sess_1',
+            transcript_path: '/tmp/sess_1.jsonl',
+            cwd: '/tmp',
+            tool_name: 'ExitPlanMode',
+            tool_input: { plan: 'Proceed' },
+            tool_use_id: 'toolu_plan_1',
+        });
+
+        expect(canCallTool).toHaveBeenCalledWith(
+            'ExitPlanMode',
+            { plan: 'Proceed' },
+            expect.anything(),
+            expect.objectContaining({ toolUseId: 'toolu_plan_1' }),
+        );
+        expect(output).toEqual(
+            expect.objectContaining({
+                continue: true,
+                suppressOutput: true,
+                systemMessage: 'Need operator approval',
+                hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'deny',
+                    permissionDecisionReason: 'Need operator approval',
+                },
+            }),
+        );
+    });
+
     it('registers PreToolUse hook that scrubs sensitive env vars for Bash commands', async () => {
         let capturedHooks: any = null;
         const createQuery = vi.fn((_params: any) => {

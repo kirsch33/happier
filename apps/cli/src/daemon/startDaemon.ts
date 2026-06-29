@@ -97,6 +97,7 @@ import { createStopSession } from './sessions/stopSession';
 import { waitForExistingSessionExitIfStopRequested } from './sessions/waitForExistingSessionExitIfStopRequested';
 import { resolveSpawnWebhookResult } from './sessions/resolveSpawnWebhookResult';
 import { isSessionRunnerActive as isSessionRunnerActiveInDaemon } from './sessions/isSessionRunnerActive';
+import { pruneStaleSessionRunnerLocks } from './sessionRunnerLock';
 import { startDaemonHeartbeatLoop } from './lifecycle/heartbeat';
 import { createSessionRunnerRespawnManager } from './processSupervision/sessionRunnerRespawn';
 import { buildTrackedSessionRespawnEnvironmentVariables } from './processSupervision/sessionRunnerRespawnDescriptor';
@@ -1393,6 +1394,7 @@ function startPendingQueueBackgroundNudgeLoop(params: Readonly<{
   shutdownPromise: Promise<unknown>;
   isShutdownRequested: () => boolean;
   logLabel: string;
+  retireStaleRunner?: (sessionId: string) => Promise<boolean> | boolean;
 }>): void {
   const maxAttempts = readAttachPendingQueueNudgeRetryAttempts();
   const retryDelayMs = readAttachPendingQueueNudgeRetryDelayMs();
@@ -1405,6 +1407,14 @@ function startPendingQueueBackgroundNudgeLoop(params: Readonly<{
         isShutdownRequested: params.isShutdownRequested,
       });
       if (nudgeResult.type === 'materialized') return;
+      if (pendingQueueNudgeMeansRunnerCannotServeResume(nudgeResult) && params.retireStaleRunner) {
+        logger.warn('[DAEMON RUN] Pending queue nudge target is alive but cannot serve pending queue materialization; retiring stale runner', {
+          sessionId: params.sessionId,
+          reason: nudgeResult.reason,
+        });
+        const retired = await params.retireStaleRunner(params.sessionId);
+        if (retired) return;
+      }
       if (attempt >= maxAttempts) return;
       const sleepResult = await sleepMsOrShutdown(retryDelayMs, params.shutdownPromise);
       if (sleepResult === 'shutdown') return;
@@ -1479,6 +1489,9 @@ function nudgeAttachedExistingSessionPendingQueue(params: Readonly<{
     return params.resolved;
   }
 
+  // Fresh attach/restart runners can report success before the in-runner pending-queue
+  // RPC has registered. Retry in the background, but do not retire the runner here;
+  // the pre-spawn already-running branch is the stale-runner replacement gate.
   startPendingQueueBackgroundNudgeLoop({
     sessionId: resolvedSessionId,
     credentials: params.credentials,
@@ -1928,8 +1941,14 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           2000,
           { min: 0, max: 60_000 },
         );
+        const spawnInFlightWaitTimeoutMs = resolvePositiveIntEnv(
+          process.env.HAPPIER_DAEMON_SPAWN_IN_FLIGHT_WAIT_TIMEOUT_MS,
+          120_000,
+          { min: 0, max: 10 * 60_000 },
+        );
         const spawnRequestCoalescer = createSpawnRequestCoalescer({
           recentSuccessTtlMs: spawnRecentSuccessTtlMs,
+          inFlightWaitTimeoutMs: spawnInFlightWaitTimeoutMs,
         });
 
         const shutdownSpawnDrainGraceMs = resolvePositiveIntEnv(
@@ -2122,6 +2141,10 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           trackedSessionCount: pidToTrackedSession.size,
           orphanedDeadDaemonSessionCount: orphanedDeadDaemonSessions.length,
         });
+        const startupSessionRunnerLockPrune = await pruneStaleSessionRunnerLocks();
+        if (startupSessionRunnerLockPrune.removed > 0 || startupSessionRunnerLockPrune.errors.length > 0) {
+          logger.debug('[DAEMON RUN] Startup session runner lock prune finished', startupSessionRunnerLockPrune);
+        }
         if (process.platform === 'linux' && startupSource === 'background-service') {
           const migratedTrackedSessionProcesses = await migrateTrackedSessionProcessesOutOfDaemonServiceCgroup({
             trackedSessions: pidToTrackedSession.values(),

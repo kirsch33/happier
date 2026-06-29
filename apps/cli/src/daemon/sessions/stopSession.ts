@@ -15,13 +15,60 @@ function isZellijMissingSessionOutput(output: string, sessionName: string): bool
   return normalizedOutput.includes(`no session named "${normalizedSessionName}" found`);
 }
 
-async function stopRecordedZellijTerminalHost(sessionId: string): Promise<boolean> {
-  const attachmentInfo = await readTerminalAttachmentInfo({
-    happyHomeDir: configuration.happyHomeDir,
-    sessionId,
-  }).catch(() => null);
-  const terminal = attachmentInfo?.terminal;
-  if (terminal?.mode !== 'zellij') return false;
+function isTmuxMissingTargetOutput(output: string): boolean {
+  const normalizedOutput = output.toLowerCase();
+  return normalizedOutput.includes("can't find window")
+    || normalizedOutput.includes("can't find session")
+    || normalizedOutput.includes('no such window')
+    || normalizedOutput.includes('no current client');
+}
+
+type RecordedTerminal = NonNullable<NonNullable<Awaited<ReturnType<typeof readTerminalAttachmentInfo>>>['terminal']>;
+
+function tmuxSessionNameFromTarget(target: string): string {
+  const colonIndex = target.indexOf(':');
+  return (colonIndex >= 0 ? target.slice(0, colonIndex) : target).trim();
+}
+
+async function stopRecordedTmuxTerminalHost(sessionId: string, terminal: RecordedTerminal): Promise<boolean> {
+  if (terminal.mode !== 'tmux') return false;
+
+  const target = typeof terminal.tmux?.target === 'string' ? terminal.tmux.target.trim() : '';
+  if (!target) return false;
+
+  const sessionName = tmuxSessionNameFromTarget(target);
+  if (!sessionName) return false;
+
+  const tmuxTmpDir = typeof terminal.tmux?.tmpDir === 'string' ? terminal.tmux.tmpDir.trim() : '';
+  const tmuxEnv = tmuxTmpDir ? { TMUX_TMPDIR: tmuxTmpDir } : undefined;
+  const uid = typeof (process as any).getuid === 'function' ? ((process as any).getuid() as number) : null;
+  const socketPath = tmuxTmpDir && uid !== null ? `${tmuxTmpDir}/tmux-${uid}/default` : undefined;
+  const tmux = new TmuxUtilities(undefined, tmuxEnv, socketPath);
+
+  const sessionKill = await tmux.executeTmuxCommand(['kill-session'], sessionName, undefined, undefined, socketPath).catch((error) => {
+    logger.debug(`[DAEMON RUN] Failed direct tmux kill-session for terminal-hosted session ${sessionId} (${sessionName})`, error);
+    return null;
+  });
+  let killed = sessionKill !== null && sessionKill.returncode === 0;
+  if (!killed && sessionKill !== null && isTmuxMissingTargetOutput(`${sessionKill.stderr}\n${sessionKill.stdout}`)) return true;
+
+  if (!killed) {
+    killed = await tmux.killWindow(target).catch((error) => {
+      logger.debug(`[DAEMON RUN] Failed fallback tmux kill-window for terminal-hosted session ${sessionId} (${target})`, error);
+      return false;
+    });
+  }
+
+  if (killed) {
+    logger.debug(`[DAEMON RUN] Killed tmux terminal host for session ${sessionId} (${sessionName})`);
+    return true;
+  }
+
+  logger.debug(`[DAEMON RUN] Failed to kill tmux terminal host for session ${sessionId} (${sessionName})`);
+  return false;
+}
+async function stopRecordedZellijTerminalHost(sessionId: string, terminal: RecordedTerminal): Promise<boolean> {
+  if (terminal.mode !== 'zellij') return false;
 
   const sessionName = typeof terminal.zellij?.sessionName === 'string' ? terminal.zellij.sessionName.trim() : '';
   if (!sessionName) return false;
@@ -56,6 +103,19 @@ async function stopRecordedZellijTerminalHost(sessionId: string): Promise<boolea
   return false;
 }
 
+async function stopRecordedTerminalHost(sessionId: string): Promise<boolean> {
+  const attachmentInfo = await readTerminalAttachmentInfo({
+    happyHomeDir: configuration.happyHomeDir,
+    sessionId,
+  }).catch(() => null);
+  const terminal = attachmentInfo?.terminal;
+  if (!terminal) return false;
+
+  if (terminal.mode === 'tmux') return stopRecordedTmuxTerminalHost(sessionId, terminal);
+  if (terminal.mode === 'zellij') return stopRecordedZellijTerminalHost(sessionId, terminal);
+  return false;
+}
+
 export function createStopSession(params: Readonly<{
   pidToTrackedSession: Map<number, TrackedSession>;
 }>): (sessionId: string) => Promise<boolean> {
@@ -84,7 +144,7 @@ export function createStopSession(params: Readonly<{
     }
 
     const terminalHostStopped = !isPidFallback
-      ? await stopRecordedZellijTerminalHost(normalizedSessionId)
+      ? await stopRecordedTerminalHost(normalizedSessionId)
       : false;
 
     if (pidsToStop.length === 0) {

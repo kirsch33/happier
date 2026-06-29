@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   parsePermissionIntentAlias,
+  resolveAgentIdFromSessionMetadata,
   resolveMetadataStringOverrideV1,
   resolvePermissionIntentFromSessionMetadata,
   type PermissionIntent,
@@ -10,16 +11,22 @@ import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { readRpcErrorCode } from '@happier-dev/protocol/rpcErrors';
 
 import { fetchEncryptedTranscriptPageAfterSeq } from '@/api/session/fetchEncryptedTranscriptWindow';
-import { materializeNextPendingQueueV2MessageViaHttp } from '@/api/session/pendingQueueV2Transport';
+import {
+  materializeNextPendingQueueV2MessageViaHttp,
+  type PendingQueueMaterializeNextResult,
+} from '@/api/session/pendingQueueV2Transport';
 import { waitForTranscriptEncryptedMessageByLocalId } from '@/api/session/transcriptMessageLookup';
-import type { Credentials } from '@/persistence';
+import { readSettings, type Credentials } from '@/persistence';
 import {
   detectSessionTurnActivity,
   isMemoryArtifactDecryptedRow,
   isSessionUserMessage,
   type SessionTurnActivity,
 } from '@/session/query/detectSessionTurnInFlight';
-import { fetchSessionById } from '@/session/transport/http/sessionsHttp';
+import { spawnDaemonSession } from '@/daemon/controlClient';
+import { buildInactiveUsageLimitResumeSpawnOptions } from '@/daemon/sessions/runtimeSnapshot/buildInactiveUsageLimitResumeSpawnOptions';
+import { fetchSessionById, type RawSessionRecord } from '@/session/transport/http/sessionsHttp';
+import type { SpawnDaemonSessionRequest } from '@/rpc/handlers/spawnSessionOptionsContract';
 import { callSessionRpc } from '@/session/transport/rpc/sessionRpc';
 import { waitForIdleViaSocket } from '@/session/transport/socket/sessionSocketAgentState';
 import { sendSessionMessageViaSocketCommitted } from '@/session/transport/socket/sessionSocketSendMessage';
@@ -44,6 +51,10 @@ export type SendSessionMessageResult =
 export type SendSessionMessageSocketCommit = Readonly<{
   sessionId: string;
   localId: string;
+}>;
+
+type SocketCommitResult = Readonly<{
+  materializedSeq: number | null;
 }>;
 
 function parsePermissionIntentOrThrow(raw: string): PermissionIntent {
@@ -76,9 +87,9 @@ function isFallbackSafeRuntimeRpcError(error: unknown): boolean {
 async function nudgePendingQueueBestEffort(params: Readonly<{
   token: string;
   sessionId: string;
-}>): Promise<void> {
+}>): Promise<PendingQueueMaterializeNextResult | null> {
   try {
-    await materializeNextPendingQueueV2MessageViaHttp({
+    return await materializeNextPendingQueueV2MessageViaHttp({
       token: params.token,
       sessionId: params.sessionId,
     });
@@ -86,6 +97,115 @@ async function nudgePendingQueueBestEffort(params: Readonly<{
     // Best-effort only. Callers may layer stronger retry loops when materialization
     // is safety-critical, but ordinary socket-fallback sends should still attempt
     // one canonical nudge here.
+    return null;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+async function resolveLocalMachineIdFallback(): Promise<string> {
+  try {
+    return readNonEmptyString((await readSettings()).machineId) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function readMaterializedSeqForLocalId(
+  result: PendingQueueMaterializeNextResult | null,
+  localId: string,
+): number | null {
+  const message = result?.message;
+  if (!message || message.localId !== localId) return null;
+  return Number.isSafeInteger(message.seq) && message.seq >= 0 ? message.seq : null;
+}
+
+async function resolveInitialTranscriptAfterSeqForSocketCommit(params: Readonly<{
+  token: string;
+  sessionId: string;
+  localId: string;
+  materializedSeq: number | null;
+}>): Promise<number | undefined> {
+  const materializedSeq = params.materializedSeq;
+  if (typeof materializedSeq === 'number' && Number.isSafeInteger(materializedSeq) && materializedSeq >= 0) {
+    return Math.max(0, materializedSeq - 1);
+  }
+
+  try {
+    const materialized = await waitForTranscriptEncryptedMessageByLocalId({
+      token: params.token,
+      sessionId: params.sessionId,
+      localId: params.localId,
+      maxWaitMs: 1_500,
+    });
+    if (materialized && Number.isSafeInteger(materialized.seq) && materialized.seq >= 0) {
+      return Math.max(0, materialized.seq - 1);
+    }
+  } catch {
+    // If the prompt is still only pending, the resumed runtime can consume the pending queue.
+  }
+  return undefined;
+}
+
+async function wakeSocketCommittedSessionBestEffort(params: Readonly<{
+  token: string;
+  sessionId: string;
+  localId: string;
+  rawSession: RawSessionRecord;
+  decryptedMetadata: unknown;
+  materializedSeq: number | null;
+  permissionModeOverride?: string;
+  permissionIntent: PermissionIntent;
+  modelOverride?: string | null;
+  modelId: string;
+}>): Promise<void> {
+  const metadata = asRecord(params.decryptedMetadata);
+  if (!metadata) return;
+
+  // Avoid guessing a backend for historical sessions with incomplete metadata.
+  // The inactive resume helper falls back to Codex; CLI send should not silently
+  // change a Claude/OpenCode session into Codex when metadata is undecidable.
+  if (!resolveAgentIdFromSessionMetadata(metadata)) return;
+
+  try {
+    const spawnOptions = buildInactiveUsageLimitResumeSpawnOptions({
+      fallbackMachineId: await resolveLocalMachineIdFallback(),
+      sessionId: params.sessionId,
+      rawSession: params.rawSession,
+      metadata,
+    });
+    if (!spawnOptions) return;
+
+    const initialTranscriptAfterSeq = await resolveInitialTranscriptAfterSeqForSocketCommit({
+      token: params.token,
+      sessionId: params.sessionId,
+      localId: params.localId,
+      materializedSeq: params.materializedSeq,
+    });
+    const now = Date.now();
+
+    const spawnRequest: SpawnDaemonSessionRequest = {
+      ...(spawnOptions as SpawnDaemonSessionRequest),
+      ...(initialTranscriptAfterSeq !== undefined ? { initialTranscriptAfterSeq } : {}),
+      ...(params.permissionModeOverride !== undefined
+        ? { permissionMode: params.permissionIntent, permissionModeUpdatedAt: now }
+        : {}),
+      ...(params.modelOverride !== undefined
+        ? { modelId: params.modelId || 'default', modelUpdatedAt: now }
+        : {}),
+    };
+    await spawnDaemonSession(spawnRequest);
+  } catch {
+    // Sending should not fail solely because the local daemon could not be nudged.
+    // A waiting caller will still time out, preserving the visible failure signal.
   }
 }
 
@@ -348,7 +468,7 @@ export async function sendSessionMessage(params: Readonly<{
       : ({ t: 'encrypted', c: encryptSessionPayload({ ctx: sessionTarget.ctx, payload: record }) } as const);
 
   const shouldUseRuntimeRpc = sessionTarget.rawSession.active === true;
-  async function commitViaSocket(): Promise<void> {
+  async function commitViaSocket(): Promise<SocketCommitResult> {
     await sendSessionMessageViaSocketCommitted({
       token: params.credentials.token,
       sessionId: sessionId,
@@ -358,7 +478,7 @@ export async function sendSessionMessage(params: Readonly<{
       sentFrom: 'cli',
       permissionMode: permissionIntent,
     });
-    await nudgePendingQueueBestEffort({
+    const materialized = await nudgePendingQueueBestEffort({
       token: params.credentials.token,
       sessionId,
     });
@@ -366,7 +486,11 @@ export async function sendSessionMessage(params: Readonly<{
       sessionId: sessionId,
       localId,
     });
+    return {
+      materializedSeq: readMaterializedSeqForLocalId(materialized, localId),
+    };
   }
+  let socketCommitResult: SocketCommitResult | null = null;
   if (shouldUseRuntimeRpc) {
     try {
       await callSessionRpc({
@@ -394,10 +518,34 @@ export async function sendSessionMessage(params: Readonly<{
         throw error;
       }
 
-      await commitViaSocket();
+      socketCommitResult = await commitViaSocket();
+      await wakeSocketCommittedSessionBestEffort({
+        token: params.credentials.token,
+        sessionId,
+        localId,
+        rawSession: sessionTarget.rawSession,
+        decryptedMetadata,
+        materializedSeq: socketCommitResult.materializedSeq,
+        permissionModeOverride: params.permissionModeOverride,
+        permissionIntent,
+        modelOverride: params.modelOverride,
+        modelId,
+      });
     }
   } else {
-    await commitViaSocket();
+    socketCommitResult = await commitViaSocket();
+    await wakeSocketCommittedSessionBestEffort({
+      token: params.credentials.token,
+      sessionId,
+      localId,
+      rawSession: sessionTarget.rawSession,
+      decryptedMetadata,
+      materializedSeq: socketCommitResult.materializedSeq,
+      permissionModeOverride: params.permissionModeOverride,
+      permissionIntent,
+      modelOverride: params.modelOverride,
+      modelId,
+    });
   }
 
   if (!params.wait) {

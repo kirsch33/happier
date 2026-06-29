@@ -4,7 +4,10 @@ import { SessionMcpSelectionV1Schema } from '@happier-dev/protocol';
 
 import { resolveCanonicalCodexBackendMode } from '@/rpc/handlers/codexBackendMode';
 import type { SpawnSessionOptions, SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
+import { SPAWN_SESSION_ERROR_CODES } from '@/rpc/handlers/registerSessionHandlers';
 import { normalizeSpawnSessionDirectory } from '@/rpc/handlers/spawnSessionOptionsContract';
+
+const DEFAULT_IN_FLIGHT_WAIT_TIMEOUT_MS = 120_000;
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -135,11 +138,61 @@ export function computeDaemonSpawnRequestKey(options: SpawnSessionOptions): Daem
   return { kind: 'new', key: `new:${sha256Hex(stableJsonStringify(fingerprint))}` };
 }
 
-export function createSpawnRequestCoalescer(params: Readonly<{ recentSuccessTtlMs: number; nowMs?: () => number }>) {
-  const inFlightByKey = new Map<string, Promise<SpawnSessionResult>>();
+type InFlightSpawnRequest = Readonly<{
+  promise: Promise<SpawnSessionResult>;
+  startedAtMs: number;
+}>;
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readElapsedMs(startedAtMs: number, nowMs: () => number): number | null {
+  const elapsed = nowMs() - startedAtMs;
+  return Number.isFinite(elapsed) && elapsed >= 0 ? Math.floor(elapsed) : null;
+}
+
+function buildInFlightTimeoutResult(timeoutMs: number): SpawnSessionResult {
+  return {
+    type: 'error',
+    errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+    errorMessage: `Timed out waiting ${timeoutMs}ms for an existing spawn request to finish. Try again to start a fresh request.`,
+  };
+}
+
+export function createSpawnRequestCoalescer(params: Readonly<{
+  recentSuccessTtlMs: number;
+  inFlightWaitTimeoutMs?: number;
+  nowMs?: () => number;
+}>) {
+  const inFlightByKey = new Map<string, InFlightSpawnRequest>();
   const recentSuccessByKey = new Map<string, { sessionId: string; atMs: number }>();
   const nowMs = params.nowMs ?? (() => Date.now());
   const ttlMs = Math.max(0, Math.floor(Number(params.recentSuccessTtlMs)));
+  const inFlightWaitTimeoutMs = Math.max(
+    0,
+    Math.floor(Number(params.inFlightWaitTimeoutMs ?? DEFAULT_IN_FLIGHT_WAIT_TIMEOUT_MS)),
+  );
+
+  const waitForExisting = async (key: DaemonSpawnRequestKey, existing: InFlightSpawnRequest): Promise<SpawnSessionResult> => {
+    if (inFlightWaitTimeoutMs <= 0) return await existing.promise;
+
+    const elapsedMs = readElapsedMs(existing.startedAtMs, nowMs);
+    if (elapsedMs !== null && elapsedMs >= inFlightWaitTimeoutMs) {
+      if (inFlightByKey.get(key.key) === existing) inFlightByKey.delete(key.key);
+      return buildInFlightTimeoutResult(inFlightWaitTimeoutMs);
+    }
+
+    const remainingMs = elapsedMs === null ? inFlightWaitTimeoutMs : inFlightWaitTimeoutMs - elapsedMs;
+    return await Promise.race([
+      existing.promise,
+      sleep(remainingMs).then(() => {
+        if (inFlightByKey.get(key.key) === existing) inFlightByKey.delete(key.key);
+        return buildInFlightTimeoutResult(inFlightWaitTimeoutMs);
+      }),
+    ]);
+  };
 
   const tryGetRecent = (key: DaemonSpawnRequestKey): SpawnSessionResult | null => {
     if (key.kind !== 'new') return null;
@@ -169,18 +222,20 @@ export function createSpawnRequestCoalescer(params: Readonly<{ recentSuccessTtlM
       if (cached) return cached;
 
       const existing = inFlightByKey.get(key.key);
-      if (existing) return await existing;
+      if (existing) return await waitForExisting(key, existing);
 
+      let entry: InFlightSpawnRequest | null = null;
       const promise = (async () => {
         try {
           const result = await work();
           recordRecentSuccess(key, result);
           return result;
         } finally {
-          inFlightByKey.delete(key.key);
+          if (inFlightByKey.get(key.key) === entry) inFlightByKey.delete(key.key);
         }
       })();
-      inFlightByKey.set(key.key, promise);
+      entry = { promise, startedAtMs: nowMs() };
+      inFlightByKey.set(key.key, entry);
       return await promise;
     },
   };

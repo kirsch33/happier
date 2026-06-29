@@ -492,6 +492,92 @@ describe('sendSessionMessage', () => {
         });
     });
 
+    it('wakes an inactive local session runner after committing a message through the pending queue', async () => {
+        const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
+        const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({
+            didMaterialize: true,
+            localId: 'local-wake',
+            didWrite: true,
+            message: {
+                id: 'msg-wake',
+                seq: 42,
+                localId: 'local-wake',
+                messageRole: 'user' as const,
+                content: null,
+                createdAt: 100,
+                updatedAt: 100,
+            },
+        }));
+        const spawnDaemonSession = vi.fn(async () => ({ success: true, sessionId: 'sess-1' }));
+        const metadata = JSON.stringify({
+            machineId: 'machine-1',
+            path: '/workspace/project',
+            flavor: 'claude',
+        });
+
+        vi.doMock('@/persistence', () => ({
+            readSettings: vi.fn(async () => ({ machineId: 'machine-1' })),
+        }));
+        vi.doMock('@/daemon/controlClient', () => ({
+            spawnDaemonSession,
+        }));
+        vi.doMock('@/session/transport/rpc/sessionRpc', () => ({
+            callSessionRpc: vi.fn(async () => ({ ok: true })),
+        }));
+        vi.doMock('@/session/transport/socket/sessionSocketSendMessage', () => ({
+            sendSessionMessageViaSocketCommitted,
+        }));
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
+            materializeNextPendingQueueV2MessageViaHttp,
+        }));
+        vi.doMock('./resolveSessionTransportContext', () => ({
+            resolveSessionTransportContext: vi.fn(async () => ({
+                ok: true,
+                sessionId: 'sess-1',
+                mode: 'plain',
+                ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'dataKey' },
+                rawSession: {
+                    id: 'sess-1',
+                    active: false,
+                    metadata,
+                    encryptionMode: 'plain',
+                    path: '/workspace/project',
+                    machineId: 'machine-1',
+                    agentState: null,
+                    latestTurnStatus: 'completed',
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                },
+            })),
+        }));
+
+        const { sendSessionMessage } = await import('./sendSessionMessage');
+        const machineKey = new Uint8Array(32).fill(1);
+
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'wake up',
+            localId: 'local-wake',
+            wait: false,
+            timeoutMs: 1,
+        })).resolves.toEqual({
+            ok: true,
+            sessionId: 'sess-1',
+            localId: 'local-wake',
+            waited: false,
+        });
+
+        expect(sendSessionMessageViaSocketCommitted).toHaveBeenCalledTimes(1);
+        expect(spawnDaemonSession).toHaveBeenCalledWith(expect.objectContaining({
+            existingSessionId: 'sess-1',
+            directory: '/workspace/project',
+            machineId: 'machine-1',
+            backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+            initialTranscriptAfterSeq: 41,
+        }));
+    });
+
     it('invokes onCommittedViaSocket when runtime RPC falls back to socket-committed delivery', async () => {
         const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
         const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({ didMaterialize: true }));

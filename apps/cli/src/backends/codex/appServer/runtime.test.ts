@@ -94,6 +94,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     rejectReviewStartMethodUnavailable?: boolean;
     rejectStructuredTurnInput?: boolean;
     rejectStructuredSteerInput?: boolean;
+    rejectPoisonedThreadTurnInput?: boolean;
     emitResumeContinuationUserInputRequest?: boolean;
     emitResumeTurnStartedBeforeResponse?: boolean;
     resumeResponseDelayMs?: number;
@@ -389,6 +390,10 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            continue;',
         '        }',
         '        const text = Array.isArray(msg.params?.input) ? String(msg.params.input[0]?.text ?? "unknown") : "unknown";',
+        `        if (${JSON.stringify(params.rejectPoisonedThreadTurnInput === true)} && msg.params?.threadId === "thread-poisoned" && text === "poisoned-thread-retry") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32600, message: "[ObjectParam] [input[307].arguments.<<malformed_tool_name_with_very_long_property_name>>] [property_name_above_max_length] Invalid property name in input[307].arguments" } }) + "\\n");',
+        '            continue;',
+        '        }',
         '        const matchingTurnStartCount = (await readFile(requestLogPath, "utf8").catch(() => "")).split("\\n").filter((line) => { try { const entry = JSON.parse(line); return entry.method === "turn/start" && Array.isArray(entry.params?.input) && String(entry.params.input[0]?.text ?? "") === text; } catch { return false; } }).length;',
         '        const turnId = matchingTurnStartCount > 1 ? `turn-${text}-${matchingTurnStartCount}` : `turn-${text}`;',
         '        const completionDelayMs = text === "connected-service-invalidation-active-turn" && matchingTurnStartCount === 1 ? 120000 : text === "overlap-start" ? 180 : text === "cancel-me" ? 50 : 15;',
@@ -1276,6 +1281,7 @@ describe('createCodexAppServerRuntime', () => {
             rejectReviewStartMethodUnavailable?: boolean;
             rejectStructuredTurnInput?: boolean;
             rejectStructuredSteerInput?: boolean;
+            rejectPoisonedThreadTurnInput?: boolean;
             emitResumeContinuationUserInputRequest?: boolean;
             emitResumeTurnStartedBeforeResponse?: boolean;
             resumeResponseDelayMs?: number;
@@ -1321,6 +1327,7 @@ describe('createCodexAppServerRuntime', () => {
             rejectReviewStartMethodUnavailable: options.rejectReviewStartMethodUnavailable,
             rejectStructuredTurnInput: options.rejectStructuredTurnInput,
             rejectStructuredSteerInput: options.rejectStructuredSteerInput,
+            rejectPoisonedThreadTurnInput: options.rejectPoisonedThreadTurnInput,
             emitResumeContinuationUserInputRequest: options.emitResumeContinuationUserInputRequest,
             emitResumeTurnStartedBeforeResponse: options.emitResumeTurnStartedBeforeResponse,
             resumeResponseDelayMs: options.resumeResponseDelayMs,
@@ -3085,6 +3092,46 @@ describe('createCodexAppServerRuntime', () => {
         ]);
         expect(turnStarts[1]?.params).not.toHaveProperty('sandboxPolicy');
         expect(turnStarts[1]?.params).not.toHaveProperty('approvalPolicy');
+    });
+
+    it('starts a replacement thread and retries when resumed thread history poisons turn/start', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-poisoned-thread-retry-', {
+            rejectPoisonedThreadTurnInput: true,
+        });
+
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({ resumeId: 'thread-poisoned' });
+        await runtime.sendPrompt('poisoned-thread-retry');
+
+        const requestLog = await readRequestLog(requestLogPath);
+        expect(requestLog).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    method: 'thread/resume',
+                    params: expect.objectContaining({ threadId: 'thread-poisoned' }),
+                }),
+                expect.objectContaining({
+                    method: 'thread/start',
+                    params: expect.objectContaining({ cwd: root }),
+                }),
+            ]),
+        );
+        const turnStarts = requestLog.filter((entry) => entry.method === 'turn/start') as Array<{ params?: Record<string, unknown>; error?: unknown }>;
+        expect(turnStarts).toHaveLength(2);
+        expect(turnStarts[0]?.params).toMatchObject({
+            threadId: 'thread-poisoned',
+            input: [{ type: 'text', text: 'poisoned-thread-retry' }],
+        });
+        expect(turnStarts[1]?.params).toMatchObject({
+            threadId: 'thread-started',
+            input: [{ type: 'text', text: 'poisoned-thread-retry' }],
+        });
     });
 
     it('retries turn steer with text-only input when structured steer input is unsupported', async () => {

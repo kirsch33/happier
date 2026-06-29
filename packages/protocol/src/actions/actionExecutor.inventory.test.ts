@@ -169,12 +169,14 @@ describe('createActionExecutor (inventory/discovery)', () => {
     const res = await executor.execute('session.spawn_new', {
       path: '/repo/project',
       host: 'leeroy-mbp',
+      profileId: 'greatwhiteclaude',
       tag: 't',
     });
     expect(res.ok).toBe(true);
     expect(deps.sessionSpawnNew).toHaveBeenCalledWith({
       path: '/repo/project',
       host: 'leeroy-mbp',
+      profileId: 'greatwhiteclaude',
       tag: 't',
     });
   });

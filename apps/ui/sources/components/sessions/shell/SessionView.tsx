@@ -118,7 +118,7 @@ import { tracking, trackMessageSent } from '@/track';
 import { isRunningOnMac } from '@/utils/platform/platform';
 import { randomUUID } from '@/platform/randomUUID';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/platform/responsive';
-import { getSessionAvatarId, getSessionName, listPendingPermissionRequests, shouldReadTranscriptForPendingRequests, shouldShowAbortButtonForSessionState, useSessionStatus, type PendingPermissionRequest } from '@/utils/sessions/sessionUtils';
+import { getSessionAvatarId, getSessionName, listPendingPermissionRequests, listPendingUserActionRequests, shouldReadTranscriptForPendingRequests, shouldShowAbortButtonForSessionState, useSessionStatus, type PendingPermissionRequest } from '@/utils/sessions/sessionUtils';
 import { deriveTranscriptInteractionFromSession } from '@/utils/sessions/deriveTranscriptInteraction';
 import { runAfterInteractionsWithFallback } from '@/utils/timing/runAfterInteractionsWithFallback';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/system/versionUtils';
@@ -1098,7 +1098,7 @@ const SessionAgentInputWithUsage = React.memo(function SessionAgentInputWithUsag
 
 type SessionAgentInputWithUsageAndRequestsProps = Omit<
     SessionAgentInputWithUsageProps,
-    'permissionRequests'
+    'permissionRequests' | 'userActionRequests'
 > & {
     session: Session;
 };
@@ -1113,12 +1113,18 @@ const SessionAgentInputWithUsageAndRequests = React.memo(function SessionAgentIn
         () => listPendingPermissionRequests(session, shouldReadTranscript ? committedMessages : undefined),
         [committedMessages, session, shouldReadTranscript],
     );
+    const pendingUserActionRequests = React.useMemo(
+        () => listPendingUserActionRequests(session, shouldReadTranscript ? committedMessages : undefined),
+        [committedMessages, session, shouldReadTranscript],
+    );
     const stablePendingPermissionRequests = useStableAgentInputRequests(pendingPermissionRequests);
+    const stablePendingUserActionRequests = useStableAgentInputRequests(pendingUserActionRequests);
 
     return (
         <SessionAgentInputWithUsage
             {...props}
             permissionRequests={stablePendingPermissionRequests}
+            userActionRequests={stablePendingUserActionRequests}
         />
     );
 });

@@ -196,6 +196,27 @@ describe('useMachineTerminalSession', () => {
         await next.unmount();
     });
 
+
+    it('attempts terminal RPC even when cached machine presence says unreachable', async () => {
+        const terminalRef = { current: null };
+
+        const hook = await renderHook(() => useMachineTerminalSession({
+            machineId: 'machine-1',
+            cwd: '/repo',
+            machineReachable: false,
+            machineRpcTargetAvailable: true,
+            terminalKey: 'terminal-key-stale-presence',
+            terminalRef,
+        }));
+        await flushHookEffects();
+
+        expect(machineTerminalEnsureMock).toHaveBeenCalledTimes(1);
+        expect(machineTerminalEnsureMock.mock.calls[0]?.[0]).toBe('machine-1');
+        expect(hook.getCurrent().error).toBeNull();
+
+        await hook.unmount();
+    });
+
     it.each([
         {
             name: 'the stream finishes with done',

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { Metadata } from '@/api/types';
 import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import { mergeSessionWorkStateMetadataV1 } from '@/session/workState/sessionWorkStateMetadata';
@@ -16,6 +18,9 @@ import {
   buildClaudeCompactionStartedEvent,
 } from '../contextCompactionEvents';
 import { buildClaudeSessionModelsMetadataWithCurrentModelId } from '../remote/buildClaudeSessionModelsMetadataFromSupportedModels';
+import type { SessionHookData } from '../utils/startHookServer';
+
+const STOP_HOOK_ASSISTANT_FALLBACK_DELAY_MS = 2_000;
 
 type ClaudeLocalWorkStateSnapshot = ReturnType<typeof buildClaudeTodoWriteWorkState>
   & Readonly<{ ownedSourceFamilies?: readonly string[] }>;
@@ -28,6 +33,25 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readHookEventName(data: SessionHookData): string | null {
+  return readString(data.hook_event_name ?? data.hookEventName);
+}
+
+function readStopHookLastAssistantMessage(data: SessionHookData): string | null {
+  return readString(data.last_assistant_message ?? data.lastAssistantMessage);
+}
+
+function assistantMessageHasDisplayText(message: RawJSONLines): boolean {
+  if (message.type !== 'assistant') return false;
+  const content = readRecord((message as Record<string, unknown>).message)?.content;
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
+  return content.some((blockValue) => {
+    const block = readRecord(blockValue);
+    return block?.type === 'text' && readString(block.text) !== null;
+  });
 }
 
 type CompactCommandMarkerKind = 'local-command' | 'plain';
@@ -74,6 +98,7 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   logPrefix: string;
 }>): Readonly<{
   observe(message: RawJSONLines): void;
+  observeHook(data: SessionHookData): void;
   reset(): void;
 }> {
   const turnDiffBridge = createClaudeRawMessageTurnDiffBridge({
@@ -147,6 +172,48 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   let compactionSequence = 0;
   let activeCompactionLifecycleId: string | null = null;
   let suppressNextLocalCommandCompactStart = false;
+  let hasAssistantTranscriptForCurrentTurn = false;
+  let lastSyntheticStopHookAssistantText: string | null = null;
+  let pendingStopHookAssistantFallback: NodeJS.Timeout | null = null;
+  const clearPendingStopHookAssistantFallback = (): void => {
+    if (!pendingStopHookAssistantFallback) return;
+    clearTimeout(pendingStopHookAssistantFallback);
+    pendingStopHookAssistantFallback = null;
+  };
+  const emitSyntheticStopHookAssistantMessage = (text: string): void => {
+    const synthetic: RawJSONLines = {
+      type: 'assistant',
+      uuid: randomUUID(),
+      isSidechain: false,
+      message: {
+        role: 'assistant',
+        model: '<synthetic>',
+        content: [{ type: 'text', text }],
+        stop_reason: 'end_turn',
+      },
+      happierSyntheticSource: 'claude-stop-hook-last-assistant-message',
+    } as RawJSONLines;
+    const bridged = turnDiffBridge.observe(synthetic);
+    if (bridged) {
+      params.session.client.sendClaudeSessionMessage(bridged, {
+        importedFrom: 'claude-stop-hook-last-assistant-message',
+      });
+      turnDiffBridge.flushAfterForwardIfNeeded();
+    }
+  };
+  const scheduleStopHookAssistantFallback = (text: string): void => {
+    clearPendingStopHookAssistantFallback();
+    pendingStopHookAssistantFallback = setTimeout(() => {
+      pendingStopHookAssistantFallback = null;
+      if (hasAssistantTranscriptForCurrentTurn) return;
+      if (lastSyntheticStopHookAssistantText === text) return;
+      lastSyntheticStopHookAssistantText = text;
+      logger.debug(`${params.logPrefix}: projecting Claude Stop hook last_assistant_message because no assistant transcript row arrived`);
+      emitSyntheticStopHookAssistantMessage(text);
+      hasAssistantTranscriptForCurrentTurn = true;
+    }, STOP_HOOK_ASSISTANT_FALLBACK_DELAY_MS);
+    pendingStopHookAssistantFallback.unref?.();
+  };
   const nextCompactionLifecycleId = (): string => buildClaudeCompactionLifecycleId({
     sessionId: params.session.sessionId ?? params.session.client.sessionId,
     sequence: ++compactionSequence,
@@ -181,6 +248,10 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
 
   return {
     observe(message) {
+      if (assistantMessageHasDisplayText(message)) {
+        hasAssistantTranscriptForCurrentTurn = true;
+        clearPendingStopHookAssistantFallback();
+      }
       maybeAdoptEffectiveModel(message);
       maybeProjectWorkState(message);
       maybeEmitCompactionEvents(message);
@@ -195,8 +266,24 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
         turnDiffBridge.flushAfterForwardIfNeeded();
       }
     },
+    observeHook(data) {
+      const hookEventName = readHookEventName(data);
+      if (hookEventName === 'UserPromptSubmit') {
+        hasAssistantTranscriptForCurrentTurn = false;
+        lastSyntheticStopHookAssistantText = null;
+        clearPendingStopHookAssistantFallback();
+        return;
+      }
+      if (hookEventName !== 'Stop') return;
+      const lastAssistantMessage = readStopHookLastAssistantMessage(data);
+      if (!lastAssistantMessage || hasAssistantTranscriptForCurrentTurn) return;
+      scheduleStopHookAssistantFallback(lastAssistantMessage);
+    },
     reset() {
       turnDiffBridge.reset();
+      hasAssistantTranscriptForCurrentTurn = false;
+      lastSyntheticStopHookAssistantText = null;
+      clearPendingStopHookAssistantFallback();
     },
   };
 }

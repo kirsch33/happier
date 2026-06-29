@@ -27,6 +27,8 @@ export const HAPPIER_BASE_SYSTEM_PROMPT_OPTIONS_V1 = trimIdent(`
 
   You have a way to give a user a easy way to answer your questions if you know possible answers. To provide this, you need to output in your final response an XML:
 
+  If a native user-question or user-action tool is available (for example AskUserQuestion), use that tool instead of writing visible XML options into the transcript.
+
   <options>
       <option>Option 1</option>
       ...
