@@ -62,4 +62,33 @@ describe('daemon tmux spawn config', () => {
     expect(cfg.tmuxCommandEnv.TMUX_TMPDIR).toBe('/custom/tmux');
     expect(cfg.commandTokens).toEqual(expect.arrayContaining(['--happy-terminal-mode', 'tmux']));
   });
+
+  it('overlays authoritative server context and clears stale split urls', () => {
+    process.env.PATH = '/bin';
+
+    const cfg = buildTmuxSpawnConfig({
+      agent: 'claude',
+      directory: '/tmp',
+      extraEnv: {
+        HAPPIER_SERVER_URL: 'https://stale.example',
+        HAPPIER_PUBLIC_SERVER_URL: 'https://stale.example',
+        HAPPIER_LOCAL_SERVER_URL: 'http://stale.local',
+      },
+      homeDir: '/home/akirsch/.happier',
+      serverSelectionEnv: {
+        activeServerId: 'greatwhitelab',
+        canonicalServerUrl: 'http://127.0.0.1:3005',
+        apiServerUrl: 'http://127.0.0.1:3005',
+        webappUrl: 'https://happier-web.greatwhitelab.net',
+      },
+    });
+
+    expect(cfg.tmuxEnv.HAPPIER_HOME_DIR).toBe('/home/akirsch/.happier');
+    expect(cfg.tmuxEnv.HAPPIER_ACTIVE_SERVER_ID).toBe('greatwhitelab');
+    expect(cfg.tmuxEnv.HAPPIER_SERVER_URL).toBe('http://127.0.0.1:3005');
+    expect(cfg.tmuxEnv.HAPPIER_PUBLIC_SERVER_URL).toBe('');
+    expect(cfg.tmuxEnv.HAPPIER_LOCAL_SERVER_URL).toBe('');
+    expect(cfg.tmuxEnv.HAPPIER_WEBAPP_URL).toBe('https://happier-web.greatwhitelab.net');
+  });
+
 });

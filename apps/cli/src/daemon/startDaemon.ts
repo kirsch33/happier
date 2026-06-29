@@ -2855,6 +2855,13 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     agent: agentSubcommand,
                     directory: resolvedDirectory,
                     extraEnv: extraEnvForChildWithMessage,
+                    homeDir: configuration.happyHomeDir,
+                    serverSelectionEnv: {
+                      activeServerId: configuration.activeServerId,
+                      canonicalServerUrl: configuration.serverUrl,
+                      apiServerUrl: configuration.apiServerUrl,
+                      webappUrl: configuration.webappUrl,
+                    },
                     tmuxCommandEnv,
                     extraArgs: [
                       ...terminalRuntimeArgs,
