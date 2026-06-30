@@ -289,6 +289,7 @@ function readCursorComposerRelation(params: Readonly<{
 
 function cursorProvesPlainPlaceholder(params: Readonly<{
   rawText: string;
+  normalizedText: string;
   content: string;
   continuation: readonly string[];
   cursorRelation: ClaudeScreenState['composerCursorRelation'];
@@ -299,7 +300,21 @@ function cursorProvesPlainPlaceholder(params: Readonly<{
     && params.continuation.length === 0
     && params.content.length > 0
     && params.content.length <= MAX_CURSOR_PROVEN_PLAIN_PLACEHOLDER_CHARS
+    && !visibleOptionMatchesComposerContent(params.normalizedText, params.content)
   );
+}
+
+function normalizeOptionText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function visibleOptionMatchesComposerContent(text: string, content: string): boolean {
+  const normalizedContent = normalizeOptionText(content);
+  if (normalizedContent.length === 0) return false;
+  for (const match of text.matchAll(/<option>([\s\S]*?)<\/option>/g)) {
+    if (normalizeOptionText(match[1] ?? '') === normalizedContent) return true;
+  }
+  return false;
 }
 
 function readComposerState(
@@ -318,7 +333,13 @@ function readComposerState(
   if (continuation.length === 0 && composerContentIsDimPlaceholder(rawText, content)) {
     return { content: '', cursorRelation };
   }
-  if (cursorProvesPlainPlaceholder({ rawText, content, continuation, cursorRelation })) {
+  if (cursorProvesPlainPlaceholder({
+    rawText,
+    normalizedText: text,
+    content,
+    continuation,
+    cursorRelation,
+  })) {
     return { content: '', cursorRelation };
   }
   return {

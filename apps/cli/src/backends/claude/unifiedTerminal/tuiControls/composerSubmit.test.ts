@@ -67,7 +67,10 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
   });
 
   it('submits a plain capture draft below assistant options without requiring clear-style evidence', async () => {
-    const port = createFakeControlPort({ captures: [ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT] });
+    const port = createFakeControlPort({
+      captures: [ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT],
+      cursor: { x: 2, y: 8 },
+    });
 
     const result = await submitUserAuthorizedClaudeComposerDraft({
       port,

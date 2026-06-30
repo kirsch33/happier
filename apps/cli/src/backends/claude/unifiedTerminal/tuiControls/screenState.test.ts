@@ -384,6 +384,26 @@ describe('parseClaudeScreenState — plain contextual suggestion with cursor pro
     expect(state.userDraftPresent).toBe(true);
   });
 
+  it('keeps a visible XML option prefilled in the composer as a draft when the cursor is at the text start', () => {
+    const optionText = 'Write this Shell/ definition into CANON v2';
+    const state = parseClaudeScreenState([
+      'If that lands, choose the next move.',
+      '',
+      '<options>',
+      `<option>${optionText}</option>`,
+      '<option>Move on to the next restructure decision</option>',
+      '</options>',
+      '',
+      '────────────────────────────────────────────────',
+      `❯ ${optionText}`,
+      '────────────────────────────────────────────────',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'), { cursor: { x: 2, y: 8 } });
+
+    expect(state.composerContent).toBe(optionText);
+    expect(state.userDraftPresent).toBe(true);
+  });
+
   it('keeps the same plain text fail-closed as a draft without cursor evidence', () => {
     const state = parseClaudeScreenState(CLAUDE_2_1_179_TMUX_PLAIN_CONTEXTUAL_SUGGESTION);
     expect(state.composerContent).toBe('what can you help me with');

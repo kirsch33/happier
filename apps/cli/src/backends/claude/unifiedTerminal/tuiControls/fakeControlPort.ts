@@ -32,6 +32,7 @@ export function createFakeControlPort(params: Readonly<{
   hostKind?: TerminalHostKind | undefined;
   hostDead?: boolean | undefined;
   capturedAtMs?: number | undefined;
+  cursor?: Readonly<{ x: number; y: number }> | undefined;
   /** Keys whose send reports `host_dead` AFTER `onSendSpecialKey` runs (host-race simulation). */
   failSendKeys?: readonly TerminalSpecialKey[] | undefined;
   /** Capture indexes (0-based) that report `host_dead` instead of a screen. */
@@ -89,7 +90,12 @@ export function createFakeControlPort(params: Readonly<{
       captureIndex += 1;
       return {
         status: 'captured',
-        capture: { text, capturedAtMs: params.capturedAtMs ?? 0, hostKind },
+        capture: {
+          text,
+          capturedAtMs: params.capturedAtMs ?? 0,
+          hostKind,
+          ...(params.cursor ? { cursor: params.cursor } : {}),
+        },
       };
     },
   };
