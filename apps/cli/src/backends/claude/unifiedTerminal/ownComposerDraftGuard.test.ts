@@ -145,14 +145,29 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     expect(result.status).toBe('capture_style_unavailable');
   });
 
-  it('reports no_draft for a plain Claude suggestion when tmux cursor proves the composer is empty', async () => {
+  it('reports capture_style_unavailable for arbitrary plain suggestion text even when the cursor is at the text start', async () => {
     const result = await clearOwnLeftoverComposerDraft({
       captureInputState: async () => ({
         currentInput: plainSuggestionScreen('what can you help me with'),
         cursor: { x: 2, y: 1 },
       }),
       sendClearKey: async () => {
-        throw new Error('must not clear a placeholder suggestion');
+        throw new Error('must not clear unverified composer content');
+      },
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('capture_style_unavailable');
+  });
+
+  it('reports no_draft for a known Try placeholder when tmux cursor proves the composer is empty', async () => {
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({
+        currentInput: plainSuggestionScreen('Try "refactor <filepath>"'),
+        cursor: { x: 2, y: 1 },
+      }),
+      sendClearKey: async () => {
+        throw new Error('must not clear a known placeholder suggestion');
       },
       ownComposerTexts: ownLog(OWN_TEXT),
       wait: async () => undefined,

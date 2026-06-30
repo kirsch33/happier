@@ -132,7 +132,7 @@ const SLASH_SUGGESTION_LINE = /(?:^|\n)[^\S\n]*\/[a-z][a-z0-9-]*\b/i;
 // blocking overlay for controls and steering.
 const SELECTION_LIST_HINT = /\u2191\/\u2193 to select/;
 const SELECTION_CURSOR_ROW = /(?:^|\n)[^\S\n]*\u276f[^\S\n]*[\u25ef\u25c9\u25cb\u25cf\u25d0\u25d1]/;
-
+const KNOWN_PLAIN_PLACEHOLDER = /^Try\s+(?:"[^"]+"|“[^”]+”)$/u;
 
 function tailLines(text: string, count: number): string {
   return text.split('\n').slice(-count).join('\n');
@@ -300,6 +300,7 @@ function cursorProvesPlainPlaceholder(params: Readonly<{
     && params.continuation.length === 0
     && params.content.length > 0
     && params.content.length <= MAX_CURSOR_PROVEN_PLAIN_PLACEHOLDER_CHARS
+    && KNOWN_PLAIN_PLACEHOLDER.test(params.content)
     && !visibleOptionMatchesComposerContent(params.normalizedText, params.content)
   );
 }

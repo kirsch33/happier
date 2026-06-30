@@ -347,10 +347,10 @@ describe('parseClaudeScreenState — dim contextual suggestion placeholder (2.1.
 });
 
 // Live Lima/tmux capture 2026-06-19 (Claude Code 2.1.179-class): tmux `capture-pane -p -e`
-// returned the contextual suggestion with no SGR styling, but `#{cursor_x},#{cursor_y}` showed the
-// cursor at the start of the visual suggestion text. That cursor location is the host-owned proof
-// that the composer input buffer is empty; without cursor evidence, plain captures still fail
-// closed as drafts.
+// returned contextual suggestions with no SGR styling. A later live capture (2026-06-30, Claude
+// Code on debian-dev) showed real typed drafts can report the same cursor-at-text-start position,
+// so cursor proof is only safe for known placeholder shapes. Arbitrary plain text stays a draft;
+// automatic injection paths classify it as style-unavailable/unsafe instead of typing over it.
 const CLAUDE_2_1_179_TMUX_PLAIN_CONTEXTUAL_SUGGESTION = [
   '  Called happier (ctrl+o to expand)',
   '',
@@ -366,14 +366,14 @@ const CLAUDE_2_1_179_TMUX_PLAIN_CONTEXTUAL_SUGGESTION = [
 ].join('\n');
 
 describe('parseClaudeScreenState — plain contextual suggestion with cursor proof (tmux)', () => {
-  it('treats a plain visible suggestion as an EMPTY composer when the cursor is at the text start', () => {
+  it('keeps arbitrary plain suggestion text as a draft even when the cursor is at the text start', () => {
     const state = parseClaudeScreenState(CLAUDE_2_1_179_TMUX_PLAIN_CONTEXTUAL_SUGGESTION, {
       cursor: { x: 2, y: 7 },
     });
-    expect(state.composerContent).toBe('');
-    expect(state.userDraftPresent).toBe(false);
-    expect(isClaudeScreenReadyForInput(state)).toBe(true);
-    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBeNull();
+    expect(state.composerContent).toBe('what can you help me with');
+    expect(state.userDraftPresent).toBe(true);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('user_draft');
   });
 
   it('keeps long plain composer content as a draft even when the cursor is at the text start', () => {
@@ -410,12 +410,12 @@ describe('parseClaudeScreenState — plain contextual suggestion with cursor pro
     expect(state.userDraftPresent).toBe(true);
   });
 
-  it('still trusts cursor proof when unrelated border styling exists outside the composer line', () => {
+  it('keeps arbitrary plain text as a draft when only unrelated chrome has styling', () => {
     const styledChrome = CLAUDE_2_1_179_TMUX_PLAIN_CONTEXTUAL_SUGGESTION
       .replaceAll('────────────────────────────────────────────────', `${ESC}[38;2;136;136;136m────────────────────────────────────────────────${ESC}[m`);
     const state = parseClaudeScreenState(styledChrome, { cursor: { x: 2, y: 7 } });
-    expect(state.composerContent).toBe('');
-    expect(state.userDraftPresent).toBe(false);
+    expect(state.composerContent).toBe('what can you help me with');
+    expect(state.userDraftPresent).toBe(true);
   });
 
   it('keeps the same plain text a draft when the cursor is after the visible content', () => {
@@ -423,6 +423,25 @@ describe('parseClaudeScreenState — plain contextual suggestion with cursor pro
       cursor: { x: 27, y: 7 },
     });
     expect(state.composerContent).toBe('what can you help me with');
+    expect(state.userDraftPresent).toBe(true);
+  });
+
+  it('keeps a real follow-up draft when tmux reports the cursor at the text start', () => {
+    const liveDraft = [
+      '  Want me to map this skeleton onto the actual current src/ layout next?',
+      '',
+      '✻ Worked for 1m 1s',
+      '                         control this session from your phone · /remote-control',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ map it onto the actual current src/ layout',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '  akirsch@debian-dev:/home/akirsch/dbtools',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    ].join('\n');
+
+    const state = parseClaudeScreenState(liveDraft, { cursor: { x: 2, y: 5 } });
+
+    expect(state.composerContent).toBe('map it onto the actual current src/ layout');
     expect(state.userDraftPresent).toBe(true);
   });
 });

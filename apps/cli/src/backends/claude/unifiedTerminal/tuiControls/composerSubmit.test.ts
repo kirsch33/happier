@@ -43,6 +43,18 @@ const ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT = [
   '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
 ].join('\n');
 
+const LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT = [
+  '  Want me to map this skeleton onto the actual current src/ layout next?',
+  '',
+  '✻ Worked for 1m 1s',
+  '                         control this session from your phone · /remote-control',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '❯ map it onto the actual current src/ layout',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '  akirsch@debian-dev:/home/akirsch/dbtools',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+].join('\n');
+
 const PERMISSION_PROMPT = [
   'Bash(rm -rf tmp)',
   '',
@@ -70,6 +82,22 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     const port = createFakeControlPort({
       captures: [ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT],
       cursor: { x: 2, y: 8 },
+    });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result.status).toBe('submitted');
+    expect(port.sentKeys).toEqual(['Enter']);
+  });
+
+  it('submits a live-shaped plain follow-up draft even when tmux reports the cursor at the text start', async () => {
+    const port = createFakeControlPort({
+      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT],
+      cursor: { x: 2, y: 5 },
     });
 
     const result = await submitUserAuthorizedClaudeComposerDraft({

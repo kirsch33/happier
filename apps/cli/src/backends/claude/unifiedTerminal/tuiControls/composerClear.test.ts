@@ -58,6 +58,18 @@ const ASSISTANT_OPTIONS_WITH_DRAFT = [
   '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
 ].join('\n');
 
+const LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT = [
+  '  Want me to map this skeleton onto the actual current src/ layout next?',
+  '',
+  '✻ Worked for 1m 1s',
+  '                         control this session from your phone · /remote-control',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '❯ map it onto the actual current src/ layout',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '  akirsch@debian-dev:/home/akirsch/dbtools',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+].join('\n');
+
 const TRANSCRIPT_ONLY = [
   'Claude finished the previous answer.',
   'No composer visible in this capture.',
@@ -145,6 +157,22 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
   it('clears a draft below assistant option prose that says "How do you want to proceed?"', async () => {
     const port = createFakeControlPort({
       captures: [ASSISTANT_OPTIONS_WITH_DRAFT, EMPTY_COMPOSER],
+    });
+
+    const result = await clearUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(port.sentKeys).toEqual(['Escape']);
+  });
+
+  it('clears a live-shaped plain follow-up draft even when tmux reports the cursor at the text start', async () => {
+    const port = createFakeControlPort({
+      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, EMPTY_COMPOSER],
+      cursor: { x: 2, y: 5 },
     });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
