@@ -539,6 +539,7 @@ describe('PendingMessagesTranscriptBlock', () => {
             discardedMessages: [],
         }));
 
+        expect(screen.findByTestId('pendingMessages.submitTerminalComposer')).toBeTruthy();
         expect(screen.findByTestId('pendingMessages.clearTerminalComposer')).toBeTruthy();
     });
 
@@ -566,7 +567,49 @@ describe('PendingMessagesTranscriptBlock', () => {
 
         expect(screen.findByTestId('pendingMessages.nonSteerableNotice')).toBeTruthy();
         expect(screen.findByTestId('pendingMessages.steerBlockedTerminalDraftNotice')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.submitTerminalComposer')).toBeTruthy();
         expect(screen.findByTestId('pendingMessages.clearTerminalComposer')).toBeTruthy();
+    });
+
+    it('invokes the submit-composer session action after confirmation', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        modalConfirm.mockResolvedValueOnce(true);
+        actionExecute.mockResolvedValueOnce({ ok: true, result: { ok: true, status: 'submitted' } });
+        sessionValue = {
+            thinking: true,
+            thinkingAt: Date.now(),
+            active: true,
+            presence: 'online',
+            agentStateVersion: 1,
+            agentState: {
+                controlledByUser: false,
+                capabilities: {
+                    inFlightSteer: true,
+                    inFlightSteerSupported: true,
+                    inFlightSteerAvailable: false,
+                    inFlightSteerUnavailableReason: 'user_terminal_draft',
+                },
+            },
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+            sessionId: 's1',
+            pendingMessages: [{ id: 'p1', text: 'hello', displayText: undefined, createdAt: 0, updatedAt: 0, localId: 'p1', rawRecord: {} }],
+            discardedMessages: [],
+        }));
+
+        await screen.pressByTestIdAsync('pendingMessages.submitTerminalComposer');
+
+        expect(actionExecute).toHaveBeenCalledTimes(1);
+        expect(actionExecute).toHaveBeenCalledWith(
+            'session.terminalComposer.submit',
+            { sessionId: 's1' },
+            expect.objectContaining({
+                defaultSessionId: 's1',
+                surface: 'ui_button',
+            }),
+        );
+        expect(modalAlert).not.toHaveBeenCalled();
     });
 
     it('does not invoke clear-composer when confirmation is cancelled', async () => {

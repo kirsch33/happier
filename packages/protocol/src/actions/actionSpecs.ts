@@ -21,6 +21,7 @@ import {
   SessionUsageLimitWaitResumeEnableRequestV1Schema,
 } from '../sessionWorkState/sessionWorkStateRpc.js';
 import { SessionTerminalComposerClearRequestV1Schema } from '../sessionControl/sessionTerminalComposerClearV1.js';
+import { SessionTerminalComposerSubmitRequestV1Schema } from '../sessionControl/sessionTerminalComposerSubmitV1.js';
 import { SessionWorkStateStatusV1Schema } from '../sessionWorkState/sessionWorkStateV1.js';
 
 export {
@@ -2013,6 +2014,31 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     inputSchema: SessionTerminalComposerClearRequestV1Schema,
+  },
+  {
+    id: 'session.terminalComposer.submit',
+    title: 'Submit terminal composer',
+    description: 'Submit a live terminal composer draft after explicit user authorization.',
+    safety: 'danger',
+    approval: APPROVAL_RESULT_REQUIRED,
+    placements: [],
+    surfaces: {
+      ui_button: true,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: false,
+      mcp: false,
+      cli: true,
+    },
+    inputHints: {
+      title: 'Submit terminal composer',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'expectedStateAtMs', title: 'Expected state timestamp', widget: 'text' },
+      ],
+    },
+    inputSchema: SessionTerminalComposerSubmitRequestV1Schema,
   },
   {
     id: 'session.usageLimit.waitResume.enable',

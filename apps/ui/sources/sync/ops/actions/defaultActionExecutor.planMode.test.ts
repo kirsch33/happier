@@ -189,6 +189,33 @@ describe('createDefaultActionExecutor plan mode integration', () => {
     });
   });
 
+  it('routes terminal composer submit through the live session RPC', async () => {
+    sessionRpcWithServerScopeMock.mockResolvedValueOnce({
+      ok: true,
+      status: 'submitted',
+      sessionId: 's1',
+    });
+    const { createDefaultActionExecutor } = await import('./defaultActionExecutor');
+
+    const executor = createDefaultActionExecutor();
+    const result = await executor.execute(
+      'session.terminalComposer.submit',
+      { sessionId: 's1', expectedStateAtMs: 43 },
+      { defaultSessionId: 's1', surface: 'ui_button' },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      result: { ok: true, status: 'submitted', sessionId: 's1' },
+    });
+    expect(sessionRpcWithServerScopeMock).toHaveBeenCalledWith({
+      sessionId: 's1',
+      serverId: undefined,
+      method: SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT,
+      payload: { sessionId: 's1', expectedStateAtMs: 43 },
+    });
+  });
+
   it('forwards limit to agents.backends.list voice-tool routing', async () => {
     const { createDefaultActionExecutor } = await import('./defaultActionExecutor');
 

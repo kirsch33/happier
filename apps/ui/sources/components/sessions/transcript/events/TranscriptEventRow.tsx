@@ -15,6 +15,7 @@ import {
     readTerminalComposerDraftBlockedStateAtMs,
 } from '@/components/sessions/terminalComposer/terminalComposerDraftBlockedEvent';
 import { useTerminalComposerClearAction } from '@/components/sessions/terminalComposer/useTerminalComposerClearAction';
+import { useTerminalComposerSubmitAction } from '@/components/sessions/terminalComposer/useTerminalComposerSubmitAction';
 
 const EVENT_ICON_SIZE = 18;
 const EVENT_SPINNER_SIZE = 20;
@@ -270,6 +271,53 @@ const TerminalComposerClearActionButton = React.memo(function TerminalComposerCl
     );
 });
 
+const TerminalComposerSubmitActionButton = React.memo(function TerminalComposerSubmitActionButton(props: {
+    sessionId: string;
+    expectedStateAtMs: number | null;
+}) {
+    const { theme } = useUnistyles();
+    const terminalComposerSubmit = useTerminalComposerSubmitAction(props.sessionId);
+
+    return (
+        <Pressable
+            testID="transcriptEvent.submitTerminalComposer"
+            accessibilityRole="button"
+            accessibilityLabel={t('session.pendingMessages.submitTerminalComposer.action')}
+            accessibilityState={{
+                disabled: terminalComposerSubmit.busy,
+                busy: terminalComposerSubmit.busy,
+            }}
+            disabled={terminalComposerSubmit.busy}
+            onPress={() => {
+                void terminalComposerSubmit.submitTerminalComposer({
+                    expectedStateAtMs: props.expectedStateAtMs,
+                });
+            }}
+            style={({ pressed }) => ([
+                styles.action,
+                {
+                    borderColor: theme.colors.border.default,
+                    backgroundColor: pressed ? theme.colors.surface.pressedOverlay : theme.colors.surface.base,
+                    opacity: terminalComposerSubmit.busy ? 0.7 : 1,
+                },
+            ])}
+        >
+            {terminalComposerSubmit.busy ? (
+                <ActivitySpinner
+                    testID="transcriptEvent.submitTerminalComposerSpinner"
+                    size={10}
+                    color={theme.colors.text.secondary}
+                />
+            ) : (
+                <Ionicons name="return-down-forward-outline" size={12} color={theme.colors.text.secondary} />
+            )}
+            <Text style={[styles.actionText, { color: theme.colors.text.secondary }]}>
+                {t('session.pendingMessages.submitTerminalComposer.action')}
+            </Text>
+        </Pressable>
+    );
+});
+
 export const TranscriptEventRow = React.memo(function TranscriptEventRow(props: {
     event: AgentEvent;
     sessionId?: string | null;
@@ -424,10 +472,16 @@ export const TranscriptEventRow = React.memo(function TranscriptEventRow(props: 
                         </Text>
                     ) : null}
                     {props.sessionId && isTerminalComposerDraftBlocked ? (
-                        <TerminalComposerClearActionButton
-                            sessionId={props.sessionId}
-                            expectedStateAtMs={terminalComposerDraftBlockedStateAtMs}
-                        />
+                        <View style={styles.actionRow}>
+                            <TerminalComposerSubmitActionButton
+                                sessionId={props.sessionId}
+                                expectedStateAtMs={terminalComposerDraftBlockedStateAtMs}
+                            />
+                            <TerminalComposerClearActionButton
+                                sessionId={props.sessionId}
+                                expectedStateAtMs={terminalComposerDraftBlockedStateAtMs}
+                            />
+                        </View>
                     ) : null}
                 </View>
             </View>
@@ -492,6 +546,12 @@ const styles = StyleSheet.create((theme) => ({
         paddingHorizontal: 7,
         paddingVertical: 3,
         marginTop: 5,
+    },
+    actionRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 6,
     },
     actionText: {
         fontSize: 12,

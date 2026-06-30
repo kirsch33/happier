@@ -26,6 +26,7 @@ import { deriveSessionRuntimePresentationState } from '@/sync/domains/session/at
 import { canSteerUserMessageNow, supportsInFlightSteerUserMessage } from '@/sync/domains/session/control/submitMode';
 import { getPendingMessageVisualState } from './pendingMessageVisualState';
 import { useTerminalComposerClearAction } from '@/components/sessions/terminalComposer/useTerminalComposerClearAction';
+import { useTerminalComposerSubmitAction } from '@/components/sessions/terminalComposer/useTerminalComposerSubmitAction';
 
 function getPendingText(message: PendingMessage | DiscardedPendingMessage): string {
     const raw = (message.displayText ?? message.text) ?? '';
@@ -138,6 +139,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     const [scrollOffsetY, setScrollOffsetY] = React.useState<number | null>(null);
     const [materializingLocalIdMap, setMaterializingLocalIdMap] = React.useState<Record<string, true>>({});
     const terminalComposerClear = useTerminalComposerClearAction(props.sessionId);
+    const terminalComposerSubmit = useTerminalComposerSubmitAction(props.sessionId);
     const scrollRef = React.useRef<ScrollView | null>(null);
     const materializingLocalIds = React.useMemo(
         () => new Set(Object.keys(materializingLocalIdMap)),
@@ -784,37 +786,70 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
                                         : t('session.pendingMessages.nonSteerableNotice')}
                                 </Text>
                                 {showTerminalComposerClearAction ? (
-                                    <Pressable
-                                        testID="pendingMessages.clearTerminalComposer"
-                                        accessibilityRole="button"
-                                        accessibilityLabel={t('session.pendingMessages.clearTerminalComposer.action')}
-                                        accessibilityState={{ disabled: terminalComposerClear.busy, busy: terminalComposerClear.busy }}
-                                        disabled={terminalComposerClear.busy}
-                                        onPress={() => {
-                                            void terminalComposerClear.clearTerminalComposer();
-                                        }}
-                                        style={({ pressed }) => ([
-                                            styles.nonSteerableNoticeAction,
-                                            {
-                                                borderColor: theme.colors.border.default,
-                                                backgroundColor: pressed ? theme.colors.surface.pressedOverlay : theme.colors.surface.base,
-                                                opacity: terminalComposerClear.busy ? 0.7 : 1,
-                                            },
-                                        ])}
-                                    >
-                                        {terminalComposerClear.busy ? (
-                                            <ActivitySpinner
-                                                testID="pendingMessages.clearTerminalComposerSpinner"
-                                                size={10}
-                                                color={theme.colors.text.secondary}
-                                            />
-                                        ) : (
-                                            <Ionicons name="backspace-outline" size={12} color={theme.colors.text.secondary} />
-                                        )}
-                                        <Text style={[styles.nonSteerableNoticeActionText, { color: theme.colors.text.secondary }]}>
-                                            {t('session.pendingMessages.clearTerminalComposer.action')}
-                                        </Text>
-                                    </Pressable>
+                                    <View style={styles.nonSteerableNoticeActions}>
+                                        <Pressable
+                                            testID="pendingMessages.submitTerminalComposer"
+                                            accessibilityRole="button"
+                                            accessibilityLabel={t('session.pendingMessages.submitTerminalComposer.action')}
+                                            accessibilityState={{ disabled: terminalComposerSubmit.busy, busy: terminalComposerSubmit.busy }}
+                                            disabled={terminalComposerSubmit.busy}
+                                            onPress={() => {
+                                                void terminalComposerSubmit.submitTerminalComposer();
+                                            }}
+                                            style={({ pressed }) => ([
+                                                styles.nonSteerableNoticeAction,
+                                                {
+                                                    borderColor: theme.colors.border.default,
+                                                    backgroundColor: pressed ? theme.colors.surface.pressedOverlay : theme.colors.surface.base,
+                                                    opacity: terminalComposerSubmit.busy ? 0.7 : 1,
+                                                },
+                                            ])}
+                                        >
+                                            {terminalComposerSubmit.busy ? (
+                                                <ActivitySpinner
+                                                    testID="pendingMessages.submitTerminalComposerSpinner"
+                                                    size={10}
+                                                    color={theme.colors.text.secondary}
+                                                />
+                                            ) : (
+                                                <Ionicons name="return-down-forward-outline" size={12} color={theme.colors.text.secondary} />
+                                            )}
+                                            <Text style={[styles.nonSteerableNoticeActionText, { color: theme.colors.text.secondary }]}>
+                                                {t('session.pendingMessages.submitTerminalComposer.action')}
+                                            </Text>
+                                        </Pressable>
+                                        <Pressable
+                                            testID="pendingMessages.clearTerminalComposer"
+                                            accessibilityRole="button"
+                                            accessibilityLabel={t('session.pendingMessages.clearTerminalComposer.action')}
+                                            accessibilityState={{ disabled: terminalComposerClear.busy, busy: terminalComposerClear.busy }}
+                                            disabled={terminalComposerClear.busy}
+                                            onPress={() => {
+                                                void terminalComposerClear.clearTerminalComposer();
+                                            }}
+                                            style={({ pressed }) => ([
+                                                styles.nonSteerableNoticeAction,
+                                                {
+                                                    borderColor: theme.colors.border.default,
+                                                    backgroundColor: pressed ? theme.colors.surface.pressedOverlay : theme.colors.surface.base,
+                                                    opacity: terminalComposerClear.busy ? 0.7 : 1,
+                                                },
+                                            ])}
+                                        >
+                                            {terminalComposerClear.busy ? (
+                                                <ActivitySpinner
+                                                    testID="pendingMessages.clearTerminalComposerSpinner"
+                                                    size={10}
+                                                    color={theme.colors.text.secondary}
+                                                />
+                                            ) : (
+                                                <Ionicons name="backspace-outline" size={12} color={theme.colors.text.secondary} />
+                                            )}
+                                            <Text style={[styles.nonSteerableNoticeActionText, { color: theme.colors.text.secondary }]}>
+                                                {t('session.pendingMessages.clearTerminalComposer.action')}
+                                            </Text>
+                                        </Pressable>
+                                    </View>
                                 ) : null}
                             </View>
                         ) : null}
@@ -998,6 +1033,12 @@ const styles = StyleSheet.create(() => ({
         fontSize: 12,
         lineHeight: 16,
         ...Typography.default(),
+    },
+    nonSteerableNoticeActions: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 6,
     },
     nonSteerableNoticeAction: {
         flexDirection: 'row',

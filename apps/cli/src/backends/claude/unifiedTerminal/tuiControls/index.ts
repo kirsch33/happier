@@ -26,6 +26,11 @@ export {
   type ClaudeUserAuthorizedComposerClearResult,
 } from './composerClear';
 export {
+  submitUserAuthorizedClaudeComposerDraft,
+  type ClaudeComposerSubmitRefusalReason,
+  type ClaudeUserAuthorizedComposerSubmitResult,
+} from './composerSubmit';
+export {
   CLAUDE_UNIFIED_TUI_RUNTIME_CONTROL_FEATURE_ID,
   CLAUDE_TUI_MODE_MARKERS,
   DEFAULT_CLAUDE_TUI_CONTROL_TIMINGS,

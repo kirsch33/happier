@@ -1122,6 +1122,18 @@ export {
 } from './sessionControl/sessionTerminalComposerClearV1.js';
 
 export {
+  SessionTerminalComposerSubmitFailureStatusV1Schema,
+  SessionTerminalComposerSubmitRequestV1Schema,
+  SessionTerminalComposerSubmitResultV1Schema,
+  SessionTerminalComposerSubmitSuccessStatusV1Schema,
+  buildUnsupportedSessionTerminalComposerSubmitResult,
+  type SessionTerminalComposerSubmitFailureStatusV1,
+  type SessionTerminalComposerSubmitRequestV1,
+  type SessionTerminalComposerSubmitResultV1,
+  type SessionTerminalComposerSubmitSuccessStatusV1,
+} from './sessionControl/sessionTerminalComposerSubmitV1.js';
+
+export {
   DefaultSessionFoldersV1,
   MoveSessionFolderAssignmentsRequestSchema,
   MoveSessionFolderAssignmentsResponseSchema,

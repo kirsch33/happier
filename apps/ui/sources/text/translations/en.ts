@@ -4904,12 +4904,18 @@ export const en = {
 	            decryptFailed: 'Couldn’t decrypt this pending message.',
 	            nonSteerableNotice: 'The current turn can’t accept steering after this mode change. It will run next, or use Send now to interrupt.',
 	            steerBlockedTerminalDraftNotice: 'Waiting: a draft in the terminal composer is blocking delivery. Clear it in the terminal or interrupt the turn.',
-	            clearTerminalComposer: {
-	                action: 'Clear composer',
-	                confirmTitle: 'Clear terminal composer?',
-	                confirmBody: 'This discards the unsent text currently typed in the terminal. Queued messages can continue afterward.',
-	                confirmButton: 'Clear composer',
-	            },
+		            clearTerminalComposer: {
+		                action: 'Clear composer',
+		                confirmTitle: 'Clear terminal composer?',
+		                confirmBody: 'This discards the unsent text currently typed in the terminal. Queued messages can continue afterward.',
+		                confirmButton: 'Clear composer',
+		            },
+		            submitTerminalComposer: {
+		                action: 'Submit composer',
+		                confirmTitle: 'Submit terminal composer?',
+		                confirmBody: 'This sends the unsent text currently typed in the terminal. Queued messages can continue afterward.',
+		                confirmButton: 'Submit composer',
+		            },
 	            actions: {
 	                up: 'Up',
 	                down: 'Down',
@@ -4951,10 +4957,13 @@ export const en = {
                 deleteDiscardedFailed: 'Failed to delete discarded message',
                 sendDiscardedFailed: 'Failed to send discarded message',
                 reorderFailed: 'Failed to reorder pending messages',
-                clearTerminalComposerFailed: 'Failed to clear the terminal composer',
-                clearTerminalComposerUnsupported: 'This session does not support clearing the terminal composer from Happier.',
-                clearTerminalComposerUnsafe: 'The terminal composer cannot be cleared safely right now.',
-            },
+	                clearTerminalComposerFailed: 'Failed to clear the terminal composer',
+	                clearTerminalComposerUnsupported: 'This session does not support clearing the terminal composer from Happier.',
+	                clearTerminalComposerUnsafe: 'The terminal composer cannot be cleared safely right now.',
+	                submitTerminalComposerFailed: 'Failed to submit the terminal composer',
+	                submitTerminalComposerUnsupported: 'This session does not support submitting the terminal composer from Happier.',
+	                submitTerminalComposerUnsafe: 'The terminal composer cannot be submitted safely right now.',
+	            },
         },
 
         sharing: {

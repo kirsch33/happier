@@ -25,10 +25,15 @@ import {
   SessionWorkStateV1Schema,
   SessionTerminalComposerClearRequestV1Schema,
   SessionTerminalComposerClearResultV1Schema,
+  SessionTerminalComposerSubmitRequestV1Schema,
+  SessionTerminalComposerSubmitResultV1Schema,
   buildUnsupportedSessionTerminalComposerClearResult,
+  buildUnsupportedSessionTerminalComposerSubmitResult,
   readDisplayableSessionWorkStateV1,
   type SessionTerminalComposerClearRequestV1,
   type SessionTerminalComposerClearResultV1,
+  type SessionTerminalComposerSubmitRequestV1,
+  type SessionTerminalComposerSubmitResultV1,
 } from '@happier-dev/protocol';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 import {
@@ -78,6 +83,9 @@ export type SessionRuntimeControls = {
   clearTerminalComposer?: (
     request: Readonly<SessionTerminalComposerClearRequestV1>,
   ) => Promise<SessionTerminalComposerClearResultV1 | unknown> | SessionTerminalComposerClearResultV1 | unknown;
+  submitTerminalComposer?: (
+    request: Readonly<SessionTerminalComposerSubmitRequestV1>,
+  ) => Promise<SessionTerminalComposerSubmitResultV1 | unknown> | SessionTerminalComposerSubmitResultV1 | unknown;
   handleUserMessage?: (
     request: Readonly<{
       text: string;
@@ -213,6 +221,25 @@ function normalizeTerminalComposerClearResult(
   });
 }
 
+function normalizeTerminalComposerSubmitResult(
+  result: unknown,
+  sessionId: string,
+): SessionTerminalComposerSubmitResultV1 {
+  const parsed = SessionTerminalComposerSubmitResultV1Schema.safeParse(result);
+  if (parsed.success) {
+    return parsed.data.sessionId
+      ? parsed.data
+      : SessionTerminalComposerSubmitResultV1Schema.parse({ ...parsed.data, sessionId });
+  }
+  return SessionTerminalComposerSubmitResultV1Schema.parse({
+    ok: false,
+    status: 'submit_failed',
+    sessionId,
+    errorCode: 'invalid_runtime_control_result',
+    error: 'invalid_runtime_control_result',
+  });
+}
+
 export function registerSessionControlHandlers(
   rpc: RpcHandlerRegistrar,
   opts: Readonly<{
@@ -292,6 +319,21 @@ export function registerSessionControlHandlers(
     }
     return normalizeTerminalComposerClearResult(
       await opts.sessionRuntimeControls.clearTerminalComposer(parsed.data),
+      parsed.data.sessionId,
+    );
+  });
+
+  rpc.registerHandler(SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT, async (raw: unknown) => {
+    const parsed = SessionTerminalComposerSubmitRequestV1Schema.safeParse(raw);
+    if (!parsed.success) return invalidInput();
+    if (typeof opts.sessionRuntimeControls?.submitTerminalComposer !== 'function') {
+      return buildUnsupportedSessionTerminalComposerSubmitResult(
+        parsed.data.sessionId,
+        SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT,
+      );
+    }
+    return normalizeTerminalComposerSubmitResult(
+      await opts.sessionRuntimeControls.submitTerminalComposer(parsed.data),
       parsed.data.sessionId,
     );
   });

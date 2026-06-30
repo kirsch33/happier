@@ -555,15 +555,18 @@ describe('claudeUnifiedTerminalLauncher', () => {
 
     mocks.runClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: {
       registerTerminalComposerClearRuntimeControl?: (
-        handler: (request: Readonly<{ sessionId: string }>) => Promise<unknown>,
+        clearHandler: (request: Readonly<{ sessionId: string }>) => Promise<unknown>,
+        submitHandler: (request: Readonly<{ sessionId: string }>) => Promise<unknown>,
       ) => (() => void) | void;
     }) => {
       expect(typeof opts.registerTerminalComposerClearRuntimeControl).toBe('function');
-      const handler = vi.fn(async () => ({ ok: true, status: 'already_empty', sessionId: 'happy-session-id' }));
-      const dispose = opts.registerTerminalComposerClearRuntimeControl?.(handler);
+      const clearHandler = vi.fn(async () => ({ ok: true, status: 'already_empty', sessionId: 'happy-session-id' }));
+      const submitHandler = vi.fn(async () => ({ ok: true, status: 'submitted', sessionId: 'happy-session-id' }));
+      const dispose = opts.registerTerminalComposerClearRuntimeControl?.(clearHandler, submitHandler);
 
       expect(client.registerSessionRuntimeControls).toHaveBeenCalledWith({
-        clearTerminalComposer: handler,
+        clearTerminalComposer: clearHandler,
+        submitTerminalComposer: submitHandler,
       });
       dispose?.();
       expect(unregister).toHaveBeenCalledTimes(1);

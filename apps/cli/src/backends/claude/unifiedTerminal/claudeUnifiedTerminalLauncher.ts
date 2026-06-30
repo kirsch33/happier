@@ -523,8 +523,8 @@ export async function claudeUnifiedTerminalLauncher(
           localIds: userMessageLocalIds,
         });
       },
-      registerTerminalComposerClearRuntimeControl: (clearTerminalComposer) =>
-        session.client.registerSessionRuntimeControls?.({ clearTerminalComposer }) ?? (() => undefined),
+      registerTerminalComposerClearRuntimeControl: (clearTerminalComposer, submitTerminalComposer) =>
+        session.client.registerSessionRuntimeControls?.({ clearTerminalComposer, submitTerminalComposer }) ?? (() => undefined),
       nextMessage: async () => {
         if (parkedMessage) {
           const parked = parkedMessage;

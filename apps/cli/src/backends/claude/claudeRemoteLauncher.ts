@@ -1458,8 +1458,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 userMessageSeq: batch.maxUserMessageSeq ?? null,
                                 localIds: batch.userMessageLocalIds ?? [],
                             }) === true,
-                            registerTerminalComposerClearRuntimeControl: (clearTerminalComposer) =>
-                                session.client.registerSessionRuntimeControls?.({ clearTerminalComposer }) ?? (() => undefined),
+                            registerTerminalComposerClearRuntimeControl: (clearTerminalComposer, submitTerminalComposer) =>
+                                session.client.registerSessionRuntimeControls?.({ clearTerminalComposer, submitTerminalComposer }) ?? (() => undefined),
                             // C11 (incident cmq8y3nlx): binding-owned registry, seeded from the
                             // persisted prompt store above, so a respawned runner recognizes its
                             // predecessor's leftover composer injection as our own text.

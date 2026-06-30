@@ -286,6 +286,45 @@ describe('createCliActionDeps session controls', () => {
     }));
   });
 
+  it('calls live terminal composer submit RPC for session terminal composer submit actions', async () => {
+    mocks.callSessionRpc.mockResolvedValueOnce({
+      ok: true,
+      status: 'submitted',
+      sessionId: 'sess_1',
+    } as never);
+    const deps = createCliActionDeps({
+      token: 'token',
+      credentials: createCredentials(),
+      sessionId: 'sess_1',
+      ctx: {
+        encryptionKey: new Uint8Array(32).fill(1),
+        encryptionVariant: 'legacy',
+      },
+      mode: 'plain',
+      rawSession: { metadata: {} },
+    });
+
+    await expect(deps.sessionTerminalComposerSubmit?.({
+      sessionId: 'sess_1',
+      expectedStateAtMs: 1_700_000_000_001,
+    })).resolves.toEqual({
+      ok: true,
+      status: 'submitted',
+      sessionId: 'sess_1',
+    });
+
+    expect(mocks.callSessionRpc).toHaveBeenCalledWith(expect.objectContaining({
+      token: 'token',
+      sessionId: 'sess_1',
+      mode: 'plain',
+      method: `sess_1:${SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT}`,
+      request: {
+        sessionId: 'sess_1',
+        expectedStateAtMs: 1_700_000_000_001,
+      },
+    }));
+  });
+
   it('delegates inactive local goal mutations to the provider goal control adapter', async () => {
     const providerSetGoal = vi.fn(async (_params: unknown) => ({ ok: true, workState: { v: 1, items: [], primaryItemId: null, updatedAt: 1 } }));
     mocks.getSessionGoalControlAdapter.mockResolvedValueOnce({

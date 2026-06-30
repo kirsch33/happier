@@ -1605,11 +1605,18 @@ describe('ApiSessionClient connection handling', () => {
             status: 'cleared',
             sessionId: mockSession.id,
         }));
+        const submitTerminalComposer = vi.fn(async () => ({
+            ok: true,
+            status: 'submitted',
+            sessionId: mockSession.id,
+        }));
         const composerClearMethod = SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_CLEAR;
+        const composerSubmitMethod = SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT;
 
         client.setSessionRuntimeControls({ invalidateConnectedServiceAuthTransports });
         const unregisterComposerControls = client.registerSessionRuntimeControls({
             clearTerminalComposer,
+            submitTerminalComposer,
         });
 
         await expect(
@@ -1633,6 +1640,20 @@ describe('ApiSessionClient connection handling', () => {
             sessionId: mockSession.id,
             expectedStateAtMs: 1_700_000_000_000,
         });
+        await expect(
+            client.rpcHandlerManager.invokeLocal(composerSubmitMethod, {
+                sessionId: mockSession.id,
+                expectedStateAtMs: 1_700_000_000_001,
+            }),
+        ).resolves.toEqual({
+            ok: true,
+            status: 'submitted',
+            sessionId: mockSession.id,
+        });
+        expect(submitTerminalComposer).toHaveBeenCalledWith({
+            sessionId: mockSession.id,
+            expectedStateAtMs: 1_700_000_000_001,
+        });
         expect(invalidateConnectedServiceAuthTransports).toHaveBeenCalledTimes(1);
 
         unregisterComposerControls();
@@ -1645,6 +1666,15 @@ describe('ApiSessionClient connection handling', () => {
             sessionId: mockSession.id,
             errorCode: 'unsupported_session_runtime_method',
             error: `unsupported_session_runtime_method:${composerClearMethod}`,
+        });
+        await expect(
+            client.rpcHandlerManager.invokeLocal(composerSubmitMethod, { sessionId: mockSession.id }),
+        ).resolves.toEqual({
+            ok: false,
+            status: 'unsupported',
+            sessionId: mockSession.id,
+            errorCode: 'unsupported_session_runtime_method',
+            error: `unsupported_session_runtime_method:${composerSubmitMethod}`,
         });
         await expect(
             client.rpcHandlerManager.invokeLocal(

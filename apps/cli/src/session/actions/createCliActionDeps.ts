@@ -1362,6 +1362,13 @@ export function createCliActionDeps(params: Readonly<{
       });
     },
 
+    sessionTerminalComposerSubmit: async ({ sessionId, expectedStateAtMs }) => {
+      return await callResolvedSessionRpc(sessionId, SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT, {
+        sessionId,
+        ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
+      });
+    },
+
     sessionVendorPluginCatalogList: async ({ sessionId, cwd }) => {
       return await callRoutedSessionCatalogControl(sessionId, 'vendorPlugins', { cwd });
     },

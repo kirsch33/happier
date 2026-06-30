@@ -8,9 +8,13 @@ import type {
 } from '@happier-dev/agents';
 import {
   SessionTerminalComposerClearResultV1Schema,
+  SessionTerminalComposerSubmitResultV1Schema,
   type SessionTerminalComposerClearFailureStatusV1,
   type SessionTerminalComposerClearRequestV1,
   type SessionTerminalComposerClearResultV1,
+  type SessionTerminalComposerSubmitFailureStatusV1,
+  type SessionTerminalComposerSubmitRequestV1,
+  type SessionTerminalComposerSubmitResultV1,
 } from '@happier-dev/protocol';
 
 import {
@@ -61,9 +65,12 @@ import {
   createClaudeSettingsGuard,
   createClaudeUnifiedTuiControlController,
   resolveClaudeConfigRootFromEnv,
+  submitUserAuthorizedClaudeComposerDraft,
   type ClaudeComposerClearRefusalReason,
+  type ClaudeComposerSubmitRefusalReason,
   type ClaudeStatuslineRuntimeMetadata,
   type ClaudeUserAuthorizedComposerClearResult,
+  type ClaudeUserAuthorizedComposerSubmitResult,
 } from './tuiControls';
 import {
   createClaudeUnifiedControlCommandEchoSuppressor,
@@ -263,6 +270,9 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
     clearTerminalComposer: (
       request: Readonly<SessionTerminalComposerClearRequestV1>,
     ) => Promise<SessionTerminalComposerClearResultV1>,
+    submitTerminalComposer: (
+      request: Readonly<SessionTerminalComposerSubmitRequestV1>,
+    ) => Promise<SessionTerminalComposerSubmitResultV1>,
   ) => (() => void) | void) | undefined;
   onTerminalPromptInjected?: ((input: ClaudeUnifiedTerminalAcceptedInput<Mode>) => void | Promise<void>) | undefined;
   onTerminalInjectionFailure?: ((error: ClaudeUnifiedTerminalInjectionFailureError) => void | Promise<void>) | undefined;
@@ -667,6 +677,34 @@ function mapClaudeComposerClearFailureReasonToProtocolStatus(
   return 'clear_failed';
 }
 
+function mapClaudeComposerSubmitRefusalToProtocolStatus(
+  reason: ClaudeComposerSubmitRefusalReason,
+): SessionTerminalComposerSubmitFailureStatusV1 {
+  switch (reason) {
+    case 'generating':
+      return 'generating';
+    case 'permission_prompt':
+    case 'permission_editor':
+    case 'trust_prompt':
+    case 'switch_model_dialog':
+    case 'resume_choice_dialog':
+    case 'effort_change_dialog':
+    case 'unrecognized_confirmation_dialog':
+    case 'slash_picker':
+    case 'selection_list':
+      return 'dialog_open';
+  }
+}
+
+function mapClaudeComposerSubmitFailureReasonToProtocolStatus(
+  reason: string,
+): SessionTerminalComposerSubmitFailureStatusV1 {
+  if (reason.startsWith('host_dead:')) return 'host_dead';
+  if (reason.startsWith('capture_unsupported:')) return 'capture_unavailable';
+  if (reason === 'submit_failed') return 'submit_failed';
+  return 'submit_failed';
+}
+
 function mapClaudeComposerClearResultToProtocolResult(
   result: ClaudeUserAuthorizedComposerClearResult,
   sessionId: string,
@@ -702,6 +740,45 @@ function mapClaudeComposerClearResultToProtocolResult(
         sessionId,
         errorCode: result.reason,
         error: `terminal_composer_clear_failed:${result.reason}`,
+      });
+  }
+}
+
+function mapClaudeComposerSubmitResultToProtocolResult(
+  result: ClaudeUserAuthorizedComposerSubmitResult,
+  sessionId: string,
+): SessionTerminalComposerSubmitResultV1 {
+  switch (result.status) {
+    case 'submitted':
+    case 'already_empty':
+      return SessionTerminalComposerSubmitResultV1Schema.parse({
+        ok: true,
+        status: result.status,
+        sessionId,
+      });
+    case 'refused':
+      return SessionTerminalComposerSubmitResultV1Schema.parse({
+        ok: false,
+        status: mapClaudeComposerSubmitRefusalToProtocolStatus(result.reason),
+        sessionId,
+        errorCode: result.reason,
+        error: `terminal_composer_submit_refused:${result.reason}`,
+      });
+    case 'unsupported':
+      return SessionTerminalComposerSubmitResultV1Schema.parse({
+        ok: false,
+        status: 'unsupported',
+        sessionId,
+        errorCode: result.reason ?? 'terminal_control_unsupported',
+        error: result.reason ? `terminal_control_unsupported:${result.reason}` : 'terminal_control_unsupported',
+      });
+    case 'failed':
+      return SessionTerminalComposerSubmitResultV1Schema.parse({
+        ok: false,
+        status: mapClaudeComposerSubmitFailureReasonToProtocolStatus(result.reason),
+        sessionId,
+        errorCode: result.reason,
+        error: `terminal_composer_submit_failed:${result.reason}`,
       });
   }
 }
@@ -856,17 +933,30 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     if (opts.registerTerminalComposerClearRuntimeControl) {
       const terminalComposerClearPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
       if (terminalComposerClearPort) {
-        const unregister = opts.registerTerminalComposerClearRuntimeControl(async (request) => {
-          const result = await clearUserAuthorizedClaudeComposerDraft({
-            port: terminalComposerClearPort,
-          });
-          const protocolResult = mapClaudeComposerClearResultToProtocolResult(result, request.sessionId);
-          if (protocolResult.ok) {
-            opts.onInFlightSteerAvailabilitySnapshot?.({ available: true, reason: null });
-            wakeAfterTerminalComposerClear();
-          }
-          return protocolResult;
-        });
+        const unregister = opts.registerTerminalComposerClearRuntimeControl(
+          async (request) => {
+            const result = await clearUserAuthorizedClaudeComposerDraft({
+              port: terminalComposerClearPort,
+            });
+            const protocolResult = mapClaudeComposerClearResultToProtocolResult(result, request.sessionId);
+            if (protocolResult.ok) {
+              opts.onInFlightSteerAvailabilitySnapshot?.({ available: true, reason: null });
+              wakeAfterTerminalComposerClear();
+            }
+            return protocolResult;
+          },
+          async (request) => {
+            const result = await submitUserAuthorizedClaudeComposerDraft({
+              port: terminalComposerClearPort,
+            });
+            const protocolResult = mapClaudeComposerSubmitResultToProtocolResult(result, request.sessionId);
+            if (protocolResult.ok) {
+              opts.onInFlightSteerAvailabilitySnapshot?.({ available: true, reason: null });
+              wakeAfterTerminalComposerClear();
+            }
+            return protocolResult;
+          },
+        );
         unregisterTerminalComposerClearRuntimeControl = typeof unregister === 'function' ? unregister : null;
       }
     }

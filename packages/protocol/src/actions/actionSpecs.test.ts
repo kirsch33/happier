@@ -22,6 +22,7 @@ const RESULT_REQUIRED_BLOCKING_ACTION_IDS = [
   'session.work_state.get',
   'session.goal.get',
   'session.terminalComposer.clear',
+  'session.terminalComposer.submit',
   'session.usageLimit.checkNow',
   'session.usageLimit.consumeResetCredit',
   'session.vendor_plugin_catalog.list',
@@ -316,6 +317,27 @@ describe('Action Spec Registry', () => {
     })).toEqual({
       sessionId: 'sess_1',
       expectedStateAtMs: 1_700_000_000_000,
+    });
+    expect(spec.inputSchema.safeParse({
+      sessionId: '  ',
+    }).success).toBe(false);
+  });
+
+  it('declares terminal composer submit as a user-authorized provider-neutral control', () => {
+    const spec = getActionSpec('session.terminalComposer.submit' as any);
+
+    expect(spec.safety).toBe('danger');
+    expect(spec.approval).toEqual({ result: 'required' });
+    expect(spec.surfaces.ui_button).toBe(true);
+    expect(spec.surfaces.cli).toBe(true);
+    expect(spec.surfaces.mcp).toBe(false);
+    expect(spec.surfaces.session_agent).toBe(false);
+    expect(spec.inputSchema.parse({
+      sessionId: 'sess_1',
+      expectedStateAtMs: 1_700_000_000_001,
+    })).toEqual({
+      sessionId: 'sess_1',
+      expectedStateAtMs: 1_700_000_000_001,
     });
     expect(spec.inputSchema.safeParse({
       sessionId: '  ',

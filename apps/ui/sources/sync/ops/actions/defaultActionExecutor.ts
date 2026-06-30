@@ -319,6 +319,16 @@ export function createDefaultActionExecutor(opts?: Readonly<{
           ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
         },
       }),
+    sessionTerminalComposerSubmit: async ({ sessionId, expectedStateAtMs, serverId }) =>
+      await sessionRpcWithServerScope({
+        sessionId,
+        serverId,
+        method: SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT,
+        payload: {
+          sessionId,
+          ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
+        },
+      }),
     sessionModeSet: async ({ sessionId, modeId }) => {
       const session = (storage.getState() as any)?.sessions?.[sessionId] ?? null;
       const control = resolveSessionModeActionControl(session);

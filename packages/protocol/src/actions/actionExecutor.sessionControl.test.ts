@@ -452,6 +452,52 @@ describe('createActionExecutor (session control)', () => {
     });
   });
 
+  it('executes terminal composer submit through protocol deps', async () => {
+    const sessionTerminalComposerSubmit = vi.fn(async () => ({
+      ok: true,
+      status: 'submitted',
+      sessionId: 's1',
+    }));
+    const executor = createExecutor({
+      sessionTerminalComposerSubmit,
+      resolveServerIdForSessionId: (sessionId) => sessionId === 's1' ? 'server-a' : null,
+    });
+
+    const res = await executor.execute(
+      'session.terminalComposer.submit' as any,
+      { sessionId: 's1', expectedStateAtMs: 1_700_000_000_001 },
+      { surface: 'cli' },
+    );
+
+    expect(res).toEqual({
+      ok: true,
+      result: {
+        ok: true,
+        status: 'submitted',
+        sessionId: 's1',
+      },
+    });
+    expect(sessionTerminalComposerSubmit).toHaveBeenCalledWith({
+      sessionId: 's1',
+      expectedStateAtMs: 1_700_000_000_001,
+      serverId: 'server-a',
+    });
+  });
+
+  it('fails terminal composer submit closed when deps are unavailable', async () => {
+    const executor = createExecutor();
+
+    await expect(executor.execute(
+      'session.terminalComposer.submit' as any,
+      { sessionId: 's1' },
+      { surface: 'cli' },
+    )).resolves.toEqual({
+      ok: false,
+      errorCode: 'unsupported_action',
+      error: 'unsupported_action:session.terminalComposer.submit',
+    });
+  });
+
   it('executes vendor plugin and skill catalog list actions through protocol deps', async () => {
     const sessionVendorPluginCatalogList = vi.fn(async () => ({ vendorPlugins: [] }));
     const sessionSkillCatalogList = vi.fn(async () => ({ skills: [] }));

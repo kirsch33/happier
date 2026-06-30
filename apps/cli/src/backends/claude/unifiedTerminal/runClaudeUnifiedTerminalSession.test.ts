@@ -307,6 +307,9 @@ describe('runClaudeUnifiedTerminalSession', () => {
     const registeredClear: {
       current: ((request: Readonly<{ sessionId: string }>) => Promise<unknown> | unknown) | null;
     } = { current: null };
+    const registeredSubmit: {
+      current: ((request: Readonly<{ sessionId: string }>) => Promise<unknown> | unknown) | null;
+    } = { current: null };
     const availabilitySnapshots: Array<Readonly<{ available: boolean; reason: 'unsafe_window' | 'user_terminal_draft' | null }>> = [];
     let unregisterCount = 0;
     let currentScreen = [
@@ -368,11 +371,13 @@ describe('runClaudeUnifiedTerminalSession', () => {
         run: async () => {},
         dispose: async () => {},
       }),
-      registerTerminalComposerClearRuntimeControl: (handler) => {
-        registeredClear.current = handler;
+      registerTerminalComposerClearRuntimeControl: (clearHandler, submitHandler) => {
+        registeredClear.current = clearHandler;
+        registeredSubmit.current = submitHandler;
         return () => {
           unregisterCount += 1;
           registeredClear.current = null;
+          registeredSubmit.current = null;
         };
       },
       onInFlightSteerAvailabilitySnapshot: (snapshot) => {
@@ -388,6 +393,18 @@ describe('runClaudeUnifiedTerminalSession', () => {
       expect(result).toMatchObject({ ok: true, status: 'cleared', sessionId: 'sess-clear' });
       expect(specialKeysSent).toEqual(['Escape']);
       expect(availabilitySnapshots).toContainEqual({ available: true, reason: null });
+
+      currentScreen = [
+        'Some previous Claude output',
+        '╭───────────────────────────────────────────────────────────────────────────╮',
+        '│ > draft to submit from the terminal │',
+        '╰───────────────────────────────────────────────────────────────────────────╯',
+      ].join('\n');
+      const submitTerminalComposer = registeredSubmit.current;
+      if (!submitTerminalComposer) throw new Error('terminal composer submit handler was not registered');
+      const submitResult = await submitTerminalComposer({ sessionId: 'sess-clear' });
+      expect(submitResult).toMatchObject({ ok: true, status: 'submitted', sessionId: 'sess-clear' });
+      expect(specialKeysSent).toEqual(['Escape', 'Enter']);
     } finally {
       abortController.abort();
       await sessionPromise;
@@ -395,6 +412,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
 
     expect(unregisterCount).toBe(1);
     expect(registeredClear.current).toBeNull();
+    expect(registeredSubmit.current).toBeNull();
   });
 
   it('wakes a draft-guard deferred prompt when the user-authorized terminal composer clear succeeds after a style-unavailable plain capture', async () => {
@@ -500,8 +518,8 @@ describe('runClaudeUnifiedTerminalSession', () => {
           subscribedHook = undefined;
         };
       },
-      registerTerminalComposerClearRuntimeControl: (handler) => {
-        registeredClear.current = handler;
+      registerTerminalComposerClearRuntimeControl: (clearHandler) => {
+        registeredClear.current = clearHandler;
         return () => {
           registeredClear.current = null;
         };

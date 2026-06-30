@@ -154,6 +154,11 @@ export type ActionExecutorDeps = Readonly<{
     expectedStateAtMs?: number;
     serverId?: string | null;
   }>) => Promise<unknown>;
+  sessionTerminalComposerSubmit?: (args: Readonly<{
+    sessionId: string;
+    expectedStateAtMs?: number;
+    serverId?: string | null;
+  }>) => Promise<unknown>;
   sessionVendorPluginCatalogList?: (args: Readonly<{ sessionId: string; cwd?: string; serverId?: string | null }>) => Promise<unknown>;
   sessionSkillCatalogList?: (args: Readonly<{ sessionId: string; cwd?: string; serverId?: string | null }>) => Promise<unknown>;
   sessionUsageLimitWaitResumeEnable?: (args: Readonly<{
@@ -1572,6 +1577,22 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           const expectedStateAtMs = (parsed.data as any).expectedStateAtMs;
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionTerminalComposerClear({
+            sessionId,
+            ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
+            ...(serverId ? { serverId } : {}),
+          });
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'session.terminalComposer.submit') {
+          const sessionId = normalizeId((parsed.data as any).sessionId);
+          if (!sessionId) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          if (!deps.sessionTerminalComposerSubmit) {
+            return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:session.terminalComposer.submit' };
+          }
+          const expectedStateAtMs = (parsed.data as any).expectedStateAtMs;
+          const serverId = resolveServerIdForSession(deps, ctx, sessionId);
+          const res = await deps.sessionTerminalComposerSubmit({
             sessionId,
             ...(typeof expectedStateAtMs === 'number' ? { expectedStateAtMs } : {}),
             ...(serverId ? { serverId } : {}),

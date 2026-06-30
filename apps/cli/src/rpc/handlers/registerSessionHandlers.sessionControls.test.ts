@@ -197,6 +197,47 @@ describe('registerSessionHandlers session controls', () => {
     });
   });
 
+  it('routes terminal composer submit RPCs to runtime controls with typed fallback statuses', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const submitTerminalComposer = vi.fn(async () => ({
+      ok: true,
+      status: 'submitted',
+      sessionId: 'sess_1',
+    }));
+    const method = SESSION_RPC_METHODS.SESSION_TERMINAL_COMPOSER_SUBMIT;
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      sessionRuntimeControls: {
+        submitTerminalComposer,
+      },
+    });
+
+    await expect(handlers.get(method)?.({
+      sessionId: 'sess_1',
+      expectedStateAtMs: 1_700_000_000_001,
+    })).resolves.toEqual({
+      ok: true,
+      status: 'submitted',
+      sessionId: 'sess_1',
+    });
+    expect(submitTerminalComposer).toHaveBeenCalledWith({
+      sessionId: 'sess_1',
+      expectedStateAtMs: 1_700_000_000_001,
+    });
+
+    const { handlers: unsupportedHandlers, registrar: unsupportedRegistrar } = createRegistrar();
+    registerSessionHandlers(unsupportedRegistrar, process.cwd(), {
+      sessionRuntimeControls: {},
+    });
+    await expect(unsupportedHandlers.get(method)?.({ sessionId: 'sess_1' })).resolves.toEqual({
+      ok: false,
+      status: 'unsupported',
+      sessionId: 'sess_1',
+      errorCode: 'unsupported_session_runtime_method',
+      error: `unsupported_session_runtime_method:${method}`,
+    });
+  });
+
   it('routes catalog RPCs to runtime catalog controls', async () => {
     const { handlers, registrar } = createRegistrar();
     const listVendorPlugins = vi.fn(async () => ({

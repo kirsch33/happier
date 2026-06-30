@@ -1,0 +1,136 @@
+import { describe, expect, it } from 'vitest';
+
+import { submitUserAuthorizedClaudeComposerDraft } from './composerSubmit';
+import { createFakeControlPort } from './fakeControlPort';
+
+const EMPTY_COMPOSER = [
+  '╭───────────────────────────────────────────────╮',
+  '│ >                                               │',
+  '╰───────────────────────────────────────────────╯',
+  '  ? for shortcuts',
+].join('\n');
+
+function idleDraft(draft: string): string {
+  return [
+    '╭───────────────────────────────────────────────╮',
+    `│ > ${draft}`,
+    '╰───────────────────────────────────────────────╯',
+    '  ? for shortcuts',
+  ].join('\n');
+}
+
+function generatingDraft(draft: string): string {
+  return [
+    '● Working…',
+    '✶ Forging… (12s · esc to interrupt)',
+    '╭───────────────────────────────────────────────╮',
+    `│ > ${draft}`,
+    '╰───────────────────────────────────────────────╯',
+  ].join('\n');
+}
+
+const ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT = [
+  'How do you want to proceed?',
+  '',
+  '<options>',
+  '<option>2 — pure v2, concept-local Shell/ only</option>',
+  '<option>3 — reconciliation: Shell/ everywhere, top-level + concept-local</option>',
+  '</options>',
+  '',
+  '────────────────────────────────────────────────',
+  '❯ 3 — reconciliation: Shell/ everywhere, top-level + concept-local',
+  '────────────────────────────────────────────────',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n');
+
+const PERMISSION_PROMPT = [
+  'Bash(rm -rf tmp)',
+  '',
+  'Do you want to proceed?',
+  '❯ 1. Yes',
+  '  2. No, tell Claude what to do differently',
+].join('\n');
+
+describe('submitUserAuthorizedClaudeComposerDraft', () => {
+  it('submits a safe visible boxed composer draft with Enter', async () => {
+    const port = createFakeControlPort({ captures: [idleDraft('send this draft')] });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result.status).toBe('submitted');
+    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key']);
+  });
+
+  it('submits a plain capture draft below assistant options without requiring clear-style evidence', async () => {
+    const port = createFakeControlPort({ captures: [ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT] });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result.status).toBe('submitted');
+    expect(port.sentKeys).toEqual(['Enter']);
+  });
+
+  it('reports already_empty without pressing Enter when the composer has no draft', async () => {
+    const port = createFakeControlPort({ captures: [EMPTY_COMPOSER] });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result.status).toBe('already_empty');
+    expect(port.sentKeys).toEqual([]);
+  });
+
+  it('refuses while Claude is generating because Enter could affect the running turn', async () => {
+    const port = createFakeControlPort({ captures: [generatingDraft('queued words')] });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'refused', reason: 'generating' });
+    expect(port.sentKeys).toEqual([]);
+  });
+
+  it('refuses while a dialog owns input', async () => {
+    const port = createFakeControlPort({ captures: [PERMISSION_PROMPT] });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'refused', reason: 'permission_prompt' });
+    expect(port.sentKeys).toEqual([]);
+  });
+
+  it('reports host_dead when Enter cannot be sent', async () => {
+    const port = createFakeControlPort({
+      captures: [idleDraft('draft to submit')],
+      failSendKeys: ['Enter'],
+    });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'host_dead:unrecoverable' });
+    expect(port.sentKeys).toEqual(['Enter']);
+  });
+});

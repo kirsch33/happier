@@ -168,6 +168,7 @@ const SESSION_RUNTIME_CONTROL_KEYS = [
     'cancelUsageLimitWaitResume',
     'checkUsageLimitRecoveryNow',
     'clearTerminalComposer',
+    'submitTerminalComposer',
     'handleUserMessage',
 ] as const satisfies readonly SessionRuntimeControlKey[];
 
