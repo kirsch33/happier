@@ -15,6 +15,7 @@ export type TerminalSpecialKey =
   | 'Enter'
   | 'CtrlE'
   | 'CtrlJ'
+  | 'CtrlU'
   | 'Escape'
   | 'Tab'
   | 'ShiftTab'
@@ -25,6 +26,7 @@ export const TERMINAL_SPECIAL_KEYS: readonly TerminalSpecialKey[] = Object.freez
   'Enter',
   'CtrlE',
   'CtrlJ',
+  'CtrlU',
   'Escape',
   'Tab',
   'ShiftTab',

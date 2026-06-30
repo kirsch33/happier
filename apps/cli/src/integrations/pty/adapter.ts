@@ -69,6 +69,8 @@ function resolveSpecialKeyBytes(key: TerminalSpecialKey): string {
       return '\u0005';
     case 'CtrlJ':
       return '\n';
+    case 'CtrlU':
+      return '\u0015';
     case 'Escape':
       return '\u001b';
     case 'Tab':

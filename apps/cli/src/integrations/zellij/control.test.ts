@@ -112,10 +112,11 @@ describe('createZellijTerminalControlPort', () => {
     expect(rec.writes.map((w) => w.text)).toEqual(['\t']);
   });
 
-  it('sends CtrlJ as a raw LF byte', async () => {
+  it('sends CtrlJ and CtrlU as raw control bytes', async () => {
     const rec = recordingActions();
     await makePort(rec).sendSpecialKey('CtrlJ');
-    expect(rec.writes.map((w) => w.text)).toEqual(['\n']);
+    await makePort(rec).sendSpecialKey('CtrlU');
+    expect(rec.writes.map((w) => w.text)).toEqual(['\n', '\u0015']);
   });
 
   it('captures the FULL pane via dump-screen and strips ANSI via the shared normalizer', async () => {

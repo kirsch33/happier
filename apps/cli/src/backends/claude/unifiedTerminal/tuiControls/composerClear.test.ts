@@ -89,7 +89,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     expect(port.sentKeys).toEqual([]);
   });
 
-  it('clears a safe visible user draft with Escape and verifies the composer is empty', async () => {
+  it('clears a safe visible user draft with line-edit keys and verifies the composer is empty', async () => {
     const port = createFakeControlPort({
       captures: [idleDraft('my half-typed genuine thought'), EMPTY_COMPOSER],
     });
@@ -101,8 +101,8 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
-    expect(port.sentKeys).toEqual(['Escape']);
-    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key', 'capture']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
+    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key', 'key', 'capture']);
   });
 
   it('allows a user-authorized slash draft clear when no slash picker or dialog owns input', async () => {
@@ -117,7 +117,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
-    expect(port.sentKeys).toEqual(['Escape']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
   });
 
   it('retries once when the first Escape leaves the draft behind', async () => {
@@ -136,7 +136,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'cleared', attempts: 2 });
-    expect(port.sentKeys).toEqual(['Escape', 'Escape']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU', 'CtrlE', 'CtrlU']);
   });
 
   it('reports clear_failed after bounded clear attempts leave the draft visible', async () => {
@@ -151,7 +151,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'failed', reason: 'clear_failed' });
-    expect(port.sentKeys).toEqual(['Escape', 'Escape']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU', 'CtrlE', 'CtrlU']);
   });
 
   it('clears a draft below assistant option prose that says "How do you want to proceed?"', async () => {
@@ -166,7 +166,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
-    expect(port.sentKeys).toEqual(['Escape']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
   });
 
   it('clears a live-shaped plain follow-up draft even when tmux reports the cursor at the text start', async () => {
@@ -182,7 +182,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
-    expect(port.sentKeys).toEqual(['Escape']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
   });
 
   it('refuses to clear while Claude is generating because Escape would interrupt the turn', async () => {
@@ -231,7 +231,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     expect(port.sentKeys).toEqual([]);
   });
 
-  it('reports host_dead when recapture fails after Escape', async () => {
+  it('reports host_dead when recapture fails after line clear', async () => {
     const port = createFakeControlPort({
       captures: [idleDraft('draft to discard'), EMPTY_COMPOSER],
       failCaptureAtIndexes: [1],
@@ -244,13 +244,13 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'failed', reason: 'host_dead:unrecoverable' });
-    expect(port.sentKeys).toEqual(['Escape']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
   });
 
-  it('reports host_dead when Escape cannot be sent', async () => {
+  it('reports host_dead when line clear cannot be sent', async () => {
     const port = createFakeControlPort({
       captures: [idleDraft('draft to discard')],
-      failSendKeys: ['Escape'],
+      failSendKeys: ['CtrlU'],
     });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
@@ -260,6 +260,6 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'failed', reason: 'host_dead:unrecoverable' });
-    expect(port.sentKeys).toEqual(['Escape']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
   });
 });

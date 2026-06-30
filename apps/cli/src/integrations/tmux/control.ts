@@ -25,6 +25,7 @@ const TMUX_NAMED_SPECIAL_KEYS: Readonly<Partial<Record<TerminalSpecialKey, strin
   Enter: 'Enter',
   CtrlE: 'C-e',
   CtrlJ: 'C-j',
+  CtrlU: 'C-u',
   Escape: 'Escape',
   Tab: 'Tab',
   CtrlC: 'C-c',

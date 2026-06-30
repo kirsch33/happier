@@ -8,8 +8,8 @@ import {
 import type { ClaudeScreenState } from './screenState';
 
 const DEFAULT_USER_AUTHORIZED_COMPOSER_CLEAR_SETTLE_MS = 250;
-// Same bounded keyboard behavior as the automatic own-leftover clear path: one Escape may close an
-// intermediate composer affordance while leaving text behind, so allow one verified retry.
+// Same bounded keyboard behavior as the automatic own-leftover clear path. Do not use Escape here:
+// live Claude Code 2.1.193 can interpret Escape as Rewind rather than line clear.
 const MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS = 2;
 
 export type ClaudeComposerClearRefusalReason =
@@ -118,8 +118,11 @@ export async function clearUserAuthorizedClaudeComposerDraft(params: Readonly<{
 
   let lastScreen = initialClassification.screen;
   for (let attempt = 1; attempt <= MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS; attempt += 1) {
-    const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('Escape'));
-    if (sendFailure) return toComposerClearFailure(sendFailure);
+    const moveFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlE'));
+    if (moveFailure && moveFailure.kind !== 'unsupported') return toComposerClearFailure(moveFailure);
+
+    const clearFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlU'));
+    if (clearFailure) return toComposerClearFailure(clearFailure);
 
     await wait(settleMs);
 
