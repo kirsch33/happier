@@ -87,6 +87,15 @@ describe('createTmuxTerminalControlPort', () => {
     ]);
   });
 
+  it('sends CtrlJ as the named C-j key', async () => {
+    const { executor, calls } = recordingExecutor();
+    const port = createTmuxTerminalControlPort({ executor, target: TARGET });
+
+    await port.sendSpecialKey('CtrlJ');
+
+    expect(calls).toEqual([['send-keys', '-t', TARGET, 'C-j']]);
+  });
+
   it('sends ShiftTab as the raw ESC [ Z sequence and NEVER a named S-Tab', async () => {
     const { executor, calls } = recordingExecutor();
     const port = createTmuxTerminalControlPort({ executor, target: TARGET });

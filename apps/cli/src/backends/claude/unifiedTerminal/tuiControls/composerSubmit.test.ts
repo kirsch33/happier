@@ -74,7 +74,7 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual(['CtrlJ']);
     expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key']);
   });
 
@@ -91,7 +91,7 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual(['CtrlJ']);
   });
 
   it('submits a live-shaped plain follow-up draft even when tmux reports the cursor at the text start', async () => {
@@ -107,7 +107,7 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual(['CtrlJ']);
   });
 
   it('reports already_empty without pressing Enter when the composer has no draft', async () => {
@@ -149,10 +149,10 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     expect(port.sentKeys).toEqual([]);
   });
 
-  it('reports host_dead when Enter cannot be sent', async () => {
+  it('reports host_dead when CtrlJ cannot be sent', async () => {
     const port = createFakeControlPort({
       captures: [idleDraft('draft to submit')],
-      failSendKeys: ['Enter'],
+      failSendKeys: ['CtrlJ'],
     });
 
     const result = await submitUserAuthorizedClaudeComposerDraft({
@@ -162,6 +162,6 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'failed', reason: 'host_dead:unrecoverable' });
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual(['CtrlJ']);
   });
 });

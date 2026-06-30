@@ -158,12 +158,14 @@ describe('createPtyTerminalHostAdapter', () => {
     });
     const port = adapter.createControlPort?.(handle);
     await port?.sendSpecialKey('ShiftTab');
+    await port?.sendSpecialKey('CtrlJ');
     await port?.sendSpecialKey('CtrlC');
 
     expect(result).toEqual({ status: 'injected', at: 456, bytesWritten: 17 });
     expect(fake.processes[0]?.writes).toEqual([
       'line one\nline two\r',
       TERMINAL_SHIFT_TAB_SEQUENCE,
+      '\n',
       '\u0003',
     ]);
   });

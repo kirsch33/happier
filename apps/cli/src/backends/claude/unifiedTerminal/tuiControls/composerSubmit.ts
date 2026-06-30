@@ -109,7 +109,7 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
       break;
   }
 
-  const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('Enter'));
+  const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlJ'));
   if (sendFailure) return toComposerSubmitFailure(sendFailure);
 
   await wait(settleMs);

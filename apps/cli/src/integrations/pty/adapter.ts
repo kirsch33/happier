@@ -65,6 +65,8 @@ function resolveSpecialKeyBytes(key: TerminalSpecialKey): string {
   switch (key) {
     case 'Enter':
       return '\r';
+    case 'CtrlJ':
+      return '\n';
     case 'Escape':
       return '\u001b';
     case 'Tab':
