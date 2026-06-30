@@ -1,3 +1,4 @@
+import type { TerminalSpecialKey } from '@happier-dev/agents';
 import type { TerminalControlPort } from '@/integrations/terminalHost/controlTypes';
 
 import {
@@ -78,6 +79,10 @@ function classifyComposerSubmitScreen(state: ClaudeScreenState): ComposerSubmitS
   return { kind: 'submittable_draft', screen: state };
 }
 
+function resolveComposerSubmitKey(state: ClaudeScreenState): TerminalSpecialKey {
+  return state.composerCursorRelation === 'at_content_start' ? 'CtrlJ' : 'Enter';
+}
+
 export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
   port: TerminalControlPort;
   wait?: ((ms: number) => Promise<void>) | undefined;
@@ -109,7 +114,9 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
       break;
   }
 
-  const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlJ'));
+  const sendFailure = sendResultToFailure(
+    await params.port.sendSpecialKey(resolveComposerSubmitKey(initialClassification.screen)),
+  );
   if (sendFailure) return toComposerSubmitFailure(sendFailure);
 
   await wait(settleMs);
