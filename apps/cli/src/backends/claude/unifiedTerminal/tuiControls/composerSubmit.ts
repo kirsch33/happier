@@ -83,6 +83,20 @@ function composerStillContainsDraft(state: ClaudeScreenState, draft: string): bo
   return draft.length > 0 && current.includes(draft);
 }
 
+function looksLikeUneditableCursorStartSuggestion(params: Readonly<{
+  before: ClaudeScreenState;
+  afterMoveToEnd: ClaudeScreenState;
+  draft: string;
+}>): boolean {
+  return (
+    params.draft.length > 0
+    && !params.draft.includes('\n')
+    && params.before.composerCursorRelation === 'at_content_start'
+    && params.afterMoveToEnd.composerContent === params.draft
+    && params.afterMoveToEnd.composerCursorRelation === 'at_content_start'
+  );
+}
+
 export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
   port: TerminalControlPort;
   wait?: ((ms: number) => Promise<void>) | undefined;
@@ -119,6 +133,17 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
   const moveToEndResult = sendResultToFailure(await params.port.sendSpecialKey('CtrlE'));
   if (moveToEndResult && moveToEndResult.kind !== 'unsupported') {
     return toComposerSubmitFailure(moveToEndResult);
+  }
+
+  await wait(settleMs);
+  const afterMoveToEnd = await captureScreenState(params.port);
+  if (afterMoveToEnd.kind !== 'state') return toComposerSubmitFailure(captureFailureToResult(afterMoveToEnd));
+  if (looksLikeUneditableCursorStartSuggestion({
+    before: initialClassification.screen,
+    afterMoveToEnd: afterMoveToEnd.state,
+    draft,
+  })) {
+    return { status: 'already_empty', screen: afterMoveToEnd.state };
   }
 
   const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('Enter'));

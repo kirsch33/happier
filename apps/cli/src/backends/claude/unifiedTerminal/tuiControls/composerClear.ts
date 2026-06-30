@@ -85,6 +85,20 @@ function classifyComposerClearScreen(state: ClaudeScreenState): ComposerClearScr
   return { kind: 'clearable_draft', screen: state };
 }
 
+function looksLikeUneditableCursorStartSuggestion(params: Readonly<{
+  before: ClaudeScreenState;
+  afterMoveToEnd: ClaudeScreenState;
+  draft: string;
+}>): boolean {
+  return (
+    params.draft.length > 0
+    && !params.draft.includes('\n')
+    && params.before.composerCursorRelation === 'at_content_start'
+    && params.afterMoveToEnd.composerContent === params.draft
+    && params.afterMoveToEnd.composerCursorRelation === 'at_content_start'
+  );
+}
+
 export async function clearUserAuthorizedClaudeComposerDraft(params: Readonly<{
   port: TerminalControlPort;
   wait?: ((ms: number) => Promise<void>) | undefined;
@@ -116,10 +130,23 @@ export async function clearUserAuthorizedClaudeComposerDraft(params: Readonly<{
       break;
   }
 
+  const draft = initialClassification.screen.composerContent ?? '';
   let lastScreen = initialClassification.screen;
   for (let attempt = 1; attempt <= MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS; attempt += 1) {
     const moveFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlE'));
     if (moveFailure && moveFailure.kind !== 'unsupported') return toComposerClearFailure(moveFailure);
+
+    await wait(settleMs);
+    const afterMoveToEnd = await captureScreenState(params.port);
+    if (afterMoveToEnd.kind !== 'state') return toComposerClearFailure(captureFailureToResult(afterMoveToEnd));
+    if (looksLikeUneditableCursorStartSuggestion({
+      before: initialClassification.screen,
+      afterMoveToEnd: afterMoveToEnd.state,
+      draft,
+    })) {
+      return { status: 'already_empty', screen: afterMoveToEnd.state };
+    }
+    lastScreen = afterMoveToEnd.state;
 
     const clearFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlU'));
     if (clearFailure) return toComposerClearFailure(clearFailure);

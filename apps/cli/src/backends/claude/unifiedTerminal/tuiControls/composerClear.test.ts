@@ -70,6 +70,20 @@ const LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT = [
   '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
 ].join('\n');
 
+const LIVE_UNEDITABLE_CONTEXTUAL_SUGGESTION = [
+  "  One edge to decide: GM's Converters/Behaviors/ — do those go to a GM-local UI/",
+  "  or get hoisted to a shared/core UI/ if other tools reuse them? That's the",
+  '  next fork.',
+  '',
+  '✻ Baked for 24s',
+  '',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '❯ GM converters local or shared?',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '  akirsch@debian-dev:/home/akirsch/dbtools',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+].join('\n');
+
 const TRANSCRIPT_ONLY = [
   'Claude finished the previous answer.',
   'No composer visible in this capture.',
@@ -91,7 +105,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
 
   it('clears a safe visible user draft with line-edit keys and verifies the composer is empty', async () => {
     const port = createFakeControlPort({
-      captures: [idleDraft('my half-typed genuine thought'), EMPTY_COMPOSER],
+      captures: [idleDraft('my half-typed genuine thought'), idleDraft('my half-typed genuine thought'), EMPTY_COMPOSER],
     });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
@@ -102,12 +116,12 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
 
     expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
     expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
-    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key', 'key', 'capture']);
+    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key', 'capture', 'key', 'capture']);
   });
 
   it('allows a user-authorized slash draft clear when no slash picker or dialog owns input', async () => {
     const port = createFakeControlPort({
-      captures: [idleDraft('/compact focus the summary'), EMPTY_COMPOSER],
+      captures: [idleDraft('/compact focus the summary'), idleDraft('/compact focus the summary'), EMPTY_COMPOSER],
     });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
@@ -123,6 +137,8 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
   it('retries once when the first Escape leaves the draft behind', async () => {
     const port = createFakeControlPort({
       captures: [
+        idleDraft('draft survives once'),
+        idleDraft('draft survives once'),
         idleDraft('draft survives once'),
         idleDraft('draft survives once'),
         EMPTY_COMPOSER,
@@ -141,7 +157,13 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
 
   it('reports clear_failed after bounded clear attempts leave the draft visible', async () => {
     const port = createFakeControlPort({
-      captures: [idleDraft('stuck draft'), idleDraft('stuck draft'), idleDraft('stuck draft')],
+      captures: [
+        idleDraft('stuck draft'),
+        idleDraft('stuck draft'),
+        idleDraft('stuck draft'),
+        idleDraft('stuck draft'),
+        idleDraft('stuck draft'),
+      ],
     });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
@@ -156,7 +178,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
 
   it('clears a draft below assistant option prose that says "How do you want to proceed?"', async () => {
     const port = createFakeControlPort({
-      captures: [ASSISTANT_OPTIONS_WITH_DRAFT, EMPTY_COMPOSER],
+      captures: [ASSISTANT_OPTIONS_WITH_DRAFT, ASSISTANT_OPTIONS_WITH_DRAFT, EMPTY_COMPOSER],
     });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
@@ -171,8 +193,8 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
 
   it('clears a live-shaped plain follow-up draft even when tmux reports the cursor at the text start', async () => {
     const port = createFakeControlPort({
-      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, EMPTY_COMPOSER],
-      cursor: { x: 2, y: 5 },
+      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, EMPTY_COMPOSER],
+      cursors: [{ x: 2, y: 5 }, { x: 45, y: 5 }, { x: 2, y: 5 }],
     });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
@@ -183,6 +205,22 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
 
     expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
     expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
+  });
+
+  it('treats an uneditable contextual suggestion that ignores CtrlE as already empty', async () => {
+    const port = createFakeControlPort({
+      captures: [LIVE_UNEDITABLE_CONTEXTUAL_SUGGESTION, LIVE_UNEDITABLE_CONTEXTUAL_SUGGESTION],
+      cursors: [{ x: 2, y: 7 }, { x: 2, y: 7 }],
+    });
+
+    const result = await clearUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result.status).toBe('already_empty');
+    expect(port.sentKeys).toEqual(['CtrlE']);
   });
 
   it('refuses to clear while Claude is generating because Escape would interrupt the turn', async () => {
@@ -231,7 +269,7 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     expect(port.sentKeys).toEqual([]);
   });
 
-  it('reports host_dead when recapture fails after line clear', async () => {
+  it('reports host_dead when recapture fails after cursor movement', async () => {
     const port = createFakeControlPort({
       captures: [idleDraft('draft to discard'), EMPTY_COMPOSER],
       failCaptureAtIndexes: [1],
@@ -244,12 +282,12 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'failed', reason: 'host_dead:unrecoverable' });
-    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
+    expect(port.sentKeys).toEqual(['CtrlE']);
   });
 
   it('reports host_dead when line clear cannot be sent', async () => {
     const port = createFakeControlPort({
-      captures: [idleDraft('draft to discard')],
+      captures: [idleDraft('draft to discard'), idleDraft('draft to discard')],
       failSendKeys: ['CtrlU'],
     });
 

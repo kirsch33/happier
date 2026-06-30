@@ -33,6 +33,7 @@ export function createFakeControlPort(params: Readonly<{
   hostDead?: boolean | undefined;
   capturedAtMs?: number | undefined;
   cursor?: Readonly<{ x: number; y: number }> | undefined;
+  cursors?: readonly (Readonly<{ x: number; y: number }> | undefined)[] | undefined;
   /** Keys whose send reports `host_dead` AFTER `onSendSpecialKey` runs (host-race simulation). */
   failSendKeys?: readonly TerminalSpecialKey[] | undefined;
   /** Capture indexes (0-based) that report `host_dead` instead of a screen. */
@@ -86,6 +87,7 @@ export function createFakeControlPort(params: Readonly<{
       }
       const idx = Math.min(captureIndex, params.captures.length - 1);
       const text = params.captures.length > 0 ? params.captures[idx] : '';
+      const cursor = params.cursors?.[idx] ?? params.cursor;
       log.push({ type: 'capture', index: captureIndex });
       captureIndex += 1;
       return {
@@ -94,7 +96,7 @@ export function createFakeControlPort(params: Readonly<{
           text,
           capturedAtMs: params.capturedAtMs ?? 0,
           hostKind,
-          ...(params.cursor ? { cursor: params.cursor } : {}),
+          ...(cursor ? { cursor } : {}),
         },
       };
     },
