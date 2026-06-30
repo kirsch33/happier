@@ -159,8 +159,8 @@ describe('ApiClient connected services v2', () => {
     );
   });
 
-  it('uses the connected-service credential timeout override for sealed credential reads', async () => {
-    vi.stubEnv('HAPPIER_CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS', '45000');
+  it('uses the connected-service HTTP timeout override for sealed credential reads', async () => {
+    vi.stubEnv('HAPPIER_CONNECTED_SERVICE_HTTP_TIMEOUT_MS', '45000');
     mockGet.mockResolvedValue({
       status: 200,
       data: {
@@ -393,6 +393,12 @@ describe('ApiClient connected services v2', () => {
         expect.objectContaining({ profileId: 'retryable', status: 'refresh_failed_retryable' }),
       ],
     });
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/v2/connect/openai-codex/profiles'),
+      expect.objectContaining({
+        timeout: 20_000,
+      }),
+    );
   });
 
   it('shares concurrent and fresh connected-service profile list requests', async () => {

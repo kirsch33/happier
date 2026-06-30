@@ -27,6 +27,7 @@ import { resolveServerHttpBaseUrl } from './client/serverHttpBaseUrl';
 import {
   ConnectedServiceAuthGroupGenerationConflictError,
   createConnectedServiceCredentialApi,
+  readConnectedServiceHttpTimeoutMs,
   type ConnectedServiceAuthGroupApi,
   type ConnectedServiceCredentialApi,
 } from './connectedServices/connectedServiceCredentialApi';
@@ -690,7 +691,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json'
           },
-          timeout: 5000
+          timeout: readConnectedServiceHttpTimeoutMs()
         }
       );
 
@@ -738,7 +739,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
 
@@ -812,7 +813,7 @@ export class ApiClient {
           'Authorization': `Bearer ${this.credential.token}`,
           'Content-Type': 'application/json',
         },
-        timeout: 5000,
+        timeout: readConnectedServiceHttpTimeoutMs(),
       },
     );
     if (response.status !== 200) {
@@ -882,7 +883,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -937,7 +938,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -990,7 +991,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1043,7 +1044,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1090,7 +1091,7 @@ export class ApiClient {
             'Content-Type': 'application/json',
           },
           params: { expectedGeneration },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1170,7 +1171,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
 
@@ -1217,7 +1218,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1268,7 +1269,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
 
@@ -1310,7 +1311,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1390,7 +1391,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
 
@@ -1433,7 +1434,7 @@ export class ApiClient {
             'Authorization': `Bearer ${this.credential.token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
+          timeout: readConnectedServiceHttpTimeoutMs(),
         },
       );
       if (response.status !== 200) {
@@ -1516,7 +1517,7 @@ export class ApiClient {
           'Authorization': `Bearer ${this.credential.token}`,
           'Content-Type': 'application/json',
         },
-        timeout: 5000,
+        timeout: readConnectedServiceHttpTimeoutMs(),
       },
     );
     if (response.status !== 200) {
