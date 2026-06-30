@@ -68,6 +68,7 @@ function createAxiosResponseError(params: Readonly<{
 
 describe('ApiClient connected services v2', () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     mockPost.mockReset();
     mockGet.mockReset();
     vi.clearAllMocks();
@@ -127,6 +128,62 @@ describe('ApiClient connected services v2', () => {
 
     const serializedLogs = JSON.stringify(vi.mocked(logger.debug).mock.calls);
     expect(serializedLogs).not.toContain('cXVvdGEtY2lwaGVydGV4dA==');
+  });
+
+  it('uses the connected-service credential timeout default for sealed credential reads', async () => {
+    mockGet.mockResolvedValue({
+      status: 200,
+      data: {
+        sealed: { format: 'account_scoped_v1', ciphertext: 'c2VhbGVk' },
+        metadata: { kind: 'oauth', providerEmail: 'user@example.com', expiresAt: Date.now() + 3600_000 },
+      },
+    });
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.getConnectedServiceCredentialSealed({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+    })).resolves.toMatchObject({
+      sealed: { format: 'account_scoped_v1', ciphertext: 'c2VhbGVk' },
+    });
+
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/v2/connect/openai-codex/profiles/work/credential'),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer happy-token',
+        }),
+        timeout: 20_000,
+      }),
+    );
+  });
+
+  it('uses the connected-service credential timeout override for sealed credential reads', async () => {
+    vi.stubEnv('HAPPIER_CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS', '45000');
+    mockGet.mockResolvedValue({
+      status: 200,
+      data: {
+        sealed: { format: 'account_scoped_v1', ciphertext: 'c2VhbGVk' },
+        metadata: { kind: 'oauth', providerEmail: 'user@example.com', expiresAt: Date.now() + 3600_000 },
+      },
+    });
+
+    const api = await ApiClient.create(createTestCredentials());
+
+    await expect(api.getConnectedServiceCredentialSealed({
+      serviceId: 'openai-codex',
+      profileId: 'work',
+    })).resolves.toMatchObject({
+      sealed: { format: 'account_scoped_v1', ciphertext: 'c2VhbGVk' },
+    });
+
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/v2/connect/openai-codex/profiles/work/credential'),
+      expect.objectContaining({
+        timeout: 45_000,
+      }),
+    );
   });
 
   it('gets sealed quota snapshots from the v2 connected services quotas endpoint', async () => {

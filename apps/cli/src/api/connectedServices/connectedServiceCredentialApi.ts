@@ -21,7 +21,18 @@ import { createHttpStatusError } from '../client/httpStatusError';
 import { serializeAxiosErrorForLog } from '../client/serializeAxiosErrorForLog';
 import { resolveServerHttpBaseUrl } from '../client/serverHttpBaseUrl';
 
-const CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS = 5_000;
+const DEFAULT_CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS = 20_000;
+const CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_ENV = 'HAPPIER_CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS';
+
+function readConnectedServiceCredentialHttpTimeoutMs(): number {
+  const raw = process.env[CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_ENV]?.trim();
+  if (!raw) return DEFAULT_CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS;
+  }
+  return Math.trunc(parsed);
+}
 
 export class ConnectedServiceAuthGroupGenerationConflictError extends Error {
   constructor(public readonly generation: number) {
@@ -133,7 +144,7 @@ export async function getAccountEncryptionMode(params: Readonly<{
       `${serverUrl}/v1/account/encryption`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: readConnectedServiceCredentialHttpTimeoutMs(),
       },
     );
     if (response.status === 404) return 'e2ee';
@@ -164,7 +175,7 @@ export async function getConnectedServiceCredentialSealed(params: Readonly<{
       `${serverUrl}/v2/connect/${serviceId}/profiles/${profileId}/credential`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: readConnectedServiceCredentialHttpTimeoutMs(),
       },
     );
     if (response.status !== 200) {
@@ -222,7 +233,7 @@ export async function getConnectedServiceCredentialPlain(params: Readonly<{
       `${serverUrl}/v3/connect/${serviceId}/profiles/${profileId}/credential`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: readConnectedServiceCredentialHttpTimeoutMs(),
       },
     );
     if (response.status !== 200) {
@@ -273,7 +284,7 @@ export async function getConnectedServiceAuthGroup(params: Readonly<{
       `${serverUrl}/v3/connect/${serviceId}/groups/${groupId}`,
       {
         headers: authHeaders(params.token),
-        timeout: CONNECTED_SERVICE_CREDENTIAL_HTTP_TIMEOUT_MS,
+        timeout: readConnectedServiceCredentialHttpTimeoutMs(),
       },
     );
     if (response.status !== 200) {
