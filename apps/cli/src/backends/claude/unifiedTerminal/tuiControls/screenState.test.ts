@@ -866,6 +866,17 @@ describe('parseClaudeScreenState — soft-wrapped composer draft (C11)', () => {
     ].join('\n'));
     expect(empty.composerContent).toBe('');
   });
+
+  it('captures a draft that starts on a continuation line after a blank composer prompt', () => {
+    const state = parseClaudeScreenState([
+      '──────────────',
+      '❯ ',
+      '  Reply only STARTSUBMIT.',
+      '──────────────',
+    ].join('\n'));
+    expect(state.composerContent).toBe('Reply only STARTSUBMIT.');
+    expect(state.userDraftPresent).toBe(true);
+  });
 });
 
 // Live capture 2026-06-12 11:50 (orchestrator runner pid 58731, zellij dump): the AGENTS panel

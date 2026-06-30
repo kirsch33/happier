@@ -65,7 +65,7 @@ const PERMISSION_PROMPT = [
 
 describe('submitUserAuthorizedClaudeComposerDraft', () => {
   it('submits a safe visible boxed composer draft with Enter', async () => {
-    const port = createFakeControlPort({ captures: [idleDraft('send this draft')] });
+    const port = createFakeControlPort({ captures: [idleDraft('send this draft'), EMPTY_COMPOSER] });
 
     const result = await submitUserAuthorizedClaudeComposerDraft({
       port,
@@ -75,12 +75,12 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
 
     expect(result.status).toBe('submitted');
     expect(port.sentKeys).toEqual(['Enter']);
-    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key']);
+    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key', 'capture']);
   });
 
   it('submits a visible draft with Enter when tmux reports the cursor after the content', async () => {
     const port = createFakeControlPort({
-      captures: [idleDraft('Reply only SUBMITTED.')],
+      captures: [idleDraft('Reply only SUBMITTED.'), EMPTY_COMPOSER],
       cursor: { x: 24, y: 1 },
     });
 
@@ -96,7 +96,7 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
 
   it('submits a plain capture draft below assistant options without requiring clear-style evidence', async () => {
     const port = createFakeControlPort({
-      captures: [ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT],
+      captures: [ASSISTANT_OPTIONS_WITH_PLAIN_CAPTURE_DRAFT, EMPTY_COMPOSER],
       cursor: { x: 2, y: 8 },
     });
 
@@ -107,12 +107,12 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['CtrlJ']);
+    expect(port.sentKeys).toEqual(['Enter']);
   });
 
   it('submits a live-shaped plain follow-up draft even when tmux reports the cursor at the text start', async () => {
     const port = createFakeControlPort({
-      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT],
+      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, EMPTY_COMPOSER],
       cursor: { x: 2, y: 5 },
     });
 
@@ -123,7 +123,30 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['CtrlJ']);
+    expect(port.sentKeys).toEqual(['Enter', 'CtrlJ']);
+  });
+
+  it('submits after CtrlJ inserts a continuation line by sending a final Enter', async () => {
+    const draft = 'Reply only STARTSUBMIT.';
+    const afterCtrlJ = [
+      '────────────────────────────────────────────────',
+      '❯ ',
+      `  ${draft}`,
+      '────────────────────────────────────────────────',
+    ].join('\n');
+    const port = createFakeControlPort({
+      captures: [idleDraft(draft), idleDraft(draft), afterCtrlJ, EMPTY_COMPOSER],
+      cursor: { x: 2, y: 1 },
+    });
+
+    const result = await submitUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result.status).toBe('submitted');
+    expect(port.sentKeys).toEqual(['Enter', 'CtrlJ', 'Enter']);
   });
 
   it('reports already_empty without pressing Enter when the composer has no draft', async () => {

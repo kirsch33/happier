@@ -1,4 +1,3 @@
-import type { TerminalSpecialKey } from '@happier-dev/agents';
 import type { TerminalControlPort } from '@/integrations/terminalHost/controlTypes';
 
 import {
@@ -79,8 +78,9 @@ function classifyComposerSubmitScreen(state: ClaudeScreenState): ComposerSubmitS
   return { kind: 'submittable_draft', screen: state };
 }
 
-function resolveComposerSubmitKey(state: ClaudeScreenState): TerminalSpecialKey {
-  return state.composerCursorRelation === 'at_content_start' ? 'CtrlJ' : 'Enter';
+function composerStillContainsDraft(state: ClaudeScreenState, draft: string): boolean {
+  const current = state.composerContent ?? '';
+  return draft.length > 0 && current.includes(draft);
 }
 
 export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
@@ -114,11 +114,36 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
       break;
   }
 
-  const sendFailure = sendResultToFailure(
-    await params.port.sendSpecialKey(resolveComposerSubmitKey(initialClassification.screen)),
-  );
+  const draft = initialClassification.screen.composerContent ?? '';
+
+  const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('Enter'));
   if (sendFailure) return toComposerSubmitFailure(sendFailure);
 
   await wait(settleMs);
+  const afterEnter = await captureScreenState(params.port);
+  if (afterEnter.kind !== 'state') return { status: 'submitted', screen: initialClassification.screen };
+  if (!composerStillContainsDraft(afterEnter.state, draft)) {
+    return { status: 'submitted', screen: initialClassification.screen };
+  }
+
+  const fallbackFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlJ'));
+  if (fallbackFailure) return toComposerSubmitFailure(fallbackFailure);
+
+  await wait(settleMs);
+  const afterCtrlJ = await captureScreenState(params.port);
+  if (afterCtrlJ.kind !== 'state') return { status: 'submitted', screen: initialClassification.screen };
+  if (!composerStillContainsDraft(afterCtrlJ.state, draft)) {
+    return { status: 'submitted', screen: initialClassification.screen };
+  }
+
+  const finalEnterFailure = sendResultToFailure(await params.port.sendSpecialKey('Enter'));
+  if (finalEnterFailure) return toComposerSubmitFailure(finalEnterFailure);
+
+  await wait(settleMs);
+  const afterFinalEnter = await captureScreenState(params.port);
+  if (afterFinalEnter.kind !== 'state') return { status: 'submitted', screen: initialClassification.screen };
+  if (composerStillContainsDraft(afterFinalEnter.state, draft)) {
+    return { status: 'failed', reason: 'submit_failed', screen: afterFinalEnter.state };
+  }
   return { status: 'submitted', screen: initialClassification.screen };
 }
