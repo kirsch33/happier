@@ -116,6 +116,11 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
 
   const draft = initialClassification.screen.composerContent ?? '';
 
+  const moveToEndResult = sendResultToFailure(await params.port.sendSpecialKey('CtrlE'));
+  if (moveToEndResult && moveToEndResult.kind !== 'unsupported') {
+    return toComposerSubmitFailure(moveToEndResult);
+  }
+
   const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('Enter'));
   if (sendFailure) return toComposerSubmitFailure(sendFailure);
 

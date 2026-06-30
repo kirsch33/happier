@@ -13,6 +13,7 @@ import type { TerminalHostKind } from './inputInjection.js';
 
 export type TerminalSpecialKey =
   | 'Enter'
+  | 'CtrlE'
   | 'CtrlJ'
   | 'Escape'
   | 'Tab'
@@ -22,6 +23,7 @@ export type TerminalSpecialKey =
 
 export const TERMINAL_SPECIAL_KEYS: readonly TerminalSpecialKey[] = Object.freeze([
   'Enter',
+  'CtrlE',
   'CtrlJ',
   'Escape',
   'Tab',

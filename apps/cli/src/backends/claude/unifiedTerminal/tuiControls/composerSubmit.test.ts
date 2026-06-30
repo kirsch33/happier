@@ -74,8 +74,8 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter']);
-    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key', 'capture']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'Enter']);
+    expect(port.log.map((entry) => entry.type)).toEqual(['capture', 'key', 'key', 'capture']);
   });
 
   it('submits a visible draft with Enter when tmux reports the cursor after the content', async () => {
@@ -91,7 +91,7 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'Enter']);
   });
 
   it('submits a plain capture draft below assistant options without requiring clear-style evidence', async () => {
@@ -107,12 +107,12 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'Enter']);
   });
 
   it('submits a live-shaped plain follow-up draft even when tmux reports the cursor at the text start', async () => {
     const port = createFakeControlPort({
-      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, EMPTY_COMPOSER],
+      captures: [LIVE_FOLLOWUP_PLAIN_CAPTURE_DRAFT, EMPTY_COMPOSER],
       cursor: { x: 2, y: 5 },
     });
 
@@ -123,7 +123,7 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter', 'CtrlJ']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'Enter']);
   });
 
   it('submits after CtrlJ inserts a continuation line by sending a final Enter', async () => {
@@ -146,7 +146,7 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result.status).toBe('submitted');
-    expect(port.sentKeys).toEqual(['Enter', 'CtrlJ', 'Enter']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'Enter', 'CtrlJ', 'Enter']);
   });
 
   it('reports already_empty without pressing Enter when the composer has no draft', async () => {
@@ -201,6 +201,6 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
     });
 
     expect(result).toMatchObject({ status: 'failed', reason: 'host_dead:unrecoverable' });
-    expect(port.sentKeys).toEqual(['Enter']);
+    expect(port.sentKeys).toEqual(['CtrlE', 'Enter']);
   });
 });

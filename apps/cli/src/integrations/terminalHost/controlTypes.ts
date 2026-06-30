@@ -15,7 +15,7 @@ export type {
 
 /**
  * Raw byte sequence used for a {@link TerminalSpecialKey} when a host has no native named key
- * for it. zellij has no Tab/ShiftTab/CtrlJ/CtrlC/Backspace action, so these are written as literal
+ * for it. zellij has no Tab/ShiftTab/CtrlE/CtrlJ/CtrlC/Backspace action, so these are written as literal
  * bytes; tmux uses this only for ShiftTab (its named `S-Tab` is a proven no-op). `Enter` and
  * `Escape` are intentionally absent because both hosts have a dedicated named-key path.
  */
@@ -24,6 +24,7 @@ export const TERMINAL_SPECIAL_KEY_RAW_SEQUENCES: Readonly<
 > = Object.freeze({
   Tab: '\t',
   ShiftTab: TERMINAL_SHIFT_TAB_SEQUENCE,
+  CtrlE: '\u0005',
   CtrlJ: '\n',
   CtrlC: '\u0003',
   Backspace: '\u007f',
