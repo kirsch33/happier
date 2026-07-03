@@ -20,16 +20,18 @@ export type CaptureFailure =
   | Readonly<{ kind: 'capture_failed'; reason: string }>;
 
 export type CaptureOutcome =
-  | Readonly<{ kind: 'state'; state: ClaudeScreenState }>
+  | Readonly<{ kind: 'state'; state: ClaudeScreenState; rawText: string }>
   | CaptureFailure;
 
 export async function captureScreenState(port: TerminalControlPort): Promise<CaptureOutcome> {
   const result = await port.captureScreen();
   switch (result.status) {
     case 'captured':
+      const rawText = result.capture.styledText ?? result.capture.text;
       return {
         kind: 'state',
-        state: parseClaudeScreenState(result.capture.styledText ?? result.capture.text, { cursor: result.capture.cursor }),
+        state: parseClaudeScreenState(rawText, { cursor: result.capture.cursor }),
+        rawText,
       };
     case 'host_dead':
       return { kind: 'host_dead', recoverable: result.recoverable };

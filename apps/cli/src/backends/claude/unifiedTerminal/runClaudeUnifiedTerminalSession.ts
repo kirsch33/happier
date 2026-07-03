@@ -876,6 +876,15 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     }
     terminalComposerClearedWakePending = true;
   };
+  let userAuthorizedComposerAmbiguityBypassCount = 0;
+  const armUserAuthorizedComposerAmbiguityBypass = (): void => {
+    userAuthorizedComposerAmbiguityBypassCount = 1;
+  };
+  const consumeUserAuthorizedComposerAmbiguityBypass = (): boolean => {
+    if (userAuthorizedComposerAmbiguityBypassCount <= 0) return false;
+    userAuthorizedComposerAmbiguityBypassCount -= 1;
+    return true;
+  };
   const observeProviderSessionStarted = (): void => {
     providerSessionStartedObserved = true;
     endStartupHostLivenessGrace();
@@ -940,6 +949,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             });
             const protocolResult = mapClaudeComposerClearResultToProtocolResult(result, request.sessionId);
             if (protocolResult.ok) {
+              armUserAuthorizedComposerAmbiguityBypass();
               opts.onInFlightSteerAvailabilitySnapshot?.({ available: true, reason: null });
               wakeAfterTerminalComposerClear();
             }
@@ -951,6 +961,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             });
             const protocolResult = mapClaudeComposerSubmitResultToProtocolResult(result, request.sessionId);
             if (protocolResult.ok) {
+              armUserAuthorizedComposerAmbiguityBypass();
               opts.onInFlightSteerAvailabilitySnapshot?.({ available: true, reason: null });
               wakeAfterTerminalComposerClear();
             }
@@ -1189,6 +1200,15 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                 });
                 const draftLength =
                   'screen' in result ? (result.screen.composerContent?.length ?? 0) : undefined;
+                if (
+                  result.status === 'capture_style_unavailable'
+                  && consumeUserAuthorizedComposerAmbiguityBypass()
+                ) {
+                  return {
+                    status: 'no_draft',
+                    ...(draftLength !== undefined ? { draftLength } : {}),
+                  };
+                }
                 return {
                   status: result.status,
                   ...(result.status === 'cleared' ? { attempts: result.attempts } : {}),

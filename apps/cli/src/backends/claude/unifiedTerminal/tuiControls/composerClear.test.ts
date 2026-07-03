@@ -29,6 +29,11 @@ function generatingDraft(draft: string): string {
   ].join('\n');
 }
 
+const GENERATING_WITHOUT_COMPOSER = [
+  '● Working…',
+  '✶ Forging… (12s · esc to interrupt)',
+].join('\n');
+
 const PERMISSION_PROMPT = [
   'Bash(rm -rf tmp)',
   '',
@@ -223,8 +228,24 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     expect(port.sentKeys).toEqual(['CtrlE']);
   });
 
-  it('refuses to clear while Claude is generating because Escape would interrupt the turn', async () => {
-    const port = createFakeControlPort({ captures: [generatingDraft('queued words')] });
+  it('clears a visible draft while Claude is generating so the user can unblock the pending queue', async () => {
+    const port = createFakeControlPort({
+      captures: [generatingDraft('queued words'), generatingDraft('queued words'), EMPTY_COMPOSER],
+      cursors: [{ x: 4, y: 3 }, { x: 16, y: 3 }, { x: 4, y: 1 }],
+    });
+
+    const result = await clearUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU']);
+  });
+
+  it('refuses to clear while Claude is generating without an interactive composer draft', async () => {
+    const port = createFakeControlPort({ captures: [GENERATING_WITHOUT_COMPOSER] });
 
     const result = await clearUserAuthorizedClaudeComposerDraft({
       port,

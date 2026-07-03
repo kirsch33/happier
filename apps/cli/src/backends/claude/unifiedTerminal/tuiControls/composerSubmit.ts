@@ -5,6 +5,7 @@ import {
   captureScreenState,
   sendResultToFailure,
 } from './controlRuntime';
+import { isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate } from './composerCaptureClassification';
 import type { ClaudeScreenState } from './screenState';
 
 const DEFAULT_USER_AUTHORIZED_COMPOSER_SUBMIT_SETTLE_MS = 250;
@@ -42,9 +43,6 @@ function toComposerSubmitFailure(
 }
 
 function classifyComposerSubmitScreen(state: ClaudeScreenState): ComposerSubmitScreenClassification {
-  if (state.generating || state.queuedMessageBannerVisible) {
-    return { kind: 'refused', reason: 'generating', screen: state };
-  }
   if (state.permissionPromptVisible) {
     return { kind: 'refused', reason: 'permission_prompt', screen: state };
   }
@@ -72,7 +70,11 @@ function classifyComposerSubmitScreen(state: ClaudeScreenState): ComposerSubmitS
   if (state.selectionListVisible) {
     return { kind: 'refused', reason: 'selection_list', screen: state };
   }
-  if ((state.composerContent ?? '').length === 0) {
+  const composerContent = state.composerContent ?? '';
+  if (composerContent.length === 0) {
+    if (state.generating && state.composerContent === null) {
+      return { kind: 'refused', reason: 'generating', screen: state };
+    }
     return { kind: 'empty', screen: state };
   }
   return { kind: 'submittable_draft', screen: state };
@@ -94,6 +96,20 @@ function looksLikeUneditableCursorStartSuggestion(params: Readonly<{
     && params.before.composerCursorRelation === 'at_content_start'
     && params.afterMoveToEnd.composerContent === params.draft
     && params.afterMoveToEnd.composerCursorRelation === 'at_content_start'
+  );
+}
+
+function looksLikeUneditablePlainSuggestionAfterNoop(params: Readonly<{
+  screen: ClaudeScreenState;
+  rawText: string;
+  draft: string;
+}>): boolean {
+  return (
+    params.draft.length > 0
+    && !params.draft.includes('\n')
+    && params.screen.composerContent === params.draft
+    && params.screen.composerCursorRelation === 'at_content_start'
+    && isClaudeComposerCaptureStyleUnavailablePlaceholderCandidate(params.rawText, params.screen)
   );
 }
 
@@ -173,6 +189,13 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
   const afterFinalEnter = await captureScreenState(params.port);
   if (afterFinalEnter.kind !== 'state') return { status: 'submitted', screen: initialClassification.screen };
   if (composerStillContainsDraft(afterFinalEnter.state, draft)) {
+    if (looksLikeUneditablePlainSuggestionAfterNoop({
+      screen: afterFinalEnter.state,
+      rawText: afterFinalEnter.rawText,
+      draft,
+    })) {
+      return { status: 'already_empty', screen: afterFinalEnter.state };
+    }
     return { status: 'failed', reason: 'submit_failed', screen: afterFinalEnter.state };
   }
   return { status: 'submitted', screen: initialClassification.screen };

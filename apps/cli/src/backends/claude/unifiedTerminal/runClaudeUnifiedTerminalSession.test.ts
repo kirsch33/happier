@@ -318,6 +318,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       '│ > draft typed directly in the terminal │',
       '╰───────────────────────────────────────────────────────────────────────────╯',
     ].join('\n');
+    let currentCursor: { x: number; y: number } | undefined = { x: 4, y: 2 };
     const handle: TerminalHostHandle = {
       kind: 'tmux',
       sessionName: 'happier-claude-session-test',
@@ -334,7 +335,12 @@ describe('runClaudeUnifiedTerminalSession', () => {
       createOrAttachHost: vi.fn(async () => handle),
       injectUserPrompt: vi.fn(async () => ({ status: 'injected', at: Date.now(), bytesWritten: 0 }) as const),
       evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
-      captureInputState: vi.fn(async () => ({ stable: true, currentInput: currentScreen, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({
+        stable: true,
+        currentInput: currentScreen,
+        observedAt: Date.now(),
+        ...(currentCursor ? { cursor: currentCursor } : {}),
+      })),
       interruptTurn: vi.fn(async () => {}),
       createControlPort: vi.fn(() => ({
         hostKind: 'tmux' as const,
@@ -342,12 +348,21 @@ describe('runClaudeUnifiedTerminalSession', () => {
         sendRawSequence: vi.fn(async () => ({ status: 'sent', at: Date.now() } as const)),
         sendSpecialKey: vi.fn(async (key: string) => {
           specialKeysSent.push(key);
-          if (key === 'Escape') currentScreen = interactiveClaudeScreen;
+          if (key === 'CtrlE') currentCursor = { x: 44, y: 2 };
+          if (key === 'CtrlU' || key === 'Enter') {
+            currentScreen = interactiveClaudeScreen;
+            currentCursor = undefined;
+          }
           return { status: 'sent', at: Date.now() } as const;
         }),
         captureScreen: vi.fn(async () => ({
           status: 'captured',
-          capture: { text: currentScreen, capturedAtMs: Date.now(), hostKind: 'tmux' as const },
+          capture: {
+            text: currentScreen,
+            capturedAtMs: Date.now(),
+            hostKind: 'tmux' as const,
+            ...(currentCursor ? { cursor: currentCursor } : {}),
+          },
         } as const)),
       })),
       dispose: vi.fn(async () => {}),
@@ -391,7 +406,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       if (!clearTerminalComposer) throw new Error('terminal composer clear handler was not registered');
       const result = await clearTerminalComposer({ sessionId: 'sess-clear' });
       expect(result).toMatchObject({ ok: true, status: 'cleared', sessionId: 'sess-clear' });
-      expect(specialKeysSent).toEqual(['Escape']);
+      expect(specialKeysSent).toEqual(['CtrlE', 'CtrlU']);
       expect(availabilitySnapshots).toContainEqual({ available: true, reason: null });
 
       currentScreen = [
@@ -400,11 +415,12 @@ describe('runClaudeUnifiedTerminalSession', () => {
         '│ > draft to submit from the terminal │',
         '╰───────────────────────────────────────────────────────────────────────────╯',
       ].join('\n');
+      currentCursor = { x: 4, y: 2 };
       const submitTerminalComposer = registeredSubmit.current;
       if (!submitTerminalComposer) throw new Error('terminal composer submit handler was not registered');
       const submitResult = await submitTerminalComposer({ sessionId: 'sess-clear' });
       expect(submitResult).toMatchObject({ ok: true, status: 'submitted', sessionId: 'sess-clear' });
-      expect(specialKeysSent).toEqual(['Escape', 'Enter']);
+      expect(specialKeysSent).toEqual(['CtrlE', 'CtrlU', 'CtrlE', 'Enter']);
     } finally {
       abortController.abort();
       await sessionPromise;
@@ -415,17 +431,17 @@ describe('runClaudeUnifiedTerminalSession', () => {
     expect(registeredSubmit.current).toBeNull();
   });
 
-  it('wakes a draft-guard deferred prompt when the user-authorized terminal composer clear succeeds after a style-unavailable plain capture', async () => {
+  it('wakes a draft-guard deferred prompt when user-authorized clear confirms an uneditable plain suggestion', async () => {
     const abortController = createAbortableSignal();
     const injectedInputs: string[] = [];
     const specialKeysSent: string[] = [];
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     let currentScreen = interactiveClaudeScreen;
     let currentCursor: { x: number; y: number } | undefined;
-    const foreignDraftScreen = [
+    const plainSuggestionScreen = [
       'Some previous Claude output',
       '╭───────────────────────────────────────────────╮',
-      '│ ❯ half-typed terminal draft                    │',
+      '│ ❯ Claude suggested follow-up text              │',
       '╰───────────────────────────────────────────────╯',
     ].join('\n');
     const telemetry = { emit: vi.fn() };
@@ -466,10 +482,6 @@ describe('runClaudeUnifiedTerminalSession', () => {
         sendRawSequence: vi.fn(async () => ({ status: 'sent', at: Date.now() } as const)),
         sendSpecialKey: vi.fn(async (key: string) => {
           specialKeysSent.push(key);
-          if (key === 'Escape') {
-            currentScreen = interactiveClaudeScreen;
-            currentCursor = undefined;
-          }
           return { status: 'sent', at: Date.now() } as const;
         }),
         captureScreen: vi.fn(async () => ({
@@ -547,8 +559,8 @@ describe('runClaudeUnifiedTerminalSession', () => {
       });
 
       await waitUntil(() => nextMessage.mock.calls.length >= 2, 5_000);
-      currentScreen = foreignDraftScreen;
-      currentCursor = { x: 25, y: 1 };
+      currentScreen = plainSuggestionScreen;
+      currentCursor = { x: 4, y: 2 };
       releaseSecondMessage({
         message: 'deliver immediately after clear',
         mode: { permissionMode: 'default', claudeUnifiedTerminalHost: 'tmux' },
@@ -563,8 +575,8 @@ describe('runClaudeUnifiedTerminalSession', () => {
       if (!clearTerminalComposer) throw new Error('terminal composer clear handler was not registered');
       const result = await clearTerminalComposer({ sessionId: 'sess-clear-wake' });
 
-      expect(result).toMatchObject({ ok: true, status: 'cleared', sessionId: 'sess-clear-wake' });
-      expect(specialKeysSent).toContain('Escape');
+      expect(result).toMatchObject({ ok: true, status: 'already_empty', sessionId: 'sess-clear-wake' });
+      expect(specialKeysSent).toEqual(['CtrlE']);
       await waitUntil(() => injectedInputs.length === 2, 1_000);
       expect(injectedInputs).toEqual([
         'warm up the ready session',
