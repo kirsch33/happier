@@ -232,10 +232,12 @@ const CLAUDE_2_1_174_FRESH_PLACEHOLDER = [
 ].join('\n');
 
 describe('parseClaudeScreenState — empty-composer placeholder hint (2.1.174 fresh session)', () => {
-  it('keeps the Try "<hint>" text fail-closed as a draft without style or cursor evidence', () => {
+  it('treats the known Try "<hint>" placeholder as empty even without style or cursor evidence', () => {
     const state = parseClaudeScreenState(CLAUDE_2_1_174_FRESH_PLACEHOLDER);
-    expect(state.composerContent).toBe('Try "refactor <filepath>"');
-    expect(state.userDraftPresent).toBe(true);
+    expect(state.composerContent).toBe('');
+    expect(state.userDraftPresent).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBeNull();
   });
 
   it('treats the Try "<hint>" placeholder as an EMPTY composer when cursor proves the input is empty', () => {
@@ -269,14 +271,55 @@ describe('parseClaudeScreenState — empty-composer placeholder hint (2.1.174 fr
     expect(state.userDraftPresent).toBe(true);
   });
 
+  it('keeps a visible option that exactly matches a Try placeholder-shaped composer as a draft', () => {
+    const optionText = 'Try "refactor <filepath>"';
+    const state = parseClaudeScreenState([
+      'Choose one:',
+      '',
+      '<options>',
+      `<option>${optionText}</option>`,
+      '<option>Do something else</option>',
+      '</options>',
+      '',
+      '────────────────────────────────────────────────',
+      `❯ ${optionText}`,
+      '────────────────────────────────────────────────',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.composerContent).toBe(optionText);
+    expect(state.userDraftPresent).toBe(true);
+  });
+
   it('treats the typographic-quote placeholder variant as empty when cursor proves it', () => {
     const curly = CLAUDE_2_1_174_FRESH_PLACEHOLDER.replace(
       '❯ Try "refactor <filepath>"',
       '❯ Try “fix typecheck errors”',
     );
-    const state = parseClaudeScreenState(curly, { cursor: { x: 2, y: 6 } });
+    const state = parseClaudeScreenState(curly);
     expect(state.userDraftPresent).toBe(false);
     expect(state.composerContent).toBe('');
+  });
+
+  it('treats the Claude 2.1.193 edit-file placeholder as an empty composer', () => {
+    const screen = [
+      ' ▐▛███▜▌   Claude Code v2.1.193',
+      '▝▜█████▛▘  Opus 4.8 with high effort · Claude Max',
+      '  ▘▘ ▝▝    /tmp',
+      '',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ Try "edit <filepath> to..."',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    ].join('\n');
+    const state = parseClaudeScreenState(screen);
+
+    expect(state.composerContent).toBe('');
+    expect(state.userDraftPresent).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(true);
+    expect(isSafeWindowForSlashControl(state)).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBeNull();
   });
 });
 

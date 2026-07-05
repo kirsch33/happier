@@ -313,6 +313,20 @@ function cursorProvesPlainPlaceholder(params: Readonly<{
   );
 }
 
+function contentIsKnownPlainPlaceholder(params: Readonly<{
+  normalizedText: string;
+  content: string;
+  continuation: readonly string[];
+}>): boolean {
+  return (
+    params.continuation.length === 0
+    && params.content.length > 0
+    && params.content.length <= MAX_CURSOR_PROVEN_PLAIN_PLACEHOLDER_CHARS
+    && KNOWN_PLAIN_PLACEHOLDER.test(params.content)
+    && !visibleOptionMatchesComposerContent(params.normalizedText, params.content)
+  );
+}
+
 function normalizeOptionText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -345,6 +359,13 @@ function readComposerState(
     };
   }
   if (continuation.length === 0 && composerContentIsDimPlaceholder(rawText, content)) {
+    return { content: '', cursorRelation };
+  }
+  if (contentIsKnownPlainPlaceholder({
+    normalizedText: text,
+    content,
+    continuation,
+  })) {
     return { content: '', cursorRelation };
   }
   if (cursorProvesPlainPlaceholder({
