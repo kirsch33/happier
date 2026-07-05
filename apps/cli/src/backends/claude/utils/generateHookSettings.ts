@@ -43,9 +43,9 @@ export interface GenerateHookSettingsOptions {
      * PreToolUse(AskUserQuestion) permission hooks.
      *
      * This makes the provider-side hook ceiling explicit and aligned with the local permission bridge's
-     * own response timeout (`claudeLocalPermissionBridgeTimeoutSeconds`, default 600s), instead of silently
-     * relying on Claude's undocumented default. The bridge uses the same value as its expiry boundary so a
-     * late UI answer after the ceiling returns a typed expired result instead of a false success.
+     * provider-hook ceiling, not the shorter ordinary permission response timeout. The bridge still applies
+     * `claudeLocalPermissionBridgeTimeoutSeconds` to non-interactive approvals, while native user-action
+     * tools can wait for late mobile/UI answers without the provider forwarder being killed at 600s.
      */
     permissionHookTimeoutSeconds?: number;
 }

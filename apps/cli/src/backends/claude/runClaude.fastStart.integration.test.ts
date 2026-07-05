@@ -17,6 +17,7 @@ vi.mock('@/backends/claude/localPermissions/localPermissionBridge', () => ({
     suppressOutput: true,
     hookSpecificOutput: { hookEventName: 'PermissionRequest' },
   },
+  resolveDefaultProviderHookCeilingMs: vi.fn(() => 7 * 24 * 60 * 60 * 1000),
   ClaudeLocalPermissionBridge: class ClaudeLocalPermissionBridge {
     activate() {}
     async handlePermissionHook() {
@@ -129,6 +130,7 @@ function getLastRuntimeSessionClient(): typeof lastRuntimeSessionClient {
 let startHookServerCalls = 0;
 let lastStartHookServerOptions: any = null;
 let generateHookSettingsCalls = 0;
+let lastGenerateHookPluginDirOptions: any = null;
 let resolveRunnerMcpServersCalls = 0;
 let resolveEffectiveCodingPromptCalls = 0;
 let loopCalls = 0;
@@ -203,7 +205,10 @@ vi.mock('@/backends/claude/utils/generateHookSettingsFileWithEnsuredRuntime', ()
     generateHookSettingsCalls += 1;
     return '/tmp/happier-hooks.json';
   }),
-  generateHookPluginDirWithEnsuredRuntime: vi.fn(async () => null),
+  generateHookPluginDirWithEnsuredRuntime: vi.fn(async (_port: number, options: any) => {
+    lastGenerateHookPluginDirOptions = options;
+    return null;
+  }),
 }));
 
 vi.mock('@/runtime/js/ensureJavaScriptRuntimeExecutable', () => ({
@@ -436,6 +441,51 @@ describe('runClaude fast-start', () => {
       loopExit.resolve(0);
       await runPromise;
       getOrCreateSessionSpy.mockImplementation(async () => ({ id: 'sess_1', metadataVersion: 1 }));
+    }
+
+    if (testError) {
+      throw testError;
+    }
+  });
+
+  it('uses provider hook ceiling for Claude hook HTTP requests when local bridge has a finite tool timeout', async () => {
+    vi.resetModules();
+    loopStarted = createDeferred<void>();
+    loopExit = createDeferred<number>();
+    lastLoopOpts = null;
+    lastStartHookServerOptions = null;
+    lastGenerateHookPluginDirOptions = null;
+    autoSessionReady = true;
+    initResolved = false;
+    backendInitDelayMs = 0;
+    getOrCreateSessionSpy.mockImplementation(async () => ({ id: 'sess_1', metadataVersion: 1 }));
+
+    const { runClaude } = await import('./runClaude');
+    const credentials = createLegacyCredentials();
+    let testError: unknown = null;
+    const runPromise = runClaude(credentials, {
+      startedBy: 'terminal',
+      startingMode: 'local',
+      claudeRemoteMetaDefaults: {
+        claudeLocalPermissionBridgeEnabled: true,
+        claudeLocalPermissionBridgeWaitIndefinitely: false,
+        claudeLocalPermissionBridgeTimeoutSeconds: 600,
+      },
+    }).catch((e) => {
+      testError = e;
+      loopStarted.resolve();
+    });
+
+    try {
+      await expect(waitFor(loopStarted.promise, loopStartWaitMs)).resolves.toBeUndefined();
+      if (testError) throw testError;
+
+      const providerHookCeilingMs = 7 * 24 * 60 * 60 * 1000;
+      expect(lastStartHookServerOptions?.permissionRequestTimeoutMs).toBe(providerHookCeilingMs);
+      expect(lastGenerateHookPluginDirOptions?.permissionHookTimeoutSeconds).toBe(providerHookCeilingMs / 1000);
+    } finally {
+      loopExit.resolve(0);
+      await runPromise;
     }
 
     if (testError) {

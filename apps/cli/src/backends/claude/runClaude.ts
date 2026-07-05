@@ -48,7 +48,11 @@ import { adoptReasoningEffortOverrideFromMetadata } from './utils/adoptReasoning
 import { adoptUltracodeOverrideFromMessageMeta, adoptUltracodeOverrideFromMetadata } from './utils/adoptUltracodeOverride';
 import { resolveSessionModeOverrideFromMetadataSnapshot } from '@/agent/runtime/permission/permissionModeFromMetadata';
 import { initializeBackendApiContext } from '@/agent/runtime/initializeBackendApiContext';
-import { ClaudeLocalPermissionBridge, DEFAULT_LOCAL_PERMISSION_HOOK_RESPONSE } from '@/backends/claude/localPermissions/localPermissionBridge';
+import {
+    ClaudeLocalPermissionBridge,
+    DEFAULT_LOCAL_PERMISSION_HOOK_RESPONSE,
+    resolveDefaultProviderHookCeilingMs,
+} from '@/backends/claude/localPermissions/localPermissionBridge';
 import { formatErrorForUi } from '@/ui/formatErrorForUi';
 import { computeRunnerTerminationOutcome, type RunnerTerminationEvent } from '@/agent/runtime/runnerTerminationOutcome';
 import { registerRunnerTerminationHandlers } from '@/agent/runtime/runnerTerminationHandlers';
@@ -555,6 +559,17 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let localPermissionBridgeTimeoutMs = localPermissionBridgeWaitIndefinitely
         ? null
         : currentClaudeRemoteMetaState.claudeLocalPermissionBridgeTimeoutSeconds * 1000;
+    const localPermissionBridgeProviderHookCeilingMs = resolveDefaultProviderHookCeilingMs();
+    const localPermissionBridgeProviderHookTimeoutSeconds = Math.max(
+        1,
+        Math.floor(localPermissionBridgeProviderHookCeilingMs / 1000),
+    );
+    const resolveHookServerPermissionRequestTimeoutMs = (): number | null => {
+        if (localPermissionBridgeEnabled) {
+            return localPermissionBridgeProviderHookCeilingMs;
+        }
+        return localPermissionBridgeWaitIndefinitely ? null : localPermissionBridgeTimeoutMs;
+    };
     const permissionHookSecret = randomUUID();
     let localPermissionBridge: ClaudeLocalPermissionBridge | null = null;
     const disposeLocalPermissionBridge = () => {
@@ -570,7 +585,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             localPermissionBridge = null;
             return;
         }
-        localPermissionBridge = new ClaudeLocalPermissionBridge(currentSession, { responseTimeoutMs: localPermissionBridgeTimeoutMs });
+        localPermissionBridge = new ClaudeLocalPermissionBridge(currentSession, {
+            responseTimeoutMs: localPermissionBridgeTimeoutMs,
+            providerHookCeilingMs: localPermissionBridgeProviderHookCeilingMs,
+        });
         localPermissionBridge.activate();
     };
     const publishPermissionLifecycleHook = (
@@ -623,7 +641,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             }
         },
         permissionHookSecret,
-        permissionRequestTimeoutMs: localPermissionBridgeWaitIndefinitely ? null : localPermissionBridgeTimeoutMs,
+        permissionRequestTimeoutMs: resolveHookServerPermissionRequestTimeoutMs(),
     };
     const hookServer = await runClaudeStartupPhase('hook_server_start', startupPhaseContext, () =>
         startHookServer(hookServerOptions),
@@ -646,12 +664,11 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         generateHookPluginDirWithEnsuredRuntime(hookServer.port, {
             enableLocalPermissionBridge: true,
             permissionHookSecret,
-            // Keep the provider-side permission hook ceiling aligned with the local permission bridge's
-            // own response timeout source so non-default configured timeouts do not silently fall back to
-            // Claude's undocumented default. Wait-indefinitely mode keeps the generateHookSettings default.
-            ...(localPermissionBridgeWaitIndefinitely
-                ? {}
-                : { permissionHookTimeoutSeconds: currentClaudeRemoteMetaState.claudeLocalPermissionBridgeTimeoutSeconds }),
+            // Keep Claude's installed hook timeout aligned with the bridge/provider ceiling, not with the
+            // shorter non-interactive permission timeout. The bridge itself still cancels ordinary tool
+            // approvals at `claudeLocalPermissionBridgeTimeoutSeconds`; native user-action tools must keep
+            // the hook forwarder alive long enough for late mobile/UI answers to reach Claude.
+            permissionHookTimeoutSeconds: localPermissionBridgeProviderHookTimeoutSeconds,
         }),
     );
     if (hookPluginDir) {
@@ -846,7 +863,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             localPermissionBridgeEnabled = nextLocalPermissionBridgeEnabled;
             localPermissionBridgeWaitIndefinitely = nextLocalPermissionBridgeWaitIndefinitely;
             localPermissionBridgeTimeoutMs = nextLocalPermissionBridgeTimeoutMs;
-            hookServerOptions.permissionRequestTimeoutMs = localPermissionBridgeWaitIndefinitely ? null : localPermissionBridgeTimeoutMs;
+            hookServerOptions.permissionRequestTimeoutMs = resolveHookServerPermissionRequestTimeoutMs();
             logger.debug(`[loop] Local permission bridge updated from user message: enabled=${localPermissionBridgeEnabled ? 'yes' : 'no'} timeoutMs=${localPermissionBridgeTimeoutMs === null ? 'infinite' : String(localPermissionBridgeTimeoutMs)}`);
             rebuildLocalPermissionBridge();
             updateAgentStateBestEffort(
@@ -1087,7 +1104,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     });
                 }
                 if (!localPermissionBridge) {
-                    localPermissionBridge = new ClaudeLocalPermissionBridge(sessionInstance, { responseTimeoutMs: localPermissionBridgeTimeoutMs });
+                    localPermissionBridge = new ClaudeLocalPermissionBridge(sessionInstance, {
+                        responseTimeoutMs: localPermissionBridgeTimeoutMs,
+                        providerHookCeilingMs: localPermissionBridgeProviderHookCeilingMs,
+                    });
                     localPermissionBridge.activate();
                 } else if (localPermissionBridgeEnabled) {
                     rebuildLocalPermissionBridge();
@@ -1251,6 +1271,17 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
     let localPermissionBridgeTimeoutMs = localPermissionBridgeWaitIndefinitely
         ? null
         : currentClaudeRemoteMetaState.claudeLocalPermissionBridgeTimeoutSeconds * 1000;
+    const localPermissionBridgeProviderHookCeilingMs = resolveDefaultProviderHookCeilingMs();
+    const localPermissionBridgeProviderHookTimeoutSeconds = Math.max(
+        1,
+        Math.floor(localPermissionBridgeProviderHookCeilingMs / 1000),
+    );
+    const resolveHookServerPermissionRequestTimeoutMs = (): number | null => {
+        if (localPermissionBridgeEnabled) {
+            return localPermissionBridgeProviderHookCeilingMs;
+        }
+        return localPermissionBridgeWaitIndefinitely ? null : localPermissionBridgeTimeoutMs;
+    };
     const permissionHookSecret = randomUUID();
     let localPermissionBridge: ClaudeLocalPermissionBridge | null = null;
 
@@ -1265,7 +1296,10 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
             localPermissionBridge = null;
             return;
         }
-        localPermissionBridge = new ClaudeLocalPermissionBridge(currentSession, { responseTimeoutMs: localPermissionBridgeTimeoutMs });
+        localPermissionBridge = new ClaudeLocalPermissionBridge(currentSession, {
+            responseTimeoutMs: localPermissionBridgeTimeoutMs,
+            providerHookCeilingMs: localPermissionBridgeProviderHookCeilingMs,
+        });
         localPermissionBridge.activate();
     };
     const publishPermissionLifecycleHook = (
@@ -1301,7 +1335,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
             }
         },
         permissionHookSecret,
-        permissionRequestTimeoutMs: localPermissionBridgeWaitIndefinitely ? null : localPermissionBridgeTimeoutMs,
+        permissionRequestTimeoutMs: resolveHookServerPermissionRequestTimeoutMs(),
     };
 
     const startupSpec = createClaudeStartupSpec({
@@ -1325,6 +1359,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                     return await generateHookPluginDirWithEnsuredRuntime(port, {
                         enableLocalPermissionBridge: true,
                         permissionHookSecret,
+                        permissionHookTimeoutSeconds: localPermissionBridgeProviderHookTimeoutSeconds,
                     });
                 },
             cleanupHookSettingsFile,
@@ -1589,7 +1624,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                         localPermissionBridgeEnabled = nextLocalPermissionBridgeEnabled;
                         localPermissionBridgeWaitIndefinitely = nextLocalPermissionBridgeWaitIndefinitely;
                         localPermissionBridgeTimeoutMs = nextLocalPermissionBridgeTimeoutMs;
-                        hookServerOptions.permissionRequestTimeoutMs = localPermissionBridgeWaitIndefinitely ? null : localPermissionBridgeTimeoutMs;
+                        hookServerOptions.permissionRequestTimeoutMs = resolveHookServerPermissionRequestTimeoutMs();
                         rebuildLocalPermissionBridge();
                         updateAgentStateBestEffort(
                             session,
@@ -1786,7 +1821,10 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                                 });
                             }
                             if (!localPermissionBridge) {
-                                localPermissionBridge = new ClaudeLocalPermissionBridge(sessionInstance, { responseTimeoutMs: localPermissionBridgeTimeoutMs });
+                                localPermissionBridge = new ClaudeLocalPermissionBridge(sessionInstance, {
+                                    responseTimeoutMs: localPermissionBridgeTimeoutMs,
+                                    providerHookCeilingMs: localPermissionBridgeProviderHookCeilingMs,
+                                });
                                 if (localPermissionBridgeEnabled) {
                                     localPermissionBridge.activate();
                                 }

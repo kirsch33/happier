@@ -101,6 +101,10 @@ function readProviderHookCeilingEnvMs(): number | null {
     }
     return null;
 }
+
+export function resolveDefaultProviderHookCeilingMs(): number {
+    return readProviderHookCeilingEnvMs() ?? DEFAULT_PROVIDER_HOOK_CEILING_MS;
+}
 const PERMISSION_TIMED_OUT_REASON = 'Timed out waiting for permission response';
 const PERMISSION_EXPIRED_REASON = 'Provider hook timeout elapsed before a response was delivered';
 const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
@@ -149,7 +153,7 @@ export class ClaudeLocalPermissionBridge {
         // track the bridge response timeout, but interactive user-action tools must stay aligned with the
         // installed Claude hook timeout. Otherwise AskUserQuestion renders in the UI as "wait indefinitely"
         // while answer delivery is silently rejected minutes/hours later.
-        const defaultProviderHookCeilingMs = readProviderHookCeilingEnvMs() ?? DEFAULT_PROVIDER_HOOK_CEILING_MS;
+        const defaultProviderHookCeilingMs = resolveDefaultProviderHookCeilingMs();
         if (typeof opts?.providerHookCeilingMs === 'number' && Number.isFinite(opts.providerHookCeilingMs) && opts.providerHookCeilingMs > 0) {
             this.providerHookCeilingMs = opts.providerHookCeilingMs;
             this.interactiveProviderHookCeilingMs = opts.providerHookCeilingMs;
