@@ -6,6 +6,12 @@ import type {
   ClaudeUnifiedPendingQueuePump,
 } from './_types';
 
+const NULL_INPUT_RETRY_DELAY_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
 export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readonly<{
   inputConsumer: ClaudeUnifiedInputConsumer<Mode>;
   arbiter: Pick<ClaudeUnifiedInputArbiter<Mode>, 'enqueueUiMessage' | 'drainWhenSafe'>;
@@ -16,6 +22,7 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
    * permanently dropping it into a dead session.
    */
   onUndeliverableBatch?: (batch: MessageBatch<Mode, string>) => void;
+  nullInputRetryDelayMs?: number | undefined;
 }>): ClaudeUnifiedPendingQueuePump<Mode> {
   let disposed = false;
   let runPromise: Promise<void> | null = null;
@@ -44,9 +51,12 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
   };
 
   const run = async (runOpts: { abortSignal: AbortSignal }): Promise<void> => {
+    const retryDelayMs = opts.nullInputRetryDelayMs ?? NULL_INPUT_RETRY_DELAY_MS;
     while (!disposed && !runOpts.abortSignal.aborted) {
       const pumped = await pumpOnce(runOpts);
-      if (!pumped) return;
+      if (!pumped && !disposed && !runOpts.abortSignal.aborted) {
+        await sleep(retryDelayMs);
+      }
     }
   };
 

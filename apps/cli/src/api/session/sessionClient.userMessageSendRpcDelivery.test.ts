@@ -310,6 +310,73 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(true);
   });
 
+  it('keeps RPC prompts in-flight until provider acceptance when provider proof is deferred', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
+
+    const received: any[] = [];
+    client.onUserMessage((msg) => received.push(msg));
+
+    (client as any).enqueueSessionUserMessage({
+      text: 'selected option',
+      localId: 'l1',
+      meta: { source: 'ui', sentFrom: 'ios' },
+    });
+
+    expect(received).toHaveLength(1);
+    expect((client as any).hasAgentQueueInFlightLocalId('l1')).toBe(true);
+    expect((client as any).hasAgentQueueDeliveredLocalId('l1')).toBe(false);
+    expect(client.hasUserMessageProviderAcceptance({ localIds: ['l1'] })).toBe(false);
+
+    (client as any).enqueueSessionUserMessage({
+      text: 'selected option',
+      localId: 'l1',
+      meta: { source: 'ui', sentFrom: 'ios' },
+    });
+
+    expect(received).toHaveLength(1);
+
+    sessionSocketStub.trigger('update', {
+      id: 'u1',
+      createdAt: Date.now(),
+      body: {
+        t: 'new-message',
+        sid: 's1',
+        message: {
+          id: 'm1',
+          seq: 1,
+          content: {
+            t: 'plain',
+            v: {
+              role: 'user',
+              content: { type: 'text', text: 'selected option' },
+              localId: 'l1',
+              meta: { source: 'ui', sentFrom: 'ios' },
+            },
+          },
+          localId: 'l1',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      },
+    });
+
+    expect(received).toHaveLength(1);
+    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
+
+    client.confirmUserMessageDeliveredToProvider(null, { localIds: ['l1'] });
+
+    expect((client as any).hasAgentQueueInFlightLocalId('l1')).toBe(false);
+    expect((client as any).hasAgentQueueDeliveredLocalId('l1')).toBe(true);
+    expect(client.hasUserMessageProviderAcceptance({ localIds: ['l1'] })).toBe(true);
+  });
+
   it('persists a deferred delivered watermark when provider acceptance resolves a prior echo seq by localId', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,

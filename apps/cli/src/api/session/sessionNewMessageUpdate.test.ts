@@ -686,6 +686,64 @@ describe('handleSessionNewMessageUpdate', () => {
     expect(emitted.some((e: any) => e.event === 'user-message')).toBe(true);
   });
 
+  it('suppresses in-flight local prompt echoes without treating them as provider-delivered proof', () => {
+    const delivered: any[] = [];
+    const provenSeqs: number[] = [];
+    const emitted: any[] = [];
+
+    const update = {
+      id: 'u-in-flight',
+      createdAt: Date.now(),
+      body: {
+        t: 'new-message',
+        sid: 'sess_1',
+        message: {
+          id: 'm-in-flight',
+          seq: 19,
+          content: {
+            t: 'plain',
+            v: {
+              role: 'user',
+              content: { type: 'text', text: 'selected option' },
+              localId: 'in-flight-1',
+              meta: { source: 'ui', sentFrom: 'ios' },
+            },
+          },
+          localId: 'in-flight-1',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      },
+    } as unknown as Update;
+
+    handleSessionNewMessageUpdate({
+      update,
+      sessionId: 'sess_1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      receivedMessageIds: new Set<string>(),
+      lastObservedMessageSeq: 0,
+      lastObservedUserMessageSeq: 0,
+      hasSelfEchoSuppressedLocalId: () => false,
+      hasAgentQueueEchoSuppressedLocalId: () => true,
+      hasAgentQueueInFlightLocalId: (localId: string) => localId === 'in-flight-1',
+      hasAgentQueueDeliveredLocalId: () => false,
+      markAgentQueueEchoSuppressedLocalId: () => void 0,
+      hasPendingQueueMaterializedLocalId: () => false,
+      deleteMaterializedLocalId: () => void 0,
+      pendingMessageCallback: (message, info) => delivered.push({ message, info }),
+      pendingMessages: [],
+      onUserMessageDeliveryProvenByLocalEcho: (seq) => provenSeqs.push(seq),
+      emit: (event, payload) => emitted.push({ event, payload }),
+      debug: () => void 0,
+      debugLargeJson: () => void 0,
+    });
+
+    expect(delivered).toEqual([]);
+    expect(provenSeqs).toEqual([]);
+    expect(emitted.some((e: any) => e.event === 'user-message')).toBe(true);
+  });
+
   it('does not redeliver deterministic daemon-initial-prompt user messages already sent by this agent process', () => {
     const pendingMessages: any[] = [];
     const emitted: any[] = [];

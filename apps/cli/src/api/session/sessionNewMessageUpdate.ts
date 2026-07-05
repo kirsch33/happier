@@ -40,8 +40,11 @@ export function handleSessionNewMessageUpdate(params: {
     hasAgentQueueEchoSuppressedLocalId: (localId: string) => boolean;
     hasPassiveCommittedUserMessageLocalId?: (localId: string) => boolean;
     markAgentQueueEchoSuppressedLocalId: (localId: string) => void;
+    hasAgentQueueInFlightLocalId?: (localId: string) => boolean;
+    markAgentQueueInFlightLocalId?: (localId: string) => void;
     hasAgentQueueDeliveredLocalId?: (localId: string) => boolean;
     markAgentQueueDeliveredLocalId?: (localId: string) => void;
+    deferAgentQueueDeliveryProofToProviderAcceptance?: boolean;
     hasPendingQueueMaterializedLocalId: (localId: string) => boolean;
     deleteMaterializedLocalId: (localId: string) => void;
     pendingMessageCallback: ((message: UserMessage, info?: Readonly<{ seq: number | null }>) => void) | null;
@@ -205,6 +208,9 @@ export function handleSessionNewMessageUpdate(params: {
         const isAgentQueueDeliveredLocalId = Boolean(
             agentQueueLocalId && params.hasAgentQueueDeliveredLocalId?.(agentQueueLocalId),
         );
+        const isAgentQueueInFlightLocalId = Boolean(
+            agentQueueLocalId && params.hasAgentQueueInFlightLocalId?.(agentQueueLocalId),
+        );
         const isAlreadyPendingAgentQueueMessage = hasPendingMessageLocalId(params.pendingMessages, agentQueueLocalId);
         const isDeterministicDaemonInitialPrompt =
             source === 'daemon-initial-prompt'
@@ -223,6 +229,7 @@ export function handleSessionNewMessageUpdate(params: {
             && isAgentQueueEchoSuppressedForDelivery;
         const shouldDeliverToAgentQueue =
             !isAgentQueueDeliveredLocalId
+            && !isAgentQueueInFlightLocalId
             && !isEffectivelyAgentQueueEchoSuppressedLocalId
             && !isAlreadyPendingAgentQueueMessage
             && !isSelfEchoSuppressedCliWrite
@@ -240,7 +247,10 @@ export function handleSessionNewMessageUpdate(params: {
             }
             if (agentQueueLocalId) {
                 params.markAgentQueueEchoSuppressedLocalId(agentQueueLocalId);
-                params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
+                params.markAgentQueueInFlightLocalId?.(agentQueueLocalId);
+                if (params.deferAgentQueueDeliveryProofToProviderAcceptance !== true) {
+                    params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
+                }
             }
             if (deliverableSeq !== null) {
                 params.onUserMessageDeliveredToAgentQueue?.(deliverableSeq);
@@ -269,6 +279,7 @@ export function handleSessionNewMessageUpdate(params: {
                 isSelfEchoSuppressedLocalId,
                 isAgentQueueEchoSuppressedLocalId,
                 isAgentQueueEchoSuppressedForDelivery,
+                isAgentQueueInFlightLocalId,
                 isAgentQueueDeliveredLocalId,
                 isAlreadyPendingAgentQueueMessage,
                 isPendingQueueMaterializedLocalId,
@@ -305,6 +316,9 @@ export function handleSessionNewMessageUpdate(params: {
                 const isAgentQueueDeliveredLocalId = Boolean(
                     agentQueueLocalId && params.hasAgentQueueDeliveredLocalId?.(agentQueueLocalId),
                 );
+                const isAgentQueueInFlightLocalId = Boolean(
+                    agentQueueLocalId && params.hasAgentQueueInFlightLocalId?.(agentQueueLocalId),
+                );
                 const isEffectivelyAgentQueueEchoSuppressedLocalId =
                     isAlreadyPendingAgentQueueMessage
                     && isAgentQueueEchoSuppressedForDelivery;
@@ -326,6 +340,7 @@ export function handleSessionNewMessageUpdate(params: {
                 );
                 const shouldDeliverToAgentQueue =
                     !isAgentQueueDeliveredLocalId
+                    && !isAgentQueueInFlightLocalId
                     && !isAlreadyPendingAgentQueueMessage
                     && !isEffectivelyAgentQueueEchoSuppressedLocalId
                     && !isSelfEchoSuppressedCliWrite
@@ -343,7 +358,10 @@ export function handleSessionNewMessageUpdate(params: {
                     }
                     if (agentQueueLocalId) {
                         params.markAgentQueueEchoSuppressedLocalId(agentQueueLocalId);
-                        params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
+                        params.markAgentQueueInFlightLocalId?.(agentQueueLocalId);
+                        if (params.deferAgentQueueDeliveryProofToProviderAcceptance !== true) {
+                            params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
+                        }
                     }
                     if (deliverableSeq !== null) {
                         params.onUserMessageDeliveredToAgentQueue?.(deliverableSeq);

@@ -261,7 +261,8 @@ export class ApiSessionClient extends EventEmitter {
     // committedLocalIdsAwaitingEcho: committed outbound rows awaiting socket echo.
     // pendingQueueMaterializedLocalIds: pending queue rows already emitted locally.
     // agentQueueEchoSuppressedLocalIds: local prompt echoes already handled for the live queue.
-    // agentQueueDeliveredLocalIds: prompt attempts already handed to the live agent queue.
+    // agentQueueInFlightLocalIds: prompt attempts handed to the live queue but not provider-accepted.
+    // agentQueueDeliveredLocalIds: prompt attempts accepted by the provider or legacy-delivered locally.
     // providerAcceptedUserMessageLocalIdsAwaitingSeq: prompt attempts accepted by provider before
     //   their socket echo assigned a durable seq.
     // passiveCommittedUserMessageLocalIds: transcript-only user writes that must not become inbound prompts.
@@ -269,11 +270,13 @@ export class ApiSessionClient extends EventEmitter {
     private readonly committedLocalIdsAwaitingEcho = new Set<string>();
     private readonly pendingQueueMaterializedLocalIds = new Set<string>();
     private readonly agentQueueEchoSuppressedLocalIds = new Set<string>();
+    private readonly agentQueueInFlightLocalIds = new Set<string>();
     private readonly agentQueueDeliveredLocalIds = new Set<string>();
     private readonly providerAcceptedUserMessageLocalIdsAwaitingSeq = new Set<string>();
     private readonly passiveCommittedUserMessageLocalIds = new Set<string>();
     private readonly committedLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private readonly agentQueueEchoSuppressedLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    private readonly agentQueueInFlightLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private readonly agentQueueDeliveredLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private readonly providerAcceptedUserMessageLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private readonly passiveCommittedUserMessageLocalIdCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1186,6 +1189,10 @@ export class ApiSessionClient extends EventEmitter {
         return this.agentQueueEchoSuppressedLocalIds.has(localId);
     }
 
+    private hasAgentQueueInFlightLocalId(localId: string): boolean {
+        return this.agentQueueInFlightLocalIds.has(localId);
+    }
+
     private hasAgentQueueDeliveredLocalId(localId: string): boolean {
         return this.agentQueueDeliveredLocalIds.has(localId);
     }
@@ -1213,8 +1220,33 @@ export class ApiSessionClient extends EventEmitter {
         this.agentQueueEchoSuppressedLocalIdCleanupTimers.set(localId, timer);
     }
 
+    private markAgentQueueInFlightLocalId(localId: string): void {
+        if (!localId) return;
+        this.agentQueueInFlightLocalIds.add(localId);
+        const existingTimer = this.agentQueueInFlightLocalIdCleanupTimers.get(localId) ?? null;
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+        const timer = setTimeout(() => {
+            this.agentQueueInFlightLocalIdCleanupTimers.delete(localId);
+            this.agentQueueInFlightLocalIds.delete(localId);
+        }, configuration.transcriptRecoveryMaxWaitMs);
+        timer.unref?.();
+        this.agentQueueInFlightLocalIdCleanupTimers.set(localId, timer);
+    }
+
+    private clearAgentQueueInFlightLocalId(localId: string): void {
+        this.agentQueueInFlightLocalIds.delete(localId);
+        const timer = this.agentQueueInFlightLocalIdCleanupTimers.get(localId) ?? null;
+        if (timer) {
+            clearTimeout(timer);
+            this.agentQueueInFlightLocalIdCleanupTimers.delete(localId);
+        }
+    }
+
     private markAgentQueueDeliveredLocalId(localId: string): void {
         if (!localId) return;
+        this.clearAgentQueueInFlightLocalId(localId);
         this.agentQueueDeliveredLocalIds.add(localId);
         const existingTimer = this.agentQueueDeliveredLocalIdCleanupTimers.get(localId) ?? null;
         if (existingTimer) {
@@ -1430,8 +1462,11 @@ export class ApiSessionClient extends EventEmitter {
                 hasAgentQueueEchoSuppressedLocalId: (localId) => this.hasAgentQueueEchoSuppressedLocalId(localId),
                 hasPassiveCommittedUserMessageLocalId: (localId) => this.hasPassiveCommittedUserMessageLocalId(localId),
                 markAgentQueueEchoSuppressedLocalId: (localId) => this.markAgentQueueEchoSuppressedLocalId(localId),
+                hasAgentQueueInFlightLocalId: (localId) => this.hasAgentQueueInFlightLocalId(localId),
+                markAgentQueueInFlightLocalId: (localId) => this.markAgentQueueInFlightLocalId(localId),
                 hasAgentQueueDeliveredLocalId: (localId) => this.hasAgentQueueDeliveredLocalId(localId),
                 markAgentQueueDeliveredLocalId: (localId) => this.markAgentQueueDeliveredLocalId(localId),
+                deferAgentQueueDeliveryProofToProviderAcceptance: this.deliveredUserMessageWatermarkDeferredToProviderAcceptance,
                 hasPendingQueueMaterializedLocalId: (localId) => this.hasPendingQueueMaterializedLocalId(localId),
                 deleteMaterializedLocalId: (localId) => this.deleteMaterializedLocalId(localId),
                 pendingMessageCallback: this.pendingMessageCallback,
@@ -2766,6 +2801,10 @@ export class ApiSessionClient extends EventEmitter {
         // Deliver immediately to the agent queue: this RPC is a prompt input, not a passive transcript write.
         // Repeated RPC attempts with the same localId still commit through the transcript path below,
         // but only the first attempt should feed the running agent within the recovery window.
+        //
+        // Claude unified sessions defer durable proof until provider acceptance. For those sessions,
+        // local queue handoff is only in-flight custody: it dedupes local echoes but must not become
+        // "delivered" until the terminal/provider accepts the batch.
         const prompt = {
             role: 'user',
             content: { type: 'text', text },
@@ -2773,11 +2812,15 @@ export class ApiSessionClient extends EventEmitter {
             meta,
             createdAt: Date.now(),
         } satisfies UserMessage;
-        if (!this.hasAgentQueueDeliveredLocalId(localId)) {
+        if (!this.hasAgentQueueDeliveredLocalId(localId) && !this.hasAgentQueueInFlightLocalId(localId)) {
             // Mark before invoking the callback: the runner may synchronously re-enter session
             // handling and observe a transcript echo for this same localId before this RPC returns.
             this.markAgentQueueEchoSuppressedLocalId(localId);
-            this.markAgentQueueDeliveredLocalId(localId);
+            if (this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) {
+                this.markAgentQueueInFlightLocalId(localId);
+            } else {
+                this.markAgentQueueDeliveredLocalId(localId);
+            }
             if (this.pendingMessageCallback) {
                 this.pendingMessageCallback(prompt, { seq: null });
             } else {
@@ -3168,6 +3211,7 @@ export class ApiSessionClient extends EventEmitter {
         let highestAcceptedSeq = typeof seq === 'number' ? seq : null;
 
         for (const localId of localIds) {
+            this.markAgentQueueDeliveredLocalId(localId);
             const committedSeq = this.committedUserMessageSeqTracker.get(localId);
             if (committedSeq !== null) {
                 highestAcceptedSeq = Math.max(highestAcceptedSeq ?? -1, committedSeq);
@@ -3467,6 +3511,7 @@ export class ApiSessionClient extends EventEmitter {
         this.pendingQueueMaterializedLocalIds.clear();
         this.committedUserMessageSeqTracker.clear();
         this.agentQueueEchoSuppressedLocalIds.clear();
+        this.agentQueueInFlightLocalIds.clear();
         this.agentQueueDeliveredLocalIds.clear();
         this.providerAcceptedUserMessageLocalIdsAwaitingSeq.clear();
         this.passiveCommittedUserMessageLocalIds.clear();
@@ -3479,6 +3524,10 @@ export class ApiSessionClient extends EventEmitter {
             clearTimeout(timer);
         }
         this.agentQueueEchoSuppressedLocalIdCleanupTimers.clear();
+        for (const timer of this.agentQueueInFlightLocalIdCleanupTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.agentQueueInFlightLocalIdCleanupTimers.clear();
         for (const timer of this.agentQueueDeliveredLocalIdCleanupTimers.values()) {
             clearTimeout(timer);
         }

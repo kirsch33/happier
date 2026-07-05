@@ -87,6 +87,48 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     await expect(startResult).rejects.toBe(error);
   });
 
+  it('keeps the running pump alive when the input consumer transiently returns null', async () => {
+    vi.useFakeTimers();
+    try {
+      const waitForNextInput = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          message: 'after transient null',
+          mode: undefined,
+          isolate: false,
+          hash: 'h-after-null',
+        })
+        .mockResolvedValue(null);
+      const enqueueUiMessage = vi.fn().mockResolvedValue(undefined);
+      const drainWhenSafe = vi.fn().mockResolvedValue(undefined);
+      const pump = createClaudeUnifiedPendingQueuePump({
+        inputConsumer: { waitForNextInput },
+        arbiter: { enqueueUiMessage, drainWhenSafe },
+        nullInputRetryDelayMs: 1,
+      });
+
+      const running = pump.start({ abortSignal: new AbortController().signal });
+
+      await vi.waitFor(() => {
+        expect(waitForNextInput).toHaveBeenCalledTimes(1);
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => {
+        expect(enqueueUiMessage).toHaveBeenCalledWith(expect.objectContaining({
+          message: 'after transient null',
+        }));
+      });
+
+      pump.dispose();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(running).resolves.toBeUndefined();
+      expect(drainWhenSafe).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('hands an already-consumed batch back instead of dropping it when aborted during the input wait (silent queue-swallow fix)', async () => {
     const abortController = new AbortController();
     let resolveInput!: (value: { message: string; mode: undefined; isolate: boolean; hash: string }) => void;
