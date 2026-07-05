@@ -5,6 +5,7 @@ import { delayUnrefAbortable } from '@/utils/time';
 import { ClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
 import type { ClaudeUnifiedStartableDisposable } from './_types';
 import { emitClaudeUnifiedHostDead, type ClaudeUnifiedTelemetrySink } from './telemetry';
+import { normalizeClaudeUnifiedHostLiveness } from './normalizeClaudeUnifiedHostLiveness';
 
 const DEFAULT_HOST_LIVENESS_POLL_MS = 30_000;
 const DEFAULT_HOST_LIVENESS_CONFIRM_DEAD_POLL_MS = 1_000;
@@ -32,29 +33,6 @@ function createProbeFailureLiveness(
     probeInconclusive: true,
     paneScreenDumpError: sanitizeTerminalHostDiagnosticText(message),
     observedAt,
-  };
-}
-
-function isReturnedToShellCommand(command: string | undefined): boolean {
-  const normalized = (command ?? '').trim().toLowerCase();
-  return normalized === 'bash'
-    || normalized === 'sh'
-    || normalized === 'zsh'
-    || normalized === 'fish'
-    || normalized === 'pwsh'
-    || normalized === 'powershell'
-    || normalized === 'powershell.exe'
-    || normalized === 'cmd'
-    || normalized === 'cmd.exe';
-}
-
-function normalizeClaudeUnifiedHostLiveness(liveness: TerminalHostLiveness): TerminalHostLiveness {
-  if (!liveness.paneAlive || !isReturnedToShellCommand(liveness.paneCurrentCommand)) return liveness;
-  return {
-    ...liveness,
-    paneAlive: false,
-    paneDead: true,
-    paneScreenDumpError: `terminal host returned to shell (${liveness.paneCurrentCommand})`,
   };
 }
 

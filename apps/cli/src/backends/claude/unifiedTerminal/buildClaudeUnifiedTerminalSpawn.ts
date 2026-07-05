@@ -67,12 +67,31 @@ export class ClaudeUnifiedTerminalManagedSettingsOptionError extends Error {
   }
 }
 
+export class ClaudeUnifiedTerminalRootBypassRequiresSandboxError extends Error {
+  readonly code = 'claude_unified_terminal_root_bypass_requires_sandbox';
+  readonly permissionMode: string;
+
+  constructor(permissionMode: string) {
+    super('Claude Code bypass permissions cannot be used as root unless IS_SANDBOX=1 is present in the Claude environment.');
+    this.name = 'ClaudeUnifiedTerminalRootBypassRequiresSandboxError';
+    this.permissionMode = permissionMode;
+  }
+}
+
 export function isClaudeUnifiedTerminalManagedSettingsOptionError(
   error: unknown,
 ): error is ClaudeUnifiedTerminalManagedSettingsOptionError {
   return Boolean(error)
     && typeof error === 'object'
     && (error as { code?: unknown }).code === 'claude_unified_terminal_managed_settings_option';
+}
+
+export function isClaudeUnifiedTerminalRootBypassRequiresSandboxError(
+  error: unknown,
+): error is ClaudeUnifiedTerminalRootBypassRequiresSandboxError {
+  return Boolean(error)
+    && typeof error === 'object'
+    && (error as { code?: unknown }).code === 'claude_unified_terminal_root_bypass_requires_sandbox';
 }
 
 function chmodPrivateFileIfSupported(path: string): void {
@@ -98,6 +117,7 @@ type ClaudeUnifiedTerminalSpawnDeps = Readonly<{
     args: readonly string[];
     env: NodeJS.ProcessEnv;
   }>) => CommandInvocation;
+  isRootUser: () => boolean;
 }>;
 
 type ClaudeUnifiedTerminalSpawnInput<Mode extends EnhancedMode = EnhancedMode> = Readonly<{
@@ -299,6 +319,10 @@ function resolveStatuslineOverlaySettings<Mode extends EnhancedMode>(params: Rea
 function buildClaudeArgs<Mode extends EnhancedMode>(
   input: ClaudeUnifiedTerminalSpawnInput<Mode>,
   statuslineSettings: ClaudeStatuslineOverlaySettings | undefined,
+  runtime: Readonly<{
+    env: Readonly<Record<string, string>>;
+    isRootUser: boolean;
+  }>,
 ): string[] {
   const args: string[] = [];
   const terminalOptions = resolveClaudeTerminalCliOptions({
@@ -335,9 +359,15 @@ function buildClaudeArgs<Mode extends EnhancedMode>(
     args.push('--mcp-config', input.happierMcpConfigJson.trim());
   }
 
-  args.push('--allow-dangerously-skip-permissions');
-
   const permissionMode = resolveClaudeSdkPermissionModeFromEnhancedMode(input.first.mode);
+  const sandboxEnabled = runtime.env.IS_SANDBOX === '1';
+  const canUseDangerousPermissionBypass = !runtime.isRootUser || sandboxEnabled;
+  if (canUseDangerousPermissionBypass) {
+    args.push('--allow-dangerously-skip-permissions');
+  }
+  if (permissionMode === 'bypassPermissions' && !canUseDangerousPermissionBypass) {
+    throw new ClaudeUnifiedTerminalRootBypassRequiresSandboxError(permissionMode);
+  }
   if (permissionMode !== 'default') {
     args.push('--permission-mode', permissionMode);
   }
@@ -464,6 +494,9 @@ function defaultDeps(inputDeps: Partial<ClaudeUnifiedTerminalSpawnDeps> | undefi
         args: [...params.args],
         env: params.env,
       })),
+    isRootUser:
+      inputDeps?.isRootUser
+      ?? (() => typeof process.getuid === 'function' && process.getuid() === 0),
   };
 }
 
@@ -477,7 +510,7 @@ export async function buildClaudeUnifiedTerminalSpawn<Mode extends EnhancedMode 
   // EFFECTIVE config root of the spawned process (CLAUDE_CONFIG_DIR / HOME in the child env).
   const env = buildClaudeEnv(input.envOverlay);
   const statuslineSettings = resolveStatuslineOverlaySettings({ input, deps, env });
-  const args = buildClaudeArgs(input, statuslineSettings);
+  const args = buildClaudeArgs(input, statuslineSettings, { env, isRootUser: deps.isRootUser() });
 
   const nodeExecutable = await deps.ensureClaudeJsRuntimeExecutable();
   if (!nodeExecutable) {

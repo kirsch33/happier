@@ -3,6 +3,8 @@ import type { TerminalHostAdapter, TerminalHostHandle } from '@/integrations/ter
 import { delayUnrefAbortable } from '@/utils/time';
 
 import type { ClaudeUnifiedInputArbiter, ClaudeUnifiedStartableDisposable } from './_types';
+import { ClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
+import { normalizeClaudeUnifiedHostLiveness } from './normalizeClaudeUnifiedHostLiveness';
 import {
   isClaudeScreenReadyForInput,
   parseClaudeScreenState,
@@ -222,7 +224,7 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
       const observedAtMs = nowMs();
       let liveness;
       try {
-        liveness = await opts.hostAdapter.evaluateLiveness(opts.handle);
+        liveness = normalizeClaudeUnifiedHostLiveness(await opts.hostAdapter.evaluateLiveness(opts.handle));
       } catch {
         if (!(await continueAfterDelay())) return;
         continue;
@@ -230,6 +232,9 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
       if (disposed || abortSignal.aborted) return;
       lastLivenessPaneAlive = liveness.paneAlive;
       if (!liveness.paneAlive) {
+        if (liveness.paneDead) {
+          throw new ClaudeUnifiedTerminalHostDeadError(liveness);
+        }
         if (!(await continueAfterDelay())) return;
         continue;
       }

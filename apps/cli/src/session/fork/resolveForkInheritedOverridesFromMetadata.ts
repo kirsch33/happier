@@ -13,6 +13,7 @@ import {
 } from '@happier-dev/agents';
 
 type ForkInheritedSpawnOverrides = {
+  profileId?: string;
   permissionMode?: PermissionMode;
   permissionModeUpdatedAt?: number;
   agentModeId?: string;
@@ -25,6 +26,7 @@ type ForkInheritedSpawnOverrides = {
 
 type ForkInheritedMetadataOverrides = Pick<
   Metadata,
+  | 'profileId'
   | 'permissionMode'
   | 'permissionModeUpdatedAt'
   | 'modelOverrideV1'
@@ -186,6 +188,11 @@ export function resolveForkInheritedOverridesFromMetadata(
 } {
   const spawn: ForkInheritedSpawnOverrides = {};
   const metadataOverrides: ForkInheritedMetadataOverrides = {};
+
+  if (isNonEmptyString(metadata?.profileId)) {
+    spawn.profileId = metadata.profileId.trim();
+    metadataOverrides.profileId = metadata.profileId.trim();
+  }
 
   const permission = resolvePermissionIntentFromSessionMetadata(metadata);
   if (permission && isPermissionMode(permission.intent)) {

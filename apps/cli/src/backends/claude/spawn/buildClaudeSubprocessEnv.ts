@@ -31,6 +31,7 @@ export function buildClaudeSubprocessEnv(params?: Readonly<{
     'TMPDIR',
     'TEMP',
     'TMP',
+    'IS_SANDBOX',
     'SSH_AUTH_SOCK',
     'HTTP_PROXY',
     'HTTPS_PROXY',

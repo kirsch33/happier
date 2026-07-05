@@ -7,6 +7,7 @@ import {
   createClaudeUnifiedTerminalReadinessBridge,
   isClaudeUnifiedTerminalReadinessTimeoutError,
 } from './createClaudeUnifiedTerminalReadinessBridge';
+import { ClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
 
 const handle: TerminalHostHandle = {
   kind: 'zellij',
@@ -181,6 +182,46 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
       observedAtMs: 10,
     });
 
+    bridge.dispose();
+  });
+
+  it('fails startup immediately when the terminal host has returned to shell', async () => {
+    vi.useFakeTimers();
+    const arbiter = createArbiter();
+    const evaluateLiveness = vi.fn().mockResolvedValue({
+      paneAlive: true,
+      paneCurrentCommand: 'zsh',
+      observedAt: 0,
+    });
+    const captureInputState = vi.fn();
+    const bridge = createClaudeUnifiedTerminalReadinessBridge({
+      hostAdapter: { evaluateLiveness, captureInputState },
+      handle: tmuxHandle,
+      arbiter,
+      pollIntervalMs: 10,
+      timeoutMs: 100,
+      nowMs: () => 0,
+    });
+
+    const started = Promise.resolve(bridge.start({ abortSignal: new AbortController().signal }))
+      .then(
+        () => null,
+        (error) => error,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+
+    const error = await started;
+    expect(error).toBeInstanceOf(ClaudeUnifiedTerminalHostDeadError);
+    expect(error).toMatchObject({
+      code: 'claude_unified_terminal_host_dead',
+      liveness: {
+        paneAlive: false,
+        paneDead: true,
+        paneCurrentCommand: 'zsh',
+        paneScreenDumpError: 'terminal host returned to shell (zsh)',
+      },
+    });
+    expect(captureInputState).not.toHaveBeenCalled();
     bridge.dispose();
   });
 

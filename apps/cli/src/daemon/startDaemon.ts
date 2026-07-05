@@ -151,6 +151,10 @@ import { waitForInitialCredentials } from './startup/waitForInitialCredentials';
 import { resolveDaemonDiagnosticSubsystemGates } from './startup/diagnosticSubsystemGates';
 import { waitForSessionWebhook } from './spawn/waitForSessionWebhook';
 import { resolveSpawnChildEnvironment } from './spawn/resolveSpawnChildEnvironment';
+import {
+  readSpawnProfileId,
+  resolveProfileEnvironmentVariablesForSpawn,
+} from './spawn/resolveProfileEnvironmentVariablesForSpawn';
 import { buildSpawnChildProcessEnv } from './spawn/buildSpawnChildProcessEnv';
 import { resolveStackProcessKindOverrideForSessionSpawn } from './spawn/resolveStackProcessKindOverrideForSessionSpawn';
 import { createSpawnConcurrencyGate } from './spawn/createSpawnConcurrencyGate';
@@ -360,6 +364,19 @@ function resolveCatalogAgentIdFromBackendTarget(target: BackendTargetRefV1 | und
     return 'customAcp';
   }
   return resolveCatalogAgentId(readBuiltInCatalogAgentIdFromBackendTarget(target));
+}
+
+async function readAccountSettingsForProfileEnv(): Promise<Readonly<Record<string, unknown>> | null> {
+  const snapshotSettings = getActiveAccountSettingsSnapshot()?.settings;
+  if (snapshotSettings && typeof snapshotSettings === 'object') {
+    return snapshotSettings as Readonly<Record<string, unknown>>;
+  }
+  try {
+    const settings = await readSettings();
+    return settings as unknown as Readonly<Record<string, unknown>>;
+  } catch {
+    return null;
+  }
 }
 
 function resolveTrackedSessionCatalogAgentIdFromMetadataSource(
@@ -2741,9 +2758,35 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     : {}),
                 };
 
+                let profileEnvironmentVariables = environmentVariablesValidation.env;
+                try {
+                  profileEnvironmentVariables = await resolveProfileEnvironmentVariablesForSpawn({
+                    options: { ...effectiveSpawnOptionsBase, directory: resolvedDirectory },
+                    providedEnvironmentVariables: environmentVariablesValidation.env,
+                    credentials,
+                    processEnv: process.env,
+                    accountSettings: await readAccountSettingsForProfileEnv(),
+                    logDebug: (message) => logger.debug(message),
+                  });
+                } catch (error) {
+                  const errorMessage =
+                    error instanceof Error
+                      ? `Profile environment resolution failed: ${error.message}`
+                      : 'Profile environment resolution failed.';
+                  logger.warn('[DAEMON RUN] Profile environment resolution failed before spawn', {
+                    profileId: readSpawnProfileId(effectiveSpawnOptionsBase),
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                  return {
+                    type: 'error',
+                    errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+                    errorMessage,
+                  };
+                }
+
                 const spawnEnvironment = await resolveSpawnChildEnvironment({
                   options: { ...effectiveSpawnOptionsBase, directory: resolvedDirectory },
-                  profileEnvironmentVariables: environmentVariablesValidation.env,
+                  profileEnvironmentVariables,
                   daemonSpawnHooks,
                   processEnv: process.env,
                   logDebug: (message) => logger.debug(message),

@@ -1,7 +1,7 @@
 import { readFile, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR } from '@/daemon/spawn/spawnExplicitEnvKeysMarker';
 import {
@@ -11,10 +11,12 @@ import {
 
 import {
   buildClaudeUnifiedTerminalSpawn,
+  ClaudeUnifiedTerminalRootBypassRequiresSandboxError,
   type ClaudeUnifiedTerminalSpawn,
 } from './buildClaudeUnifiedTerminalSpawn';
 
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+const originalIsSandbox = process.env.IS_SANDBOX;
 
 type TerminalLaunchSpecFixture = Readonly<{
   command?: string;
@@ -70,9 +72,18 @@ async function readLaunchSpecFromSpawn(spawn: ClaudeUnifiedTerminalSpawn): Promi
 }
 
 describe('buildClaudeUnifiedTerminalSpawn', () => {
+  beforeEach(() => {
+    process.env.IS_SANDBOX = '1';
+  });
+
   afterEach(() => {
     if (originalPlatformDescriptor) {
       Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+    }
+    if (originalIsSandbox === undefined) {
+      delete process.env.IS_SANDBOX;
+    } else {
+      process.env.IS_SANDBOX = originalIsSandbox;
     }
   });
 
@@ -102,6 +113,82 @@ describe('buildClaudeUnifiedTerminalSpawn', () => {
     expect(launchArgs).not.toContain('bypassPermissions');
   });
 
+  it('keeps the managed allow flag for non-root sessions even when IS_SANDBOX is absent', async () => {
+    await withPatchedEnv({ IS_SANDBOX: undefined }, async () => {
+      const spawn = await buildClaudeUnifiedTerminalSpawn({
+        path: '/workspace/project',
+        first: {
+          message: 'hello',
+          mode: {
+            permissionMode: 'default',
+          },
+        },
+        deps: {
+          resolveClaudeCliPath: () => '/usr/local/bin/claude',
+          isClaudeCliJavaScriptFile: () => false,
+          ensureClaudeJsRuntimeExecutable: async () => '/managed/node',
+          claudeLocalLauncherPath: '/happier/scripts/claude_local_launcher.cjs',
+          terminalLaunchSpecRunnerPath: '/happier/scripts/terminal_launch_spec_runner.cjs',
+          resolveCommandInvocation: ({ command, args }) => ({ command, args: [...args] }),
+          isRootUser: () => false,
+        },
+      });
+
+      const launchSpec = await readLaunchSpecFromSpawn(spawn);
+      expect(launchSpec.args?.filter((arg) => arg === '--allow-dangerously-skip-permissions')).toHaveLength(1);
+    });
+  });
+
+  it('omits the managed allow flag for root default sessions when IS_SANDBOX is absent', async () => {
+    await withPatchedEnv({ IS_SANDBOX: undefined }, async () => {
+      const spawn = await buildClaudeUnifiedTerminalSpawn({
+        path: '/workspace/project',
+        first: {
+          message: 'hello',
+          mode: {
+            permissionMode: 'default',
+          },
+        },
+        deps: {
+          resolveClaudeCliPath: () => '/usr/local/bin/claude',
+          isClaudeCliJavaScriptFile: () => false,
+          ensureClaudeJsRuntimeExecutable: async () => '/managed/node',
+          claudeLocalLauncherPath: '/happier/scripts/claude_local_launcher.cjs',
+          terminalLaunchSpecRunnerPath: '/happier/scripts/terminal_launch_spec_runner.cjs',
+          resolveCommandInvocation: ({ command, args }) => ({ command, args: [...args] }),
+          isRootUser: () => true,
+        },
+      });
+
+      const launchSpec = await readLaunchSpecFromSpawn(spawn);
+      expect(launchSpec.args).not.toContain('--allow-dangerously-skip-permissions');
+      expect(launchSpec.args).not.toContain('--permission-mode');
+    });
+  });
+
+  it('fails before launching root bypass sessions when IS_SANDBOX is absent', async () => {
+    await withPatchedEnv({ IS_SANDBOX: undefined }, async () => {
+      await expect(buildClaudeUnifiedTerminalSpawn({
+        path: '/workspace/project',
+        first: {
+          message: 'hello',
+          mode: {
+            permissionMode: 'yolo',
+          },
+        },
+        deps: {
+          resolveClaudeCliPath: () => '/usr/local/bin/claude',
+          isClaudeCliJavaScriptFile: () => false,
+          ensureClaudeJsRuntimeExecutable: async () => '/managed/node',
+          claudeLocalLauncherPath: '/happier/scripts/claude_local_launcher.cjs',
+          terminalLaunchSpecRunnerPath: '/happier/scripts/terminal_launch_spec_runner.cjs',
+          resolveCommandInvocation: ({ command, args }) => ({ command, args: [...args] }),
+          isRootUser: () => true,
+        },
+      })).rejects.toBeInstanceOf(ClaudeUnifiedTerminalRootBypassRequiresSandboxError);
+    });
+  });
+
   it('starts yolo sessions in bypass mode while still deduping the managed allow flag', async () => {
     const spawn = await buildClaudeUnifiedTerminalSpawn({
       path: '/workspace/project',
@@ -124,6 +211,7 @@ describe('buildClaudeUnifiedTerminalSpawn', () => {
 
     const launchSpec = await readLaunchSpecFromSpawn(spawn);
     const launchArgs = launchSpec.args ?? [];
+    expect(launchSpec.env?.IS_SANDBOX).toBe('1');
     expect(launchArgs.filter((arg) => arg === '--allow-dangerously-skip-permissions')).toHaveLength(1);
     expect(launchArgs.slice(launchArgs.indexOf('--permission-mode'), launchArgs.indexOf('--permission-mode') + 2)).toEqual([
       '--permission-mode',

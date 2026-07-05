@@ -7,6 +7,7 @@ import { resolveForkInheritedOverridesFromMetadata } from './resolveForkInherite
 describe('resolveForkInheritedOverridesFromMetadata', () => {
   it('returns spawn seeds plus metadata overrides for valid parent overrides', () => {
     const result = resolveForkInheritedOverridesFromMetadata({
+      profileId: ' greatwhiteclaude ',
       permissionMode: 'yolo',
       permissionModeUpdatedAt: 123,
       modelOverrideV1: { v: 1, updatedAt: 456, modelId: 'gpt-test' },
@@ -105,6 +106,7 @@ describe('resolveForkInheritedOverridesFromMetadata', () => {
     } as any);
 
     expect(result.spawn).toEqual({
+      profileId: 'greatwhiteclaude',
       permissionMode: 'yolo',
       permissionModeUpdatedAt: 123,
       agentModeId: 'plan',
@@ -126,6 +128,7 @@ describe('resolveForkInheritedOverridesFromMetadata', () => {
     });
 
     expect(result.metadata).toEqual({
+      profileId: 'greatwhiteclaude',
       permissionMode: 'yolo',
       permissionModeUpdatedAt: 123,
       modelOverrideV1: { v: 1, updatedAt: 456, modelId: 'gpt-test' },

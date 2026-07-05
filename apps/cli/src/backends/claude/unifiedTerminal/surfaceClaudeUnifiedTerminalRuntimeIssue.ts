@@ -2,7 +2,10 @@ import { surfacePrimarySessionRuntimeIssue } from '@/agent/runtime/session/error
 import { isTerminalHostStartupError } from '@/integrations/terminalHost/errors';
 import { logger } from '@/ui/logger';
 
-import { isClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
+import {
+  isClaudeUnifiedTerminalManagedSettingsOptionError,
+  isClaudeUnifiedTerminalRootBypassRequiresSandboxError,
+} from './buildClaudeUnifiedTerminalSpawn';
 import { isClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
 import { isClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
 import { isClaudeUnifiedTerminalTerminalInjectionFailureError } from './terminalInjectionFailureError';
@@ -14,7 +17,8 @@ export function isClaudeUnifiedTerminalRuntimeIssueError(error: unknown): boolea
     || isClaudeUnifiedTerminalTerminalInjectionFailureError(error)
     || isClaudeUnifiedTerminalReadinessTimeoutError(error)
     || isTerminalHostStartupError(error)
-    || isClaudeUnifiedTerminalManagedSettingsOptionError(error);
+    || isClaudeUnifiedTerminalManagedSettingsOptionError(error)
+    || isClaudeUnifiedTerminalRootBypassRequiresSandboxError(error);
 }
 
 export async function surfaceClaudeUnifiedTerminalRuntimeIssue(params: Readonly<{
