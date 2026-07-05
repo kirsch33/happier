@@ -44,6 +44,22 @@ describe('createClaudeOwnComposerTextLog (lane X, incident cmq8y3nlx user_draft 
     expect(log.matches(longPrompt.slice(0, 280))).toBe(false);
   });
 
+  it('matches a recent long visible fragment from an interrupted own injection', () => {
+    let nowMs = 10_000;
+    const log = createClaudeOwnComposerTextLog({
+      nowMs: () => nowMs,
+      prefixResidueWindowMs: 5_000,
+    });
+    const longPrompt = `intro ${'alpha '.repeat(40)}middle ${'bravo '.repeat(40)}tail`;
+    const visibleFragment = longPrompt.slice(120, 430);
+    log.record(longPrompt);
+
+    expect(log.matches(visibleFragment)).toBe(true);
+
+    nowMs += 5_001;
+    expect(log.matches(visibleFragment)).toBe(false);
+  });
+
   it('is bounded: oldest entries are evicted beyond the limit', () => {
     const log = createClaudeOwnComposerTextLog({ limit: 2 });
     log.record('one');

@@ -30,6 +30,10 @@ export type ClaudeUserAuthorizedComposerSubmitResult =
   | Readonly<{ status: 'unsupported'; reason?: string | undefined }>
   | Readonly<{ status: 'failed'; reason: string; screen?: ClaudeScreenState | undefined }>;
 
+export type ClaudeControllerOwnedComposerSubmitResult =
+  | ClaudeUserAuthorizedComposerSubmitResult
+  | Readonly<{ status: 'not_owned'; screen: ClaudeScreenState; draftLength: number }>;
+
 type ComposerSubmitScreenClassification =
   | Readonly<{ kind: 'empty'; screen: ClaudeScreenState }>
   | Readonly<{ kind: 'submittable_draft'; screen: ClaudeScreenState }>
@@ -117,11 +121,12 @@ function looksLikeUneditablePlainSuggestionAfterNoop(params: Readonly<{
   );
 }
 
-export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
+async function submitClaudeComposerDraft(params: Readonly<{
   port: TerminalControlPort;
   wait?: ((ms: number) => Promise<void>) | undefined;
   settleMs?: number | undefined;
-}>): Promise<ClaudeUserAuthorizedComposerSubmitResult> {
+  ownsDraft?: ((draft: string) => boolean) | undefined;
+}>): Promise<ClaudeControllerOwnedComposerSubmitResult> {
   const settleMs = Math.max(
     0,
     Math.trunc(params.settleMs ?? DEFAULT_USER_AUTHORIZED_COMPOSER_SUBMIT_SETTLE_MS),
@@ -149,6 +154,13 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
   }
 
   const draft = initialClassification.screen.composerContent ?? '';
+  if (params.ownsDraft && !params.ownsDraft(draft)) {
+    return {
+      status: 'not_owned',
+      screen: initialClassification.screen,
+      draftLength: draft.length,
+    };
+  }
 
   const moveToEndResult = sendResultToFailure(await params.port.sendSpecialKey('CtrlE'));
   if (moveToEndResult && moveToEndResult.kind !== 'unsupported') {
@@ -203,4 +215,25 @@ export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
     return { status: 'failed', reason: 'submit_failed', screen: afterFinalEnter.state };
   }
   return { status: 'submitted', screen: initialClassification.screen };
+}
+
+export async function submitUserAuthorizedClaudeComposerDraft(params: Readonly<{
+  port: TerminalControlPort;
+  wait?: ((ms: number) => Promise<void>) | undefined;
+  settleMs?: number | undefined;
+}>): Promise<ClaudeUserAuthorizedComposerSubmitResult> {
+  const result = await submitClaudeComposerDraft(params);
+  if (result.status === 'not_owned') {
+    return { status: 'failed', reason: 'unexpected_not_owned', screen: result.screen };
+  }
+  return result;
+}
+
+export async function submitControllerOwnedClaudeComposerDraft(params: Readonly<{
+  port: TerminalControlPort;
+  ownsDraft: (draft: string) => boolean;
+  wait?: ((ms: number) => Promise<void>) | undefined;
+  settleMs?: number | undefined;
+}>): Promise<ClaudeControllerOwnedComposerSubmitResult> {
+  return submitClaudeComposerDraft(params);
 }

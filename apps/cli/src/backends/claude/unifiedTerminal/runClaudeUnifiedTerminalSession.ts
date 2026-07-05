@@ -65,6 +65,7 @@ import {
   createClaudeSettingsGuard,
   createClaudeUnifiedTuiControlController,
   resolveClaudeConfigRootFromEnv,
+  submitControllerOwnedClaudeComposerDraft,
   submitUserAuthorizedClaudeComposerDraft,
   type ClaudeComposerClearRefusalReason,
   type ClaudeComposerSubmitRefusalReason,
@@ -1265,6 +1266,23 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         onSteerAcceptanceArmed: steerWiring.onSteerAcceptanceArmed,
         isCanonicalTurnActive: opts.isCanonicalTurnActive,
         isPromptDeliveryAccepted: opts.isPromptDeliveryAccepted,
+        ...(steerDraftClearPort
+          ? {
+              submitOwnedAmbiguousPromptDraft: async (batch) => {
+                const result = await submitControllerOwnedClaudeComposerDraft({
+                  port: steerDraftClearPort,
+                  ownsDraft: (draft) => ownComposerTextLog.matches(draft),
+                });
+                if (result.status === 'submitted' || result.status === 'already_empty' || result.status === 'not_owned') {
+                  return { status: result.status };
+                }
+                return {
+                  status: result.status,
+                  ...(result.reason !== undefined ? { reason: result.reason } : {}),
+                };
+              },
+            }
+          : {}),
         onInjectionFailure: (failure) => {
           const error = new ClaudeUnifiedTerminalInjectionFailureError(failure);
           if (failure.failureState === 'failed_terminal') {

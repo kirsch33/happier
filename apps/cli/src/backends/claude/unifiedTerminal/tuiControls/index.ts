@@ -26,7 +26,9 @@ export {
   type ClaudeUserAuthorizedComposerClearResult,
 } from './composerClear';
 export {
+  submitControllerOwnedClaudeComposerDraft,
   submitUserAuthorizedClaudeComposerDraft,
+  type ClaudeControllerOwnedComposerSubmitResult,
   type ClaudeComposerSubmitRefusalReason,
   type ClaudeUserAuthorizedComposerSubmitResult,
 } from './composerSubmit';

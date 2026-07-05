@@ -37,13 +37,25 @@ type OwnComposerTextLogEntry = Readonly<{
 function isRecentPrefixResidue(params: Readonly<{
   entry: OwnComposerTextLogEntry;
   normalizedDraft: string;
+  collapsedDraft: string;
   nowMs: number;
   prefixResidueWindowMs: number;
 }>): boolean {
-  return params.normalizedDraft.length >= MIN_PREFIX_RESIDUE_CHARS
-    && params.entry.text.length > params.normalizedDraft.length
-    && params.entry.text.startsWith(params.normalizedDraft)
-    && params.nowMs - params.entry.recordedAtMs <= params.prefixResidueWindowMs;
+  if (
+    params.normalizedDraft.length < MIN_PREFIX_RESIDUE_CHARS
+    || params.entry.text.length <= params.normalizedDraft.length
+    || params.nowMs - params.entry.recordedAtMs > params.prefixResidueWindowMs
+  ) {
+    return false;
+  }
+  // tmux/zellij captures sometimes expose only the visible wrapped middle/tail of Claude's
+  // composer after our Enter did not submit. Treat a long recent fragment as own residue, but
+  // keep the high length and short time window so normal user drafts remain foreign.
+  return params.entry.text.includes(params.normalizedDraft)
+    || params.entry.candidates.some((candidate) => (
+      candidate.length > params.collapsedDraft.length
+      && candidate.includes(params.collapsedDraft)
+    ));
 }
 
 /**
@@ -88,6 +100,7 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
         || isRecentPrefixResidue({
           entry,
           normalizedDraft: normalized,
+          collapsedDraft: collapsed,
           nowMs: referenceMs,
           prefixResidueWindowMs,
         })

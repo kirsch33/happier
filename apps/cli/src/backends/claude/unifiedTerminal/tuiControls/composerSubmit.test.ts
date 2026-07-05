@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { submitUserAuthorizedClaudeComposerDraft } from './composerSubmit';
+import {
+  submitControllerOwnedClaudeComposerDraft,
+  submitUserAuthorizedClaudeComposerDraft,
+} from './composerSubmit';
 import { createFakeControlPort } from './fakeControlPort';
 
 const EMPTY_COMPOSER = [
@@ -269,5 +272,35 @@ describe('submitUserAuthorizedClaudeComposerDraft', () => {
 
     expect(result).toMatchObject({ status: 'failed', reason: 'host_dead:unrecoverable' });
     expect(port.sentKeys).toEqual(['CtrlE', 'Enter']);
+  });
+});
+
+describe('submitControllerOwnedClaudeComposerDraft', () => {
+  it('submits a visible draft only when the controller owns it', async () => {
+    const port = createFakeControlPort({ captures: [idleDraft('owned queued prompt'), idleDraft('owned queued prompt'), EMPTY_COMPOSER] });
+
+    const result = await submitControllerOwnedClaudeComposerDraft({
+      port,
+      ownsDraft: (draft) => draft === 'owned queued prompt',
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result.status).toBe('submitted');
+    expect(port.sentKeys).toEqual(['CtrlE', 'Enter']);
+  });
+
+  it('does not press any keys for a foreign draft', async () => {
+    const port = createFakeControlPort({ captures: [idleDraft('human typed draft')] });
+
+    const result = await submitControllerOwnedClaudeComposerDraft({
+      port,
+      ownsDraft: (draft) => draft === 'owned queued prompt',
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'not_owned', draftLength: 'human typed draft'.length });
+    expect(port.sentKeys).toEqual([]);
   });
 });

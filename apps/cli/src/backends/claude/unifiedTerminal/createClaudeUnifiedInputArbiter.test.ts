@@ -1155,14 +1155,59 @@ describe('createClaudeUnifiedInputArbiter', () => {
 
     nowMs += 40;
     await vi.advanceTimersByTimeAsync(40);
-    await vi.waitFor(() => {
-      expect(injectPrompt).toHaveBeenCalledTimes(2);
-    });
+    await vi.advanceTimersToNextTimerAsync();
+    expect(injectPrompt).toHaveBeenCalledTimes(2);
     expect(arbiter.snapshot()).toMatchObject({
       queuedCount: 1,
       lastFailureReason: null,
       headInputState: 'awaiting_provider_acceptance',
     });
+  });
+
+  it('submits an owned composer draft after an ambiguous provider timeout before retrying paste', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const accepted: string[] = [];
+    const injectedNotifications: string[] = [];
+    const injectPrompt = vi.fn(async (batch) => ({ status: 'injected' as const, at: nowMs, bytesWritten: batch.message.length }));
+    const submitOwnedAmbiguousPromptDraft = vi.fn(async () => ({ status: 'submitted' as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      submitOwnedAmbiguousPromptDraft,
+      onPromptInjected: async (batch) => {
+        injectedNotifications.push(batch.message);
+      },
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+    });
+
+    await arbiter.enqueueUiMessage({ message: 'owned draft stuck in Claude composer', origin: { kind: 'ui_pending' } });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(submitOwnedAmbiguousPromptDraft).not.toHaveBeenCalled();
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersToNextTimerAsync();
+
+    expect(submitOwnedAmbiguousPromptDraft).toHaveBeenCalledTimes(1);
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(injectedNotifications).toEqual(['owned draft stuck in Claude composer']);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: null,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
+    expect(accepted).toEqual(['owned draft stuck in Claude composer']);
   });
 
   it('terminalizes a host-level injected prompt when provider confirmation never arrives after retry', async () => {

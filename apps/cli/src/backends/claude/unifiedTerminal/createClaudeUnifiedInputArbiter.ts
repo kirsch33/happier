@@ -24,6 +24,10 @@ type PendingProviderAcceptance<Mode> = Readonly<{
   acceptance: ClaudeUnifiedPromptAcceptance;
 }>;
 
+type OwnedAmbiguousPromptDraftSubmitResult =
+  | Readonly<{ status: 'submitted' | 'already_empty' | 'not_owned' }>
+  | Readonly<{ status: 'refused' | 'unsupported' | 'failed'; reason?: string | undefined }>;
+
 const DEFAULT_INJECTION_RETRY_LIMIT = 3;
 const DEFAULT_INJECTION_RETRY_BASE_DELAY_MS = 250;
 const DEFAULT_PROVIDER_ACCEPTANCE_TIMEOUT_MS = 5_000;
@@ -110,6 +114,12 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
    * head so a provider-confirmed prompt cannot be injected a second time.
    */
   isPromptDeliveryAccepted?: ((batch: ClaudeUnifiedPromptBatch<Mode>) => boolean) | undefined;
+  /**
+   * Recovery for an ambiguous provider-acceptance timeout where the prompt was written into
+   * Claude's composer but Enter did not actually submit it. This must submit only drafts proven
+   * to be controller-owned; genuine user drafts must return `not_owned` and remain untouched.
+   */
+  submitOwnedAmbiguousPromptDraft?: ((batch: ClaudeUnifiedPromptBatch<Mode>) => Promise<OwnedAmbiguousPromptDraftSubmitResult>) | undefined;
 }>): ClaudeUnifiedInputArbiter<Mode> {
   const queue: Array<ClaudeUnifiedPromptBatch<Mode>> = [];
   const nowMs = opts.nowMs ?? Date.now;
@@ -420,6 +430,63 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     providerAcceptanceTimer.unref?.();
   }
 
+  async function observeSubmittedPrompt(
+    batch: ClaudeUnifiedPromptBatch<Mode>,
+    acceptance: ClaudeUnifiedPromptAcceptance,
+    result: Extract<TerminalInputInjectionResult, { status: 'injected' }>,
+  ): Promise<void> {
+    lastDeferredReason = null;
+    lastFailureReason = null;
+    pendingProviderAcceptance = { batch, acceptance };
+    pendingAcceptanceCompletedCompaction = false;
+    headInputState = 'awaiting_provider_acceptance';
+    // Notify a successful injection at most once per batch. An ambiguous retry or owned-draft
+    // submit can act on the same batch; re-firing onPromptInjected would double-record its
+    // accepted-echo bookkeeping and could suppress a later identical terminal-typed prompt.
+    if (lastInjectedNotifiedBatch !== batch) {
+      lastInjectedNotifiedBatch = batch;
+      await opts.onPromptInjected?.(batch, acceptance, result);
+    }
+    if (acceptance.acceptedAs === 'in_flight_steer') {
+      // Acceptance evidence arrives only at turn end; defer the acceptance timeout until
+      // turn-end evidence so a long steered turn cannot mark the prompt ambiguous while it is
+      // still legitimately queued in the TUI.
+      steerAcceptanceAwaitingTurnEnd = true;
+      steerAcceptanceTimeoutResult = buildProviderAcceptanceTimeoutResult();
+      scheduleSteerTurnEndFallbackWake();
+    } else {
+      scheduleProviderAcceptanceTimeout(
+        resolveProviderAcceptanceTimeoutMs(batch, result),
+        buildProviderAcceptanceTimeoutResult(),
+      );
+    }
+  }
+
+  async function submitOwnedAmbiguousDraftIfPossible(
+    pending: PendingProviderAcceptance<Mode>,
+  ): Promise<boolean> {
+    if (!opts.submitOwnedAmbiguousPromptDraft) return false;
+    let result: OwnedAmbiguousPromptDraftSubmitResult;
+    try {
+      result = await opts.submitOwnedAmbiguousPromptDraft(pending.batch);
+    } catch {
+      return false;
+    }
+    if (disposed || queue[0] !== pending.batch) return true;
+    if (result.status !== 'submitted') return false;
+    pendingProviderAcceptance = null;
+    pendingAcceptanceCompletedCompaction = false;
+    ambiguousProviderAcceptanceFailure = null;
+    ambiguousProviderAcceptanceRetryAttempt = 0;
+    lastFailureReason = null;
+    await observeSubmittedPrompt(pending.batch, pending.acceptance, {
+      status: 'injected',
+      at: nowMs(),
+      bytesWritten: Buffer.byteLength(pending.batch.message),
+    });
+    return true;
+  }
+
   function resolvePromptAcceptance(state: TerminalTurnState): ClaudeUnifiedPromptAcceptance {
     return {
       acceptedAs: state === 'running' ? 'in_flight_steer' : 'new_turn',
@@ -589,6 +656,10 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
           && queue[0] === ambiguousProviderAcceptanceFailure.batch
           && ambiguousProviderAcceptanceRetryAttempt < 1
         ) {
+          const recoveredBySubmittingOwnedDraft = await submitOwnedAmbiguousDraftIfPossible(ambiguousProviderAcceptanceFailure);
+          if (recoveredBySubmittingOwnedDraft) {
+            return;
+          }
           ambiguousProviderAcceptanceRetryAttempt += 1;
           pendingProviderAcceptance = null;
           pendingAcceptanceCompletedCompaction = false;
@@ -696,32 +767,7 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         injectAsInFlightSteer ? { inFlightSteer: true } : undefined,
       );
       if (result.status === 'injected') {
-        lastDeferredReason = null;
-        lastFailureReason = null;
-        pendingProviderAcceptance = { batch: next, acceptance };
-        pendingAcceptanceCompletedCompaction = false;
-        headInputState = 'awaiting_provider_acceptance';
-        // Notify a successful injection at most once per batch. An ambiguous retry
-        // re-injects the same batch; re-firing onPromptInjected would double-record
-        // its accepted-echo bookkeeping and could suppress a later identical
-        // terminal-typed prompt.
-        if (lastInjectedNotifiedBatch !== next) {
-          lastInjectedNotifiedBatch = next;
-          await opts.onPromptInjected?.(next, acceptance, result);
-        }
-        if (acceptance.acceptedAs === 'in_flight_steer') {
-          // Acceptance evidence arrives only at turn end; defer the acceptance timeout until
-          // turn-end evidence so a long steered turn cannot mark the prompt ambiguous (and
-          // retry/double-queue it) while it is still legitimately queued in the TUI.
-          steerAcceptanceAwaitingTurnEnd = true;
-          steerAcceptanceTimeoutResult = buildProviderAcceptanceTimeoutResult();
-          scheduleSteerTurnEndFallbackWake();
-        } else {
-          scheduleProviderAcceptanceTimeout(
-            resolveProviderAcceptanceTimeoutMs(next, result),
-            buildProviderAcceptanceTimeoutResult(),
-          );
-        }
+        await observeSubmittedPrompt(next, acceptance, result);
         return;
       }
       if (result.status === 'deferred') {
