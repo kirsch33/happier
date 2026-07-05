@@ -661,6 +661,7 @@ function mapClaudeComposerClearRefusalToProtocolStatus(
     case 'switch_model_dialog':
     case 'resume_choice_dialog':
     case 'effort_change_dialog':
+    case 'ask_user_question_dialog':
     case 'unrecognized_confirmation_dialog':
     case 'slash_picker':
     case 'selection_list':
@@ -689,6 +690,7 @@ function mapClaudeComposerSubmitRefusalToProtocolStatus(
     case 'switch_model_dialog':
     case 'resume_choice_dialog':
     case 'effort_change_dialog':
+    case 'ask_user_question_dialog':
     case 'unrecognized_confirmation_dialog':
     case 'slash_picker':
     case 'selection_list':

@@ -27,6 +27,11 @@ export type ClaudeScreenState = Readonly<{
   /** `Change effort level?` confirmation dialog (live probe 2.1.173, incident cmq8y3nlx L6). */
   effortChangeDialogVisible: boolean;
   /**
+   * Claude native AskUserQuestion option picker (`Type something.` / `Chat about this` footer). This
+   * owns keyboard input and must block generic prompt injection, but it is not an unknown confirmation.
+   */
+  askUserQuestionDialogVisible: boolean;
+  /**
    * A `❯`-numbered selection dialog whose heading matches NO recognized matcher (P-B fail-closed):
    * e.g. a confirmation added by a newer Claude build. Typing answers it and Escape declines it, so
    * controls/steering must fail closed (`requires_interactive_control`) instead of touching it.
@@ -95,6 +100,9 @@ const EFFORT_CHANGE_DIALOG = /change effort level\?/i;
 // Used to fail closed on dialogs we do NOT recognize. Composer prompt echoes (`❯ <prompt>`) only
 // match when the prompt itself starts with `<digit>.` — accepted false-positive toward safety.
 const NUMBERED_SELECTION_OPTION = /(?:^|\n)[^\S\n]*❯[^\S\n]*\d+\./u;
+const ASK_USER_QUESTION_TYPE_OPTION = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?\d+\.[^\n]*\btype something\./i;
+const ASK_USER_QUESTION_CHAT_OPTION = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?\d+\.[^\n]*\bchat about this\b/i;
+const ASK_USER_QUESTION_DIALOG_FOOTER = /\benter to select\b[^\n]*\besc to cancel\b/i;
 const EFFORT_CHANGE_DIALOG_TARGET = /switching to\s+([a-z]+)\s+means the full history/i;
 const PERMISSION_PROMPT_HEAD = /(?:^|\n)[^\S\n]*do you want to proceed\?[^\S\n]*(?:\n|$)/i;
 const PERMISSION_PROMPT_REJECT_OPTION =
@@ -429,6 +437,11 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
   const permissionEditorOpen = PERMISSION_EDITOR.test(text) || PERMISSION_EDITOR_HEADER.test(text);
   const queuedMessageBannerVisible = QUEUED_MESSAGE_BANNER.test(text);
   const generating = ESC_TO_INTERRUPT.test(text) || GENERATING_SPINNER_LINE.test(text) || queuedMessageBannerVisible;
+  const askUserQuestionDialogVisible =
+    NUMBERED_SELECTION_OPTION.test(text)
+    && ASK_USER_QUESTION_TYPE_OPTION.test(text)
+    && ASK_USER_QUESTION_CHAT_OPTION.test(text)
+    && ASK_USER_QUESTION_DIALOG_FOOTER.test(text);
 
   const composerState = readComposerState(text, rawText, context);
   const composerContent = composerState.content;
@@ -442,6 +455,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     && !switchModelDialogVisible
     && !resumeChoiceDialogVisible
     && !effortChangeDialogVisible
+    && !askUserQuestionDialogVisible
     && !trustFolderPromptVisible
     && !permissionPromptVisible
     && !permissionEditorOpen;
@@ -450,6 +464,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     switchModelDialogVisible
     || resumeChoiceDialogVisible
     || effortChangeDialogVisible
+    || askUserQuestionDialogVisible
     || unrecognizedConfirmationDialogVisible
     || trustFolderPromptVisible
     || permissionPromptVisible
@@ -475,6 +490,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     resumeChoiceDialogVisible,
     resumeChoiceDialogOptions,
     effortChangeDialogVisible,
+    askUserQuestionDialogVisible,
     unrecognizedConfirmationDialogVisible,
     effortChangeDialogTarget,
     latestEffortConfirmation: latestEffort === null ? null : { kind: latestEffort.kind, level: latestEffort.level },
@@ -500,6 +516,7 @@ function hasBlockingOverlay(state: ClaudeScreenState): boolean {
     || state.switchModelDialogVisible
     || state.resumeChoiceDialogVisible
     || state.effortChangeDialogVisible
+    || state.askUserQuestionDialogVisible
     || state.unrecognizedConfirmationDialogVisible
     || state.queuedMessageBannerVisible
     || state.userDraftPresent
@@ -545,6 +562,7 @@ export function resolveClaudeScreenInFlightSteerVeto(state: ClaudeScreenState): 
   if (state.switchModelDialogVisible) return 'switch_model_dialog';
   if (state.resumeChoiceDialogVisible) return 'resume_choice_dialog';
   if (state.effortChangeDialogVisible) return 'effort_change_dialog';
+  if (state.askUserQuestionDialogVisible) return 'ask_user_question_dialog';
   if (state.unrecognizedConfirmationDialogVisible) return 'unrecognized_confirmation_dialog';
   if (state.permissionEditorOpen) return 'permission_editor';
   if (state.slashPickerOpen) return 'slash_picker';

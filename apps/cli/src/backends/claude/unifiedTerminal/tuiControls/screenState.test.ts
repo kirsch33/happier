@@ -744,6 +744,27 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
     ' ❯ 1. Yes, reset it',
     '   2. No, go back',
   ].join('\n');
+  const askUserQuestionDialog = [
+    ' Choose topology',
+    '',
+    ' ❯ 1. Keep Core/UI as owner (Recommended)',
+    '   2. Dissolve into concept owners',
+    '   3. Type something.',
+    '   4. Chat about this',
+    '',
+    ' Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ].join('\n');
+
+  it('detects Claude AskUserQuestion pickers as first-class user-action dialogs', () => {
+    const state = parseClaudeScreenState(askUserQuestionDialog);
+    expect(state.askUserQuestionDialogVisible).toBe(true);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.inputBoxInteractive).toBe(false);
+    expect(isSafeWindowForSlashControl(state)).toBe(false);
+    expect(isSafeWindowForModeCycle(state)).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('ask_user_question_dialog');
+  });
 
   it('detects an unrecognized ❯-numbered confirmation dialog and blocks every safe window', () => {
     const state = parseClaudeScreenState(unrecognizedDialog);

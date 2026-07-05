@@ -21,6 +21,7 @@ export type ClaudeComposerClearRefusalReason =
   | 'switch_model_dialog'
   | 'resume_choice_dialog'
   | 'effort_change_dialog'
+  | 'ask_user_question_dialog'
   | 'unrecognized_confirmation_dialog'
   | 'slash_picker'
   | 'selection_list'
@@ -64,6 +65,9 @@ function classifyComposerClearScreen(state: ClaudeScreenState): ComposerClearScr
   }
   if (state.effortChangeDialogVisible) {
     return { kind: 'refused', reason: 'effort_change_dialog', screen: state };
+  }
+  if (state.askUserQuestionDialogVisible) {
+    return { kind: 'refused', reason: 'ask_user_question_dialog', screen: state };
   }
   if (state.unrecognizedConfirmationDialogVisible) {
     return { kind: 'refused', reason: 'unrecognized_confirmation_dialog', screen: state };

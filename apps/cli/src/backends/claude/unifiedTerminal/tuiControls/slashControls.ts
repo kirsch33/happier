@@ -99,9 +99,14 @@ export function isControllerTypedSlashCommandResidue(text: string): boolean {
  * so the only safe outcome is `requires_interactive_control` with ZERO bytes sent.
  */
 export const UNRECOGNIZED_CONFIRMATION_DIALOG_REASON = 'unrecognized_confirmation_dialog';
+export const ASK_USER_QUESTION_DIALOG_REASON = 'ask_user_question_dialog';
 
 function unrecognizedDialogResult(): ControlAttemptResult {
   return { kind: 'unreachable', reason: UNRECOGNIZED_CONFIRMATION_DIALOG_REASON };
+}
+
+function askUserQuestionDialogResult(): ControlAttemptResult {
+  return { kind: 'unreachable', reason: ASK_USER_QUESTION_DIALOG_REASON };
 }
 
 type LeftoverDialogResolution = Readonly<{
@@ -162,6 +167,9 @@ async function runSlashControl(ctx: SlashControlContext, spec: SlashControlSpec)
   // the dialog), no typing (it would answer it). Surfaces once as requires_interactive_control.
   if (!leftoverDialog && state0.unrecognizedConfirmationDialogVisible) {
     return unrecognizedDialogResult();
+  }
+  if (!leftoverDialog && state0.askUserQuestionDialogVisible) {
+    return askUserQuestionDialogResult();
   }
 
   if (!leftoverDialog) {
@@ -250,6 +258,9 @@ async function runSlashControl(ctx: SlashControlContext, spec: SlashControlSpec)
         await port.sendSpecialKey('Escape');
         return captureFailureToResult(afterType);
       }
+      if (afterType.state.askUserQuestionDialogVisible) {
+        return askUserQuestionDialogResult();
+      }
       if (afterType.state.unrecognizedConfirmationDialogVisible) {
         // An unrecognized dialog swallowed the typed command (P-B): never blind-Enter (it would
         // answer the dialog) and never Escape (it would decline it). Fail closed.
@@ -291,31 +302,46 @@ async function runSlashControl(ctx: SlashControlContext, spec: SlashControlSpec)
       declinedReason: string | null;
       effective: string | null;
       queuedByProvider: boolean;
-      unrecognizedDialog: boolean;
+      blockingDialogReason: string | null;
       settled: boolean;
     }>;
     const evaluate = (state: ClaudeScreenState): PollEvaluation => {
+      if (state.askUserQuestionDialogVisible) {
+        return {
+          declinedReason: null,
+          effective: null,
+          queuedByProvider: false,
+          blockingDialogReason: ASK_USER_QUESTION_DIALOG_REASON,
+          settled: true,
+        };
+      }
       if (state.unrecognizedConfirmationDialogVisible) {
         // A dialog we caused but do not recognize (P-B): settle immediately and fail closed below —
         // stale scrollback text must never verify "through" an open unknown dialog.
-        return { declinedReason: null, effective: null, queuedByProvider: false, unrecognizedDialog: true, settled: true };
+        return {
+          declinedReason: null,
+          effective: null,
+          queuedByProvider: false,
+          blockingDialogReason: UNRECOGNIZED_CONFIRMATION_DIALOG_REASON,
+          settled: true,
+        };
       }
       const declined = spec.detectDeclined?.(state) ?? null;
-      if (declined !== null) return { declinedReason: declined, effective: null, queuedByProvider: false, unrecognizedDialog: false, settled: true };
+      if (declined !== null) return { declinedReason: declined, effective: null, queuedByProvider: false, blockingDialogReason: null, settled: true };
       const verified = spec.verify(state);
-      if (verified !== null) return { declinedReason: null, effective: verified, queuedByProvider: false, unrecognizedDialog: false, settled: true };
+      if (verified !== null) return { declinedReason: null, effective: verified, queuedByProvider: false, blockingDialogReason: null, settled: true };
       if (state.generating || state.queuedMessageBannerVisible) {
         // A turn started while the command was in flight: Claude queued it (probe P-D). It was
         // DELIVERED and will run at turn end — report delivered-pending, never a failure.
-        return { declinedReason: null, effective: null, queuedByProvider: true, unrecognizedDialog: false, settled: true };
+        return { declinedReason: null, effective: null, queuedByProvider: true, blockingDialogReason: null, settled: true };
       }
-      return { declinedReason: null, effective: null, queuedByProvider: false, unrecognizedDialog: false, settled: false };
+      return { declinedReason: null, effective: null, queuedByProvider: false, blockingDialogReason: null, settled: false };
     };
 
     let finalState: ClaudeScreenState | null = preVerifyState;
     let evaluation: PollEvaluation = preVerifyState !== null
       ? evaluate(preVerifyState)
-      : { declinedReason: null, effective: null, queuedByProvider: false, unrecognizedDialog: false, settled: false };
+      : { declinedReason: null, effective: null, queuedByProvider: false, blockingDialogReason: null, settled: false };
     for (let poll = 0; poll < maxVerifyPolls && !evaluation.settled; poll += 1) {
       await wait(poll === 0 && preVerifyState === null ? timings.commandSettleMs : verifyPollIntervalMs);
       const captured = await captureScreenState(port);
@@ -325,11 +351,11 @@ async function runSlashControl(ctx: SlashControlContext, spec: SlashControlSpec)
     }
     const { declinedReason, effective, queuedByProvider } = evaluation;
 
-    if (evaluation.unrecognizedDialog) {
-      // P-B fail-closed: the command surfaced a dialog we do not recognize. No Escape (decline)
+    if (evaluation.blockingDialogReason !== null) {
+      // P-B fail-closed: the command surfaced a dialog that owns keyboard input. No Escape (decline)
       // and no answer bytes — escalate once to requires_interactive_control via the outcome map.
       await restoreOnce();
-      return unrecognizedDialogResult();
+      return { kind: 'unreachable', reason: evaluation.blockingDialogReason };
     }
 
     if (declinedReason !== null) {

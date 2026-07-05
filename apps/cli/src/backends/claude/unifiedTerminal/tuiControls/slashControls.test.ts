@@ -609,6 +609,16 @@ describe('unrecognized confirmation dialogs (P-B fail-closed, incident cmq8y3nlx
     ' ❯ 1. Yes, reset it',
     '   2. No, go back',
   ].join('\n');
+  const ASK_USER_QUESTION_DIALOG = [
+    ' Choose topology',
+    '',
+    ' ❯ 1. Keep Core/UI as owner (Recommended)',
+    '   2. Dissolve into concept owners',
+    '   3. Type something.',
+    '   4. Chat about this',
+    '',
+    ' Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ].join('\n');
 
   it('fails closed to requires-interactive-control and sends ZERO bytes when the initial capture shows an unrecognized dialog', async () => {
     const port = createFakeControlPort({ captures: [UNRECOGNIZED_DIALOG] });
@@ -617,6 +627,17 @@ describe('unrecognized confirmation dialogs (P-B fail-closed, incident cmq8y3nlx
     const result = await applyEffortControl(contextFor(port, guard), 'high');
 
     expect(result).toEqual({ kind: 'unreachable', reason: 'unrecognized_confirmation_dialog' });
+    expect(port.sentLiteral).toEqual([]);
+    expect(port.sentKeys).toEqual([]);
+  });
+
+  it('fails closed with a precise reason when the initial capture shows a Claude user-action picker', async () => {
+    const port = createFakeControlPort({ captures: [ASK_USER_QUESTION_DIALOG] });
+    const { guard } = await makeGuard();
+
+    const result = await applyEffortControl(contextFor(port, guard), 'high');
+
+    expect(result).toEqual({ kind: 'unreachable', reason: 'ask_user_question_dialog' });
     expect(port.sentLiteral).toEqual([]);
     expect(port.sentKeys).toEqual([]);
   });

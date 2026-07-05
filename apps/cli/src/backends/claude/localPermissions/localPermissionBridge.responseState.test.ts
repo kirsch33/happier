@@ -334,8 +334,8 @@ describe('ClaudeLocalPermissionBridge (response state)', () => {
     bridge.dispose();
   });
 
-  it('returns a typed expired result for a late interactive answer after the provider hook timeout', async () => {
-    const { session, client } = createPermissionHandlerSessionStub('session-interactive-expired');
+  it('accepts an interactive answer hours after the finite bridge response timeout', async () => {
+    const { session, client } = createPermissionHandlerSessionStub('session-interactive-hours-late');
     const bridge = new ClaudeLocalPermissionBridge(session, { responseTimeoutMs: 5_000 });
     bridge.activate();
 
@@ -343,35 +343,36 @@ describe('ClaudeLocalPermissionBridge (response state)', () => {
       hook_event_name: 'PreToolUse',
       tool_name: 'AskUserQuestion',
       tool_input: { questions: [{ question: 'Pick a color', options: ['Red', 'Blue'] }] },
-      tool_use_id: 'toolu_ask_expire_1',
+      tool_use_id: 'toolu_ask_hours_late_1',
     });
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(client.agentState.requests.toolu_ask_expire_1).toBeDefined();
+    expect(client.agentState.requests.toolu_ask_hours_late_1).toBeDefined();
 
-    // No Happier timeout fires before the provider hook ceiling: still pending well past 5s.
-    await vi.advanceTimersByTimeAsync(5_001);
-    expect(client.agentState.requests.toolu_ask_expire_1).toBeDefined();
+    // No Happier timeout fires for native user-action tools: still pending hours after the finite
+    // non-interactive response timeout.
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+    expect(client.agentState.requests.toolu_ask_hours_late_1).toBeDefined();
 
     const permissionHandler = client.rpcHandlerManager.getHandler('permission');
     expect(permissionHandler).toBeDefined();
     const lateAnswer = await permissionHandler?.({
-      id: 'toolu_ask_expire_1',
+      id: 'toolu_ask_hours_late_1',
       approved: true,
       answers: { 'Pick a color': 'Red' },
     });
 
-    expect(lateAnswer).toEqual({
-      ok: false,
-      errorCode: 'permission_request_expired',
-      errorMessage: 'permission_request_expired',
-      requestId: 'toolu_ask_expire_1',
-    });
-    expect(client.agentState.requests.toolu_ask_expire_1).toBeUndefined();
-    expect(client.agentState.completedRequests.toolu_ask_expire_1).toMatchObject({ status: 'canceled' });
-    expect(client.agentState.completedRequests.toolu_ask_expire_1).not.toMatchObject({ status: 'approved' });
+    expect(lateAnswer).toEqual({ ok: true });
+    expect(client.agentState.requests.toolu_ask_hours_late_1).toBeUndefined();
+    expect(client.agentState.completedRequests.toolu_ask_hours_late_1).toMatchObject({ status: 'approved' });
 
-    await expect(ask).resolves.toMatchObject({ suppressOutput: true });
+    await expect(ask).resolves.toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        updatedInput: { answers: { 'Pick a color': 'Red' } },
+      },
+    });
     bridge.dispose();
   });
 
@@ -424,8 +425,8 @@ describe('ClaudeLocalPermissionBridge (response state)', () => {
     bridge.dispose();
   });
 
-  it('returns a typed expired result for a late ExitPlanMode answer after the provider hook timeout', async () => {
-    const { session, client } = createPermissionHandlerSessionStub('session-exit-plan-expired');
+  it('accepts an ExitPlanMode answer hours after the finite bridge response timeout', async () => {
+    const { session, client } = createPermissionHandlerSessionStub('session-exit-plan-hours-late');
     const bridge = new ClaudeLocalPermissionBridge(session, { responseTimeoutMs: 5_000 });
     bridge.activate();
 
@@ -433,23 +434,22 @@ describe('ClaudeLocalPermissionBridge (response state)', () => {
       hook_event_name: 'PermissionRequest',
       tool_name: 'ExitPlanMode',
       tool_input: { plan: 'do the thing' },
-      tool_use_id: 'toolu_exit_expire_1',
+      tool_use_id: 'toolu_exit_hours_late_1',
     });
 
-    await vi.advanceTimersByTimeAsync(5_001);
-    expect(client.agentState.requests.toolu_exit_expire_1).toBeDefined();
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+    expect(client.agentState.requests.toolu_exit_hours_late_1).toBeDefined();
 
     const permissionHandler = client.rpcHandlerManager.getHandler('permission');
-    const lateAnswer = await permissionHandler?.({ id: 'toolu_exit_expire_1', approved: true });
+    const lateAnswer = await permissionHandler?.({ id: 'toolu_exit_hours_late_1', approved: true });
 
-    expect(lateAnswer).toEqual({
-      ok: false,
-      errorCode: 'permission_request_expired',
-      errorMessage: 'permission_request_expired',
-      requestId: 'toolu_exit_expire_1',
+    expect(lateAnswer).toEqual({ ok: true });
+    expect(client.agentState.completedRequests.toolu_exit_hours_late_1).toMatchObject({ status: 'approved' });
+    await expect(exit).resolves.toMatchObject({
+      hookSpecificOutput: {
+        decision: { behavior: 'allow' },
+      },
     });
-    expect(client.agentState.completedRequests.toolu_exit_expire_1).toMatchObject({ status: 'canceled' });
-    await expect(exit).resolves.toMatchObject({ suppressOutput: true });
     bridge.dispose();
   });
 

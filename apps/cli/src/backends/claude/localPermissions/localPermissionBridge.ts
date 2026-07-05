@@ -123,6 +123,7 @@ export class ClaudeLocalPermissionBridge {
     private readonly session: Session;
     private readonly responseTimeoutMs: number | null;
     private readonly providerHookCeilingMs: number;
+    private readonly interactiveProviderHookCeilingMs: number;
     private readonly requestStore: AgentStateRequestStore;
     private readonly permissionCoordinator: ReturnType<typeof createPermissionRequestCoordinator<PermissionHookResponse>>;
     private readonly pendingRequests = new Map<string, PendingPermissionRequest>();
@@ -144,18 +145,22 @@ export class ClaudeLocalPermissionBridge {
             this.responseTimeoutMs = DEFAULT_RESPONSE_TIMEOUT_MS;
         }
         // The provider hook ceiling is the wall-clock point past which Claude has killed the hook forwarder,
-        // so a late answer can no longer be delivered. It is decoupled from `responseTimeoutMs`: when an
-        // explicit ceiling is provided it wins, otherwise it tracks any finite response timeout (they are
-        // aligned by runtime config), and finally falls back to the provider default. This guarantees an
-        // expiry safety-net even in wait-indefinitely mode where `responseTimeoutMs` is null.
+        // so a late answer can no longer be delivered. Non-interactive local permission requests may still
+        // track the bridge response timeout, but interactive user-action tools must stay aligned with the
+        // installed Claude hook timeout. Otherwise AskUserQuestion renders in the UI as "wait indefinitely"
+        // while answer delivery is silently rejected minutes/hours later.
+        const defaultProviderHookCeilingMs = readProviderHookCeilingEnvMs() ?? DEFAULT_PROVIDER_HOOK_CEILING_MS;
         if (typeof opts?.providerHookCeilingMs === 'number' && Number.isFinite(opts.providerHookCeilingMs) && opts.providerHookCeilingMs > 0) {
             this.providerHookCeilingMs = opts.providerHookCeilingMs;
+            this.interactiveProviderHookCeilingMs = opts.providerHookCeilingMs;
         } else if (typeof this.responseTimeoutMs === 'number') {
             this.providerHookCeilingMs = this.responseTimeoutMs;
+            this.interactiveProviderHookCeilingMs = defaultProviderHookCeilingMs;
         } else {
             // Wait-indefinitely mode (no finite response timeout): use the env-overridable default, kept
             // aligned with the installed hook `timeout` so expiry only fires on a genuinely-dead forwarder.
-            this.providerHookCeilingMs = readProviderHookCeilingEnvMs() ?? DEFAULT_PROVIDER_HOOK_CEILING_MS;
+            this.providerHookCeilingMs = defaultProviderHookCeilingMs;
+            this.interactiveProviderHookCeilingMs = defaultProviderHookCeilingMs;
         }
         this.requestStore = new AgentStateRequestStore({
             session: this.session.client,
@@ -306,7 +311,7 @@ export class ClaudeLocalPermissionBridge {
                 toolInput,
                 hookEventName,
                 createdAt,
-                expiresAt: this.computeProviderHookExpiry(createdAt),
+                expiresAt: this.computeProviderHookExpiry(createdAt, toolName),
             });
         }
 
@@ -845,7 +850,7 @@ export class ClaudeLocalPermissionBridge {
         // `createdAt` so a past-ceiling answer is never approved into a dead socket.
         if (!pending) {
             const context = this.permissionCoordinator.getResponseContext(requestId);
-            if (context && this.isProviderHookCeilingExceeded(context.createdAt)) {
+            if (context && this.isProviderHookCeilingExceeded(context.createdAt, context.toolName)) {
                 this.expireRequestByContext(context);
                 return { status: 'expired' };
             }
@@ -938,18 +943,20 @@ export class ClaudeLocalPermissionBridge {
         return toolName === 'ExitPlanMode' || toolName === 'exit_plan_mode';
     }
 
-    private computeProviderHookExpiry(createdAt: number): number {
+    private computeProviderHookExpiry(createdAt: number, toolName: string): number {
         // Always finite: the provider hook ceiling applies even when there is no Happier waiter
         // (wait-indefinitely mode). Claude kills the forwarder at its installed hook timeout regardless.
-        return createdAt + this.providerHookCeilingMs;
+        return createdAt + (this.isInteractiveTool(toolName)
+            ? this.interactiveProviderHookCeilingMs
+            : this.providerHookCeilingMs);
     }
 
     private isProviderHookExpired(pending: PendingPermissionRequest): boolean {
         return typeof pending.expiresAt === 'number' && Date.now() > pending.expiresAt;
     }
 
-    private isProviderHookCeilingExceeded(createdAt: number): boolean {
-        return Date.now() > this.computeProviderHookExpiry(createdAt);
+    private isProviderHookCeilingExceeded(createdAt: number, toolName: string): boolean {
+        return Date.now() > this.computeProviderHookExpiry(createdAt, toolName);
     }
 
     private expirePendingRequest(pending: PendingPermissionRequest): void {
