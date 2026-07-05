@@ -12,7 +12,7 @@ vi.mock('@/lib', () => ({
   },
 }));
 
-function askUserQuestionToolUseMessage(): SDKAssistantMessage {
+function askUserQuestionToolUseMessage(toolName = 'AskUserQuestion'): SDKAssistantMessage {
   return {
     type: 'assistant',
     message: {
@@ -21,7 +21,7 @@ function askUserQuestionToolUseMessage(): SDKAssistantMessage {
         {
           type: 'tool_use',
           id: 'toolu_ask_1',
-          name: 'AskUserQuestion',
+          name: toolName,
           input: {
             questions: [
               {
@@ -126,6 +126,37 @@ describe('PermissionHandler (AskUserQuestion)', () => {
     expect(client.getAgentStateSnapshot().completedRequests[sharedToolUseId]).toMatchObject({
       status: 'approved',
       answers,
+    });
+  });
+
+  it('returns answer payloads via updatedInput for snake-case ask_user_question', async () => {
+    const { session, client } = createPermissionHandlerSessionStub('s1');
+
+    const { PermissionHandler } = await import('./permissionHandler');
+    const handler = new PermissionHandler(session);
+    const input = askUserQuestionToolUseMessage('ask_user_question').message.content[0]!.input as Record<string, unknown>;
+    const toolUseId = 'toolu_ask_snake_1';
+
+    const resultPromise = handler.handleToolCall(
+      'ask_user_question',
+      input,
+      defaultMode,
+      { signal: new AbortController().signal, toolUseId },
+    );
+
+    const answers = { q1: 'Linux' };
+    await client.rpcHandlerManager.getHandler('permission')?.({
+      id: toolUseId,
+      approved: true,
+      answers,
+    } satisfies PermissionRpcPayload);
+
+    await expect(expectResolvesWithin(resultPromise)).resolves.toEqual({
+      behavior: 'allow',
+      updatedInput: {
+        ...input,
+        answers,
+      },
     });
   });
 });

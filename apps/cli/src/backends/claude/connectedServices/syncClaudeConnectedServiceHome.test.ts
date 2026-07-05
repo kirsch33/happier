@@ -60,6 +60,44 @@ describe('syncClaudeConnectedServiceHome self-source sharing-policy reconciliati
     expect(manifest.stateEntries).toContain('projects');
   });
 
+  it('keeps an isolated projects dir when the shared Claude projects store is unusable', async () => {
+    const { homeDir, targetDir, ambientDir } = await makeSelfSourceHome();
+    const isolatedProjectDir = join(targetDir, 'projects', PROJECT_DIR_NAME);
+    await mkdir(isolatedProjectDir, { recursive: true });
+    await writeFile(join(isolatedProjectDir, `${VENDOR_RESUME_ID}.jsonl`), '{"type":"assistant","text":"kept isolated"}\n');
+    await writeFile(join(ambientDir, 'projects'), 'not a directory');
+
+    const result = await syncClaudeConnectedServiceHome({
+      sourceEnv: { HOME: homeDir, CLAUDE_CONFIG_DIR: targetDir },
+      targetDir,
+      sharingPolicyOverride: { configMode: 'copied', stateMode: 'shared' },
+      ambientStateSourceDir: ambientDir,
+    });
+
+    expect(result.requestedStateMode).toBe('shared');
+    expect(result.effectiveStateMode).toBe('isolated');
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'claude_shared_projects_store_unwritable',
+      severity: 'warning',
+      effectiveStateMode: 'isolated',
+    }));
+
+    const projectsStat = await lstat(join(targetDir, 'projects'));
+    expect(projectsStat.isSymbolicLink()).toBe(false);
+    expect(projectsStat.isDirectory()).toBe(true);
+    await expect(
+      readFile(join(isolatedProjectDir, `${VENDOR_RESUME_ID}.jsonl`), 'utf8'),
+    ).resolves.toContain('kept isolated');
+
+    const manifest = await readConnectedServiceStateSharingManifest(targetDir);
+    expect(manifest.requestedStateMode).toBe('shared');
+    expect(manifest.effectiveStateMode).toBe('isolated');
+    expect(manifest.stateEntries).toEqual([]);
+    expect(manifest.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'claude_shared_projects_store_unwritable',
+    }));
+  });
+
   it('detaches the shared projects link into an isolated dir when sharing is toggled off', async () => {
     const { homeDir, targetDir, ambientDir } = await makeSelfSourceHome();
     const ambientProjectDir = join(ambientDir, 'projects', PROJECT_DIR_NAME);
@@ -164,5 +202,41 @@ describe('syncClaudeConnectedServiceHome candidate session import reconciliation
     const manifest = await readConnectedServiceStateSharingManifest(targetDir);
     const mapping = manifest.sessionFileMappings.find((item) => item.vendorResumeId === VENDOR_RESUME_ID);
     expect(mapping?.destinationPath).toBe(canonicalPath);
+  });
+
+  it('imports the candidate session into isolated target state when the shared source store is unusable', async () => {
+    const { homeDir, targetDir, ambientDir } = await makeSelfSourceHome();
+    const sourceDir = await mkdtemp(join(tmpdir(), 'happier-claude-sync-source-'));
+    await writeFile(join(sourceDir, 'projects'), 'not a directory');
+
+    const previousHomeDir = await mkdtemp(join(tmpdir(), 'happier-claude-sync-previous-'));
+    const candidateDir = join(previousHomeDir, 'projects', PROJECT_DIR_NAME);
+    await mkdir(candidateDir, { recursive: true });
+    const candidatePath = join(candidateDir, `${VENDOR_RESUME_ID}.jsonl`);
+    await writeFile(candidatePath, '{"type":"assistant","text":"candidate imported isolated"}\n');
+
+    const result = await syncClaudeConnectedServiceHome({
+      sourceEnv: { HOME: homeDir, CLAUDE_CONFIG_DIR: sourceDir },
+      targetDir,
+      sharingPolicyOverride: { configMode: 'copied', stateMode: 'shared' },
+      ambientStateSourceDir: ambientDir,
+      vendorResumeId: VENDOR_RESUME_ID,
+      candidatePersistedSessionFile: candidatePath,
+    });
+
+    expect(result.requestedStateMode).toBe('shared');
+    expect(result.effectiveStateMode).toBe('isolated');
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'claude_shared_projects_store_unwritable',
+      severity: 'warning',
+    }));
+
+    const importedPath = join(targetDir, 'projects', PROJECT_DIR_NAME, `${VENDOR_RESUME_ID}.jsonl`);
+    await expect(readFile(importedPath, 'utf8')).resolves.toContain('candidate imported isolated');
+
+    const manifest = await readConnectedServiceStateSharingManifest(targetDir);
+    expect(manifest.effectiveStateMode).toBe('isolated');
+    expect(manifest.sessionFileMappings.find((item) => item.vendorResumeId === VENDOR_RESUME_ID)?.destinationPath)
+      .toBe(importedPath);
   });
 });

@@ -40,6 +40,7 @@ export function createZellijTerminalControlPort(params: Readonly<{
   env: Readonly<Record<string, string>>;
   sessionName: string;
   paneId?: string;
+  resolvePaneId?: () => Promise<string | null | undefined>;
   chunkSize?: number;
   timeoutMs?: number;
   nowMs?: () => number;
@@ -58,14 +59,27 @@ export function createZellijTerminalControlPort(params: Readonly<{
       : { status: 'failed', reason: 'host_unreachable' };
   }
 
+  async function resolveTargetPaneId(): Promise<string | ZellijControlFailureResult> {
+    try {
+      const resolved = params.resolvePaneId
+        ? await params.resolvePaneId()
+        : paneId;
+      const trimmed = typeof resolved === 'string' ? resolved.trim() : '';
+      return trimmed.length > 0 ? trimmed : noTarget;
+    } catch (error) {
+      return mapError(error);
+    }
+  }
+
   async function write(text: string): Promise<TerminalControlSendResult> {
-    if (!paneId) return noTarget;
+    const targetPaneId = await resolveTargetPaneId();
+    if (typeof targetPaneId !== 'string') return targetPaneId;
     if (text.length === 0) return { status: 'sent', at: nowMs() };
     try {
       await params.actions.writeBytesChunked({
         zellijBinary: params.zellijBinary,
         env: sessionEnv,
-        paneId,
+        paneId: targetPaneId,
         text,
         ...(params.chunkSize !== undefined ? { chunkSize: params.chunkSize } : {}),
         ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
@@ -76,21 +90,22 @@ export function createZellijTerminalControlPort(params: Readonly<{
     }
   }
 
-  async function sendNamedKey(send: () => Promise<void>): Promise<TerminalControlSendResult> {
-    if (!paneId) return noTarget;
+  async function sendNamedKey(send: (targetPaneId: string) => Promise<void>): Promise<TerminalControlSendResult> {
+    const targetPaneId = await resolveTargetPaneId();
+    if (typeof targetPaneId !== 'string') return targetPaneId;
     try {
-      await send();
+      await send(targetPaneId);
       return { status: 'sent', at: nowMs() };
     } catch (error) {
       return mapError(error);
     }
   }
 
-  function paneActionParams(): Readonly<{ zellijBinary: string; env: Readonly<Record<string, string>>; paneId: string; timeoutMs?: number }> {
+  function paneActionParams(targetPaneId: string): Readonly<{ zellijBinary: string; env: Readonly<Record<string, string>>; paneId: string; timeoutMs?: number }> {
     return {
       zellijBinary: params.zellijBinary,
       env: sessionEnv,
-      paneId: paneId as string,
+      paneId: targetPaneId,
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     };
   }
@@ -104,17 +119,17 @@ export function createZellijTerminalControlPort(params: Readonly<{
       return write(sequence);
     },
     async sendSpecialKey(key) {
-      if (!paneId) return noTarget;
-      if (key === 'Enter') return sendNamedKey(() => params.actions.sendEnter(paneActionParams()));
-      if (key === 'Escape') return sendNamedKey(() => params.actions.sendEscape(paneActionParams()));
+      if (key === 'Enter') return sendNamedKey((targetPaneId) => params.actions.sendEnter(paneActionParams(targetPaneId)));
+      if (key === 'Escape') return sendNamedKey((targetPaneId) => params.actions.sendEscape(paneActionParams(targetPaneId)));
       const raw = TERMINAL_SPECIAL_KEY_RAW_SEQUENCES[key];
       if (raw === undefined) return { status: 'unsupported', reason: 'special_key_unsupported' };
       return write(raw);
     },
     async captureScreen(): Promise<TerminalControlCaptureResult> {
-      if (!paneId) return noTarget;
+      const targetPaneId = await resolveTargetPaneId();
+      if (typeof targetPaneId !== 'string') return targetPaneId;
       try {
-        const rawText = await params.actions.dumpScreen(paneActionParams());
+        const rawText = await params.actions.dumpScreen(paneActionParams(targetPaneId));
         return {
           status: 'captured',
           capture: buildTerminalControlCapture({ rawText, hostKind: 'zellij', capturedAtMs: nowMs() }),

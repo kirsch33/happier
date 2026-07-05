@@ -1210,6 +1210,87 @@ describe('createClaudeUnifiedInputArbiter', () => {
     expect(accepted).toEqual(['owned draft stuck in Claude composer']);
   });
 
+  it('waits for provider acceptance when an owned ambiguous draft is already empty', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const accepted: string[] = [];
+    const refreshed: string[] = [];
+    const injectPrompt = vi.fn(async (batch) => ({ status: 'injected' as const, at: nowMs, bytesWritten: batch.message.length }));
+    const submitOwnedAmbiguousPromptDraft = vi.fn(async () => ({ status: 'already_empty' as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      submitOwnedAmbiguousPromptDraft,
+      onPromptSubmissionRefreshed: async (batch) => {
+        refreshed.push(batch.message);
+      },
+      onPromptAccepted: async (batch) => {
+        accepted.push(batch.message);
+      },
+    });
+
+    await arbiter.enqueueUiMessage({ message: 'already submitted owned draft', origin: { kind: 'ui_pending' } });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersToNextTimerAsync();
+
+    expect(submitOwnedAmbiguousPromptDraft).toHaveBeenCalledTimes(1);
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(refreshed).toEqual(['already submitted owned draft']);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: null,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+
+    await expect(arbiter.confirmPromptAcceptedByProvider()).resolves.toBe(true);
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+    expect(accepted).toEqual(['already submitted owned draft']);
+  });
+
+  it('retries paste once when an already-empty owned draft still never reaches provider acceptance', async () => {
+    vi.useFakeTimers();
+    let nowMs = 10_000;
+    const injectPrompt = vi.fn(async (batch) => ({ status: 'injected' as const, at: nowMs, bytesWritten: batch.message.length }));
+    const submitOwnedAmbiguousPromptDraft = vi.fn(async () => ({ status: 'already_empty' as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => nowMs,
+      quietPeriodMs: 0,
+      providerAcceptanceTimeoutMs: 40,
+      injectPrompt,
+      submitOwnedAmbiguousPromptDraft,
+    });
+
+    await arbiter.enqueueUiMessage({ message: 'empty draft with lost acceptance', origin: { kind: 'ui_pending' } });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: nowMs });
+    nowMs += 1_000;
+    await arbiter.drainWhenSafe();
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersToNextTimerAsync();
+    expect(submitOwnedAmbiguousPromptDraft).toHaveBeenCalledTimes(1);
+    expect(injectPrompt).toHaveBeenCalledTimes(1);
+
+    nowMs += 40;
+    await vi.advanceTimersByTimeAsync(40);
+    await vi.advanceTimersToNextTimerAsync();
+
+    expect(submitOwnedAmbiguousPromptDraft).toHaveBeenCalledTimes(2);
+    expect(injectPrompt).toHaveBeenCalledTimes(2);
+    expect(arbiter.snapshot()).toMatchObject({
+      queuedCount: 1,
+      lastFailureReason: null,
+      headInputState: 'awaiting_provider_acceptance',
+    });
+  });
+
   it('terminalizes a host-level injected prompt when provider confirmation never arrives after retry', async () => {
     vi.useFakeTimers();
     let nowMs = 10_000;

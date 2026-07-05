@@ -1226,6 +1226,11 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
         env,
         sessionName: handle.sessionName,
         paneId: handle.paneId,
+        resolvePaneId: async () => {
+          const inspection = await inspectLiveness(handle);
+          if (!inspection.liveness.paneAlive || !inspection.targetPaneId) return null;
+          return inspection.targetPaneId;
+        },
         ...(params.chunkSize !== undefined ? { chunkSize: params.chunkSize } : {}),
         timeoutMs: actionTimeoutMs,
       });

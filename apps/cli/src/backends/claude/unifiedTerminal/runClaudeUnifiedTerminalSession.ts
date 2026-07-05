@@ -1271,7 +1271,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               submitOwnedAmbiguousPromptDraft: async (batch) => {
                 const result = await submitControllerOwnedClaudeComposerDraft({
                   port: steerDraftClearPort,
-                  ownsDraft: (draft) => ownComposerTextLog.matches(draft),
+                  ownsDraft: (draft) => ownComposerTextLog.matches(draft, { currentBatchText: batch.message }),
                 });
                 if (result.status === 'submitted' || result.status === 'already_empty' || result.status === 'not_owned') {
                   return { status: result.status };
@@ -1323,6 +1323,16 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             mode: batch.mode,
             acceptedAs: acceptance.acceptedAs,
             turnStateAtInjection: acceptance.turnStateAtInjection,
+          });
+        },
+        onPromptSubmissionRefreshed: (batch, _acceptance, result) => {
+          acceptedPromptTranscriptDiscovery.recordAcceptedPrompt({
+            message: batch.message,
+            acceptedAtMs: result.at,
+            deliveryIdentity: {
+              localIds: batch.userMessageLocalIds ?? [],
+              userMessageSeq: batch.maxUserMessageSeq ?? null,
+            },
           });
         },
         onPromptAccepted: (batch) => {

@@ -3,6 +3,8 @@ import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
 const DEFAULT_LIMIT = 32;
 const DEFAULT_PREFIX_RESIDUE_WINDOW_MS = 2 * 60_000;
 const MIN_PREFIX_RESIDUE_CHARS = 256;
+const MIN_CURRENT_BATCH_FRAGMENT_CHARS = 60;
+const MIN_CURRENT_BATCH_FRAGMENT_TOKENS = 8;
 
 export type ClaudeOwnComposerTextLog = Readonly<{
   /** Record a text WE wrote into the TUI (injected prompt). Bounded FIFO. */
@@ -12,7 +14,7 @@ export type ClaudeOwnComposerTextLog = Readonly<{
    * an interrupted own injection. Short/old prefixes are intentionally rejected so a genuine user
    * draft does not classify as ours.
    */
-  matches: (draft: string) => boolean;
+  matches: (draft: string, opts?: Readonly<{ currentBatchText?: string | null | undefined }>) => boolean;
 }>;
 
 function normalize(value: string): string {
@@ -55,7 +57,35 @@ function isRecentPrefixResidue(params: Readonly<{
     || params.entry.candidates.some((candidate) => (
       candidate.length > params.collapsedDraft.length
       && candidate.includes(params.collapsedDraft)
-    ));
+  ));
+}
+
+function countFragmentTokens(value: string): number {
+  return value.match(/[A-Za-z0-9_/-]+/g)?.length ?? 0;
+}
+
+function isCurrentBatchFragment(params: Readonly<{
+  currentBatchText?: string | null | undefined;
+  normalizedDraft: string;
+  collapsedDraft: string;
+}>): boolean {
+  const currentBatchText = typeof params.currentBatchText === 'string'
+    ? normalize(params.currentBatchText)
+    : '';
+  if (
+    currentBatchText.length === 0
+    || params.normalizedDraft.length < MIN_CURRENT_BATCH_FRAGMENT_CHARS
+    || countFragmentTokens(params.normalizedDraft) < MIN_CURRENT_BATCH_FRAGMENT_TOKENS
+    || currentBatchText.length <= params.normalizedDraft.length
+  ) {
+    return false;
+  }
+  const collapsedCurrentBatchText = collapseWhitespace(currentBatchText);
+  return currentBatchText.includes(params.normalizedDraft)
+    || (
+      collapsedCurrentBatchText.length > params.collapsedDraft.length
+      && collapsedCurrentBatchText.includes(params.collapsedDraft)
+    );
 }
 
 /**
@@ -89,7 +119,7 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
       });
       while (entries.length > limit) entries.shift();
     },
-    matches(draft) {
+    matches(draft, matchOpts) {
       const normalized = normalize(draft);
       if (normalized.length === 0) return false;
       const collapsed = collapseWhitespace(normalized);
@@ -104,7 +134,11 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
           nowMs: referenceMs,
           prefixResidueWindowMs,
         })
-      ));
+      )) || isCurrentBatchFragment({
+        currentBatchText: matchOpts?.currentBatchText ?? null,
+        normalizedDraft: normalized,
+        collapsedDraft: collapsed,
+      });
     },
   };
 }

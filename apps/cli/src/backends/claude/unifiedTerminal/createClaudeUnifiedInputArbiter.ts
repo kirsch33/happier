@@ -67,6 +67,7 @@ function isDeterministicPreProviderInputRejection(
 export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
   injectPrompt: ClaudeUnifiedPromptInjector<Mode>['injectPrompt'];
   onPromptInjected?: ClaudeUnifiedPromptInjectedHandler<Mode> | undefined;
+  onPromptSubmissionRefreshed?: ClaudeUnifiedPromptInjectedHandler<Mode> | undefined;
   onPromptAccepted?: ClaudeUnifiedPromptAcceptedHandler<Mode> | undefined;
   nowMs?: (() => number) | undefined;
   quietPeriodMs?: number | undefined;
@@ -151,6 +152,7 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
   let ambiguousProviderAcceptanceFailure: PendingProviderAcceptance<Mode> | null = null;
   const providerAcceptanceUnknownTerminalBatches = new Set<ClaudeUnifiedPromptBatch<Mode>>();
   const terminalCustodyBatches = new Set<ClaudeUnifiedPromptBatch<Mode>>();
+  const alreadyEmptyAmbiguousDraftGraceBatches = new Set<ClaudeUnifiedPromptBatch<Mode>>();
   const terminalCustodyAcceptances: Array<PendingProviderAcceptance<Mode>> = [];
   let ambiguousProviderAcceptanceRetryAttempt = 0;
   let lastInjectedNotifiedBatch: ClaudeUnifiedPromptBatch<Mode> | null = null;
@@ -446,6 +448,8 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     if (lastInjectedNotifiedBatch !== batch) {
       lastInjectedNotifiedBatch = batch;
       await opts.onPromptInjected?.(batch, acceptance, result);
+    } else {
+      await opts.onPromptSubmissionRefreshed?.(batch, acceptance, result);
     }
     if (acceptance.acceptedAs === 'in_flight_steer') {
       // Acceptance evidence arrives only at turn end; defer the acceptance timeout until
@@ -473,7 +477,22 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
       return false;
     }
     if (disposed || queue[0] !== pending.batch) return true;
+    if (result.status === 'already_empty') {
+      if (alreadyEmptyAmbiguousDraftGraceBatches.has(pending.batch)) return false;
+      alreadyEmptyAmbiguousDraftGraceBatches.add(pending.batch);
+      pendingProviderAcceptance = null;
+      pendingAcceptanceCompletedCompaction = false;
+      ambiguousProviderAcceptanceFailure = null;
+      lastFailureReason = null;
+      await observeSubmittedPrompt(pending.batch, pending.acceptance, {
+        status: 'injected',
+        at: nowMs(),
+        bytesWritten: Buffer.byteLength(pending.batch.message),
+      });
+      return true;
+    }
     if (result.status !== 'submitted') return false;
+    alreadyEmptyAmbiguousDraftGraceBatches.delete(pending.batch);
     pendingProviderAcceptance = null;
     pendingAcceptanceCompletedCompaction = false;
     ambiguousProviderAcceptanceFailure = null;
@@ -537,6 +556,7 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     }
     terminalCustodyBatches.delete(batch);
     providerAcceptanceUnknownTerminalBatches.delete(batch);
+    alreadyEmptyAmbiguousDraftGraceBatches.delete(batch);
     if (lastInjectedNotifiedBatch === batch) {
       lastInjectedNotifiedBatch = null;
     }
@@ -907,6 +927,7 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
       ambiguousProviderAcceptanceFailure = null;
       providerAcceptanceUnknownTerminalBatches.clear();
       terminalCustodyBatches.clear();
+      alreadyEmptyAmbiguousDraftGraceBatches.clear();
       terminalCustodyAcceptances.length = 0;
       ambiguousProviderAcceptanceRetryAttempt = 0;
       lastInjectedNotifiedBatch = null;

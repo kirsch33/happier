@@ -60,6 +60,33 @@ describe('createClaudeOwnComposerTextLog (lane X, incident cmq8y3nlx user_draft 
     expect(log.matches(visibleFragment)).toBe(false);
   });
 
+  it('matches a guarded medium fragment only for the current ambiguous batch', () => {
+    const log = createClaudeOwnComposerTextLog();
+    const prompt = [
+      'CAPTAIN_DIRECT_UPDATE continue the DBTools App folder cleanup from the latest transcript',
+      'preserve the Goal exactly and do not start unrelated architecture changes',
+      'focus on the active pending message before asking for new direction',
+    ].join(' ');
+    const fragment = 'continue the DBTools App folder cleanup from the latest transcript preserve the Goal exactly';
+
+    log.record(prompt);
+    expect(fragment.length).toBeGreaterThanOrEqual(60);
+    expect(fragment.length).toBeLessThan(200);
+    expect(log.matches(fragment)).toBe(false);
+    expect(log.matches(fragment, { currentBatchText: prompt })).toBe(true);
+  });
+
+  it('does not match short or low-token current-batch fragments', () => {
+    const log = createClaudeOwnComposerTextLog();
+    const prompt = 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron';
+    log.record(prompt);
+
+    expect(log.matches('alpha beta gamma delta epsilon', { currentBatchText: prompt })).toBe(false);
+    expect(log.matches('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', {
+      currentBatchText: `prefix xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx suffix`,
+    })).toBe(false);
+  });
+
   it('is bounded: oldest entries are evicted beyond the limit', () => {
     const log = createClaudeOwnComposerTextLog({ limit: 2 });
     log.record('one');

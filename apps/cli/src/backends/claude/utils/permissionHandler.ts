@@ -27,6 +27,7 @@ import { isToolAllowedForSession } from '@/agent/permissions/permissionToolIdent
 import { shouldSuppressProviderPermissionForHappierApproval } from '@/agent/tools/happierTools/resolveHappierActionForMcpToolName';
 import { applyAllowedToolsToAllowlist, applyUpdatedPermissionsToAllowlist, seedAllowlistFromCompletedRequests } from '@/agent/permissions/applyPermissionAllowlistUpdates';
 import { AgentStateRequestStore, type AgentStateOutstandingRequest } from '@/agent/permissions/agentStateRequestStore';
+import { isAskUserQuestionToolName } from '@/backends/claude/localPermissions/askUserQuestionFreeformDefault';
 import {
     createPermissionRequestCoordinator,
     type PermissionRequestCoordinator,
@@ -46,8 +47,7 @@ type PermissionResponse = PermissionRpcPayload;
 
 function isInteractiveTool(toolName: string): boolean {
     return (
-        toolName === 'AskUserQuestion' ||
-        toolName === 'ask_user_question' ||
+        isAskUserQuestionToolName(toolName) ||
         toolName === 'ExitPlanMode' ||
         toolName === 'exit_plan_mode'
     );
@@ -561,7 +561,7 @@ export class PermissionHandler {
                 : {}),
         };
 
-        if (context.toolName === 'AskUserQuestion' && response.approved && response.answers) {
+        if (isAskUserQuestionToolName(context.toolName) && response.approved && response.answers) {
             const baseInput =
                 context.toolInput && typeof context.toolInput === 'object' && !Array.isArray(context.toolInput)
                     ? (context.toolInput as Record<string, unknown>)

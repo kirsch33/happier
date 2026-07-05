@@ -54,6 +54,19 @@ function makePort(rec: Recorder, paneId: string | typeof OMIT_PANE = 'terminal_2
   });
 }
 
+function makeResolvingPort(rec: Recorder, paneIds: string[]) {
+  let index = 0;
+  return createZellijTerminalControlPort({
+    actions: rec.actions,
+    zellijBinary: 'zellij',
+    env: BASE_ENV,
+    sessionName: 'happy',
+    paneId: 'stale_terminal',
+    resolvePaneId: async () => paneIds[Math.min(index++, paneIds.length - 1)] ?? null,
+    nowMs: () => 7,
+  });
+}
+
 describe('createZellijTerminalControlPort', () => {
   it('exposes the zellij host kind', () => {
     expect(makePort(recordingActions()).hostKind).toBe('zellij');
@@ -117,6 +130,21 @@ describe('createZellijTerminalControlPort', () => {
     await makePort(rec).sendSpecialKey('CtrlJ');
     await makePort(rec).sendSpecialKey('CtrlU');
     expect(rec.writes.map((w) => w.text)).toEqual(['\n', '\u0015']);
+  });
+
+  it('resolves the live pane for each named key, raw key, and capture action', async () => {
+    const rec = recordingActions({ dumpScreenReturn: 'screen' });
+    const port = makeResolvingPort(rec, ['replacement_1', 'replacement_2', 'replacement_3']);
+
+    await port.sendSpecialKey('Enter');
+    await port.sendSpecialKey('CtrlU');
+    await port.captureScreen();
+
+    expect(rec.enters).toEqual(['replacement_1']);
+    expect(rec.writes).toEqual([
+      { paneId: 'replacement_2', text: '\u0015', env: { ...BASE_ENV, ZELLIJ_SESSION_NAME: 'happy' } },
+    ]);
+    expect(rec.dumps).toEqual(['replacement_3']);
   });
 
   it('captures the FULL pane via dump-screen and strips ANSI via the shared normalizer', async () => {

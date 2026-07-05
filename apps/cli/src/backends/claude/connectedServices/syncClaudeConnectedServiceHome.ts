@@ -1,4 +1,4 @@
-import { lstat, mkdir, readdir, realpath, rename, rm, stat, symlink } from 'node:fs/promises';
+import { lstat, mkdir, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import {
@@ -303,6 +303,19 @@ function buildSelfSourceSharedStateUnavailableDiagnostic(reason: string): Connec
   };
 }
 
+function buildClaudeSharedProjectsStoreUnwritableDiagnostic(reason: string): ConnectedServicesMaterializationDiagnostic {
+  return {
+    code: 'claude_shared_projects_store_unwritable',
+    providerId: 'claude',
+    severity: 'warning',
+    serviceId: 'claude-subscription',
+    requestedStateMode: 'shared',
+    effectiveStateMode: 'isolated',
+    entryName: 'projects',
+    reason,
+  };
+}
+
 async function realpathOrNull(path: string): Promise<string | null> {
   try {
     return await realpath(path);
@@ -311,13 +324,55 @@ async function realpathOrNull(path: string): Promise<string | null> {
   }
 }
 
+async function ensureClaudeProjectsRootWritable(path: string): Promise<boolean> {
+  try {
+    await mkdir(path, { recursive: true });
+    const pathStat = await stat(path);
+    if (!pathStat.isDirectory()) return false;
+    const testPath = join(
+      path,
+      `.happier-state-write-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    try {
+      await writeFile(testPath, '');
+    } finally {
+      await rm(testPath, { force: true }).catch(() => {});
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 type SelfSourceProjectsReconciliation = Readonly<{
   effectiveStateMode: ClaudeStateMode;
-  /** Physical root candidate session imports must land in when shared (the link source). */
-  sharedProjectsRoot: string | null;
+  /** Physical root candidate session imports must land in for the effective state mode. */
+  sessionImportProjectsRoot: string | null;
   stateEntries: readonly string[];
   diagnostics: readonly ConnectedServicesMaterializationDiagnostic[];
 }>;
+
+async function replaceClaudeProjectsSymlinkWithIsolatedDirectory(params: Readonly<{
+  targetProjectsRoot: string;
+  readableSourceProjectsRoot: string;
+}>): Promise<void> {
+  const isolatedProjectsRoot = `${params.targetProjectsRoot}.happier-isolated-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await mkdir(isolatedProjectsRoot, { recursive: true });
+    await importConnectedServiceSessionFiles({
+      roots: [{
+        sourceRoot: params.readableSourceProjectsRoot,
+        destinationRoot: isolatedProjectsRoot,
+        includeFile: (relativePath: string) => relativePath.toLowerCase().endsWith('.jsonl'),
+      }],
+    });
+    await rm(params.targetProjectsRoot, { recursive: true, force: true });
+    await rename(isolatedProjectsRoot, params.targetProjectsRoot);
+  } catch (error) {
+    await rm(isolatedProjectsRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
 
 /**
  * RD-MAT-2: a provenance-matched (self-source) home never re-ran the state-sharing descriptor, so
@@ -341,7 +396,7 @@ async function reconcileSelfSourceClaudeProjectsStateMode(params: Readonly<{
     await mkdir(targetProjectsRoot, { recursive: true }).catch(() => {});
     return {
       effectiveStateMode: 'isolated',
-      sharedProjectsRoot: null,
+      sessionImportProjectsRoot: targetProjectsRoot,
       stateEntries: [],
       diagnostics: [],
     };
@@ -349,16 +404,38 @@ async function reconcileSelfSourceClaudeProjectsStateMode(params: Readonly<{
 
   const ambientProjectsRoot = join(params.ambientStateSourceDir, 'projects');
   if (resolve(params.ambientStateSourceDir) === resolve(params.targetDir)) {
+    if (entryState === 'symlink') {
+      await rm(targetProjectsRoot, { force: true });
+      await mkdir(targetProjectsRoot, { recursive: true }).catch(() => {});
+    }
     return {
       effectiveStateMode: 'isolated',
-      sharedProjectsRoot: null,
+      sessionImportProjectsRoot: targetProjectsRoot,
       stateEntries: [],
       diagnostics: [buildSelfSourceSharedStateUnavailableDiagnostic('shared_state_source_unavailable')],
     };
   }
 
   try {
-    await mkdir(ambientProjectsRoot, { recursive: true });
+    if (!await ensureClaudeProjectsRootWritable(ambientProjectsRoot)) {
+      if (entryState === 'symlink') {
+        await replaceClaudeProjectsSymlinkWithIsolatedDirectory({
+          targetProjectsRoot,
+          readableSourceProjectsRoot: ambientProjectsRoot,
+        });
+      } else if (entryState === 'other') {
+        await moveConnectedServiceHomeEntryAside(targetProjectsRoot);
+        await mkdir(targetProjectsRoot, { recursive: true }).catch(() => {});
+      } else if (entryState === 'missing') {
+        await mkdir(targetProjectsRoot, { recursive: true }).catch(() => {});
+      }
+      return {
+        effectiveStateMode: 'isolated',
+        sessionImportProjectsRoot: targetProjectsRoot,
+        stateEntries: [],
+        diagnostics: [buildClaudeSharedProjectsStoreUnwritableDiagnostic('shared_state_store_unwritable')],
+      };
+    }
     if (entryState === 'symlink') {
       const [linkedRealPath, ambientRealPath] = await Promise.all([
         realpathOrNull(targetProjectsRoot),
@@ -367,7 +444,7 @@ async function reconcileSelfSourceClaudeProjectsStateMode(params: Readonly<{
       if (linkedRealPath && ambientRealPath && linkedRealPath === ambientRealPath) {
         return {
           effectiveStateMode: 'shared',
-          sharedProjectsRoot: ambientProjectsRoot,
+          sessionImportProjectsRoot: ambientProjectsRoot,
           stateEntries: ['projects'],
           diagnostics: [],
         };
@@ -389,14 +466,18 @@ async function reconcileSelfSourceClaudeProjectsStateMode(params: Readonly<{
     await symlink(ambientProjectsRoot, targetProjectsRoot, process.platform === 'win32' ? 'junction' : 'dir');
     return {
       effectiveStateMode: 'shared',
-      sharedProjectsRoot: ambientProjectsRoot,
+      sessionImportProjectsRoot: ambientProjectsRoot,
       stateEntries: ['projects'],
       diagnostics: [],
     };
   } catch {
+    if (entryState === 'symlink') {
+      await rm(targetProjectsRoot, { force: true }).catch(() => {});
+      await mkdir(targetProjectsRoot, { recursive: true }).catch(() => {});
+    }
     return {
       effectiveStateMode: 'isolated',
-      sharedProjectsRoot: null,
+      sessionImportProjectsRoot: targetProjectsRoot,
       stateEntries: [],
       diagnostics: [buildSelfSourceSharedStateUnavailableDiagnostic('shared_state_link_failed')],
     };
@@ -435,11 +516,11 @@ export async function syncClaudeConnectedServiceHome(params: Readonly<{
           sourceEnv: params.sourceEnv,
         }),
       });
-      const importedSessionFileMappings = reconciliation.effectiveStateMode === 'shared' && reconciliation.sharedProjectsRoot
+      const importedSessionFileMappings = reconciliation.sessionImportProjectsRoot
         ? await importClaudeCandidatePersistedSessionFile({
             vendorResumeId: params.vendorResumeId ?? null,
             candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
-            destinationProjectsRoot: reconciliation.sharedProjectsRoot,
+            destinationProjectsRoot: reconciliation.sessionImportProjectsRoot,
           })
         : [];
       await writeConnectedServiceStateSharingManifest(
@@ -470,16 +551,25 @@ export async function syncClaudeConnectedServiceHome(params: Readonly<{
     await removeClaudeCredentialEntries(params.targetDir, removeCredentialEntriesOptions);
 
     const sharedSourceProjectsRoot = join(sourceDir, 'projects');
+    const sharedProjectsWritable = settings.stateMode === 'shared'
+      ? await ensureClaudeProjectsRootWritable(sharedSourceProjectsRoot)
+      : false;
+    const effectiveStateMode: ClaudeStateMode = settings.stateMode === 'shared' && !sharedProjectsWritable
+      ? 'isolated'
+      : settings.stateMode;
+    const sharedProjectsDiagnostics = settings.stateMode === 'shared' && !sharedProjectsWritable
+      ? [buildClaudeSharedProjectsStoreUnwritableDiagnostic('shared_state_store_unwritable')]
+      : [];
     // Candidate import runs BEFORE the descriptor applies (import-then-link, F15/H4 ordering) and
     // through the conflict-reconciling importer so divergent copies converge on the canonical jsonl.
-    const candidateSessionFileMappings = settings.stateMode === 'shared'
+    const candidateSessionFileMappings = effectiveStateMode === 'shared'
       ? await importClaudeCandidatePersistedSessionFile({
           vendorResumeId: params.vendorResumeId ?? null,
           candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
           destinationProjectsRoot: sharedSourceProjectsRoot,
         })
       : [];
-    const importSessionRoots = settings.stateMode === 'shared'
+    const importSessionRoots = effectiveStateMode === 'shared'
         ? [
             {
               sourceRoot: join(params.targetDir, 'projects'),
@@ -502,7 +592,7 @@ export async function syncClaudeConnectedServiceHome(params: Readonly<{
       },
       configMode: settings.configMode,
       requestedStateMode: settings.stateMode,
-      effectiveStateMode: settings.stateMode,
+      effectiveStateMode,
       cwd: params.sessionDirectory ?? process.cwd(),
       existingManifest,
       sessionImportRoots: importSessionRoots,
@@ -520,10 +610,18 @@ export async function syncClaudeConnectedServiceHome(params: Readonly<{
       targetDir: params.targetDir,
       sessionDirectory: params.sessionDirectory ?? process.cwd(),
     });
+    const isolatedCandidateSessionFileMappings = effectiveStateMode === 'isolated'
+      ? await importClaudeCandidatePersistedSessionFile({
+          vendorResumeId: params.vendorResumeId ?? null,
+          candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+          destinationProjectsRoot: join(params.targetDir, 'projects'),
+        })
+      : [];
     await writeConnectedServiceStateSharingManifest(params.targetDir, {
       ...applyResult.manifest,
+      diagnostics: [...sharedProjectsDiagnostics, ...applyResult.manifest.diagnostics],
       sessionFileMappings: await mergeClaudeSessionFileMappings({
-        previousMappings: candidateSessionFileMappings,
+        previousMappings: [...candidateSessionFileMappings, ...isolatedCandidateSessionFileMappings],
         nextMappings: applyResult.manifest.sessionFileMappings,
       }),
     });
@@ -532,7 +630,7 @@ export async function syncClaudeConnectedServiceHome(params: Readonly<{
       providerId: 'claude',
       requestedStateMode: settings.stateMode,
       effectiveStateMode: applyResult.manifest.effectiveStateMode,
-      diagnostics: applyResult.diagnostics,
+      diagnostics: [...sharedProjectsDiagnostics, ...applyResult.diagnostics],
     };
   }, { providerId: 'claude' });
 }
@@ -551,22 +649,25 @@ export async function backfillPreviousClaudeHomeSessionFiles(params: Readonly<{
   sharedSourceProjectsRoot: string;
 }>): Promise<void> {
   const previousProjectsRoot = join(params.previousClaudeConfigDir, 'projects');
-  if (await readClaudeProjectsEntryState(previousProjectsRoot) !== 'directory') {
-    // Missing or symlinked previous projects hold no physical files owned by this home; a symlink's
-    // contents live in the shared store already and must not be bulk-copied into an isolated home.
+  const previousProjectsEntryState = await readClaudeProjectsEntryState(previousProjectsRoot);
+  if (previousProjectsEntryState !== 'directory' && previousProjectsEntryState !== 'symlink') {
     return;
   }
+  const sourceProjectsRoot = previousProjectsEntryState === 'symlink'
+    ? await realpathOrNull(previousProjectsRoot)
+    : previousProjectsRoot;
+  if (!sourceProjectsRoot) return;
   const destinationRoot = params.effectiveStateMode === 'shared'
     ? params.sharedSourceProjectsRoot
     : join(params.stagedClaudeConfigDir, 'projects');
   const [previousRealPath, destinationRealPath] = await Promise.all([
-    realpathOrNull(previousProjectsRoot),
+    realpathOrNull(sourceProjectsRoot),
     realpathOrNull(destinationRoot),
   ]);
   if (previousRealPath && destinationRealPath && previousRealPath === destinationRealPath) return;
   await importConnectedServiceSessionFiles({
     roots: [{
-      sourceRoot: previousProjectsRoot,
+      sourceRoot: sourceProjectsRoot,
       destinationRoot,
       includeFile: (relativePath: string) => relativePath.toLowerCase().endsWith('.jsonl'),
     }],
