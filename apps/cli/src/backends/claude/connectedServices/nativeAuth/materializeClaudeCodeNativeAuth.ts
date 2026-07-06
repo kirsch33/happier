@@ -24,6 +24,7 @@ import { sanitizeClaudeRootConfigFile } from '../claudeRootConfig';
 import { materializeClaudeWorkspaceTrust } from '../materializeClaudeWorkspaceTrust';
 import {
   buildClaudeCodeCredentialPayload,
+  parseClaudeCodeCredentialFile,
   resolveClaudeCodeCredentialsFilePath,
   writeClaudeCodeCredentialsFile,
 } from './claudeCodeCredentialFile';
@@ -33,6 +34,7 @@ import {
   type ClaudeCodeCredentialHealth,
   type ClaudeCodeCredentialHealthStatus,
 } from './claudeCodeCredentialHealth';
+import { findMissingClaudeCodeCredentialScopes } from './claudeCodeCredentialScopes';
 
 export type ClaudeCodeNativeAuthMaterializationResult =
   | Readonly<{
@@ -157,6 +159,18 @@ function diagnosticForKeychainWriteFailure(): ConnectedServicesMaterializationDi
   };
 }
 
+function diagnosticForSourceCredentialFallback(
+  health: ClaudeCodeCredentialHealth,
+): ConnectedServicesMaterializationDiagnostic {
+  return {
+    code: 'claude_subscription_native_auth_source_credentials_used',
+    providerId: 'claude',
+    severity: 'warning',
+    serviceId: 'claude-subscription',
+    reason: health.status,
+  };
+}
+
 export function diagnoseClaudeCodeNativeAuthMaterialization(params: Readonly<{
   record: ConnectedServiceCredentialRecordV1;
 }>): readonly ConnectedServicesMaterializationDiagnostic[] {
@@ -201,6 +215,53 @@ export async function materializeClaudeCodeNativeAuth(params: Readonly<{
 
 function hasNonBlankString(value: unknown): boolean {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isSourceCredentialFallbackEligible(health: ClaudeCodeCredentialHealth): boolean {
+  return health.status === 'missing_access_token' || health.status === 'missing_refresh_token';
+}
+
+type SourceNativeCredentialFile = Readonly<{
+  contents: string;
+}>;
+
+async function readValidSourceNativeCredentialFile(
+  sourceEnv: NodeJS.ProcessEnv,
+): Promise<SourceNativeCredentialFile | null> {
+  const sourceClaudeConfigDir = resolveConfiguredClaudeConfigDir({ env: sourceEnv });
+  const credentialPath = resolveClaudeCodeCredentialsFilePath(sourceClaudeConfigDir);
+  let contents: string;
+  try {
+    contents = await readFile(credentialPath, 'utf8');
+  } catch {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return null;
+  }
+
+  const credential = parseClaudeCodeCredentialFile(parsed);
+  if (credential.status !== 'ok') return null;
+  if (!credential.hasAccessToken || !credential.hasRefreshToken) return null;
+  if (findMissingClaudeCodeCredentialScopes(credential.scopes).length > 0) return null;
+  return { contents: contents.endsWith('\n') ? contents : `${contents}\n` };
+}
+
+async function writeSourceNativeCredentialFile(params: Readonly<{
+  targetClaudeConfigDir: string;
+  sourceCredential: SourceNativeCredentialFile;
+}>): Promise<string> {
+  await mkdir(params.targetClaudeConfigDir, { recursive: true });
+  const credentialPath = resolveClaudeCodeCredentialsFilePath(params.targetClaudeConfigDir);
+  await writeFile(credentialPath, params.sourceCredential.contents, { mode: 0o600 });
+  if (process.platform !== 'win32') {
+    await chmod(credentialPath, 0o600).catch(() => {});
+  }
+  return credentialPath;
 }
 
 type FileRollbackSnapshot = Readonly<{
@@ -287,6 +348,102 @@ export async function writeClaudeSubscriptionNativeAuthMacOsKeychainCredential(p
   }
 }
 
+async function materializeClaudeSubscriptionNativeAuthHomeFromSourceCredential(params: Readonly<{
+  targetClaudeConfigDir: string;
+  sourceEnv: NodeJS.ProcessEnv;
+  accountSettings?: AccountSettings | Readonly<Record<string, unknown>> | null;
+  sessionDirectory?: string | null;
+  vendorResumeId?: string | null;
+  candidatePersistedSessionFile?: string | null;
+  ambientStateSourceDir?: string | null;
+  health: ClaudeCodeCredentialHealth;
+}>): Promise<ClaudeCodeNativeAuthMaterializationResult | null> {
+  const sourceCredential = await readValidSourceNativeCredentialFile(params.sourceEnv);
+  if (!sourceCredential) return null;
+
+  const sharingPolicy = resolveClaudeHomeSharingSettings(params.accountSettings ?? null);
+  const sourceClaudeConfigDir = resolveConfiguredClaudeConfigDir({ env: params.sourceEnv });
+  const fallbackDiagnostic = diagnosticForSourceCredentialFallback(params.health);
+
+  if (resolve(sourceClaudeConfigDir) === resolve(params.targetClaudeConfigDir)) {
+    const syncResult = await syncClaudeConnectedServiceHome({
+      sourceEnv: params.sourceEnv,
+      targetDir: params.targetClaudeConfigDir,
+      accountSettings: params.accountSettings ?? null,
+      sessionDirectory: params.sessionDirectory ?? null,
+      preserveNativeCredentialFile: true,
+      sharingPolicyOverride: {
+        configMode: 'copied',
+        stateMode: sharingPolicy.stateMode,
+      },
+      vendorResumeId: params.vendorResumeId ?? null,
+      candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+      ambientStateSourceDir: params.ambientStateSourceDir ?? null,
+    });
+    await mkdir(params.targetClaudeConfigDir, { recursive: true });
+    await materializeClaudeWorkspaceTrust({
+      sourceEnv: params.sourceEnv,
+      targetDir: params.targetClaudeConfigDir,
+      sessionDirectory: params.sessionDirectory ?? null,
+      preserveExistingOauthAccountProjection: true,
+    });
+    await sanitizeClaudeRootConfigFile(join(params.targetClaudeConfigDir, '.claude.json'));
+    const credentialPath = await writeSourceNativeCredentialFile({
+      targetClaudeConfigDir: params.targetClaudeConfigDir,
+      sourceCredential,
+    });
+    return {
+      status: 'materialized',
+      env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
+      diagnostics: [...syncResult.diagnostics, fallbackDiagnostic],
+      credentialPath,
+    };
+  }
+
+  await mkdir(dirname(params.targetClaudeConfigDir), { recursive: true });
+  return await withConnectedServiceStateSharingDestinationLock(params.targetClaudeConfigDir, async () => {
+    const stagedClaudeConfigDir = await mkdtemp(join(dirname(params.targetClaudeConfigDir), '.happier-claude-config-'));
+    try {
+      const syncResult = await syncClaudeConnectedServiceHome({
+        sourceEnv: params.sourceEnv,
+        targetDir: stagedClaudeConfigDir,
+        accountSettings: params.accountSettings ?? null,
+        sessionDirectory: params.sessionDirectory ?? null,
+        preserveNativeCredentialFile: true,
+        sharingPolicyOverride: {
+          configMode: 'copied',
+          stateMode: sharingPolicy.stateMode,
+        },
+        vendorResumeId: params.vendorResumeId ?? null,
+        candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+      });
+      await sanitizeClaudeRootConfigFile(join(stagedClaudeConfigDir, '.claude.json'));
+      await writeSourceNativeCredentialFile({
+        targetClaudeConfigDir: stagedClaudeConfigDir,
+        sourceCredential,
+      });
+      await backfillPreviousClaudeHomeSessionFiles({
+        previousClaudeConfigDir: params.targetClaudeConfigDir,
+        stagedClaudeConfigDir,
+        effectiveStateMode: syncResult.effectiveStateMode,
+        sharedSourceProjectsRoot: join(sourceClaudeConfigDir, 'projects'),
+      });
+      await replaceDirectoryAtomically({
+        stagedDir: stagedClaudeConfigDir,
+        targetDir: params.targetClaudeConfigDir,
+      });
+      return {
+        status: 'materialized',
+        env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
+        diagnostics: [...syncResult.diagnostics, fallbackDiagnostic],
+        credentialPath: join(params.targetClaudeConfigDir, '.credentials.json'),
+      };
+    } finally {
+      await rm(stagedClaudeConfigDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }, { providerId: 'claude' });
+}
+
 export async function materializeClaudeSubscriptionNativeAuthHome(params: Readonly<{
   record: ConnectedServiceCredentialRecordV1;
   targetClaudeConfigDir: string;
@@ -308,6 +465,24 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
     credentialHealthStatus: health.status,
   });
   if (health.status !== 'ok') {
+    if (isSourceCredentialFallbackEligible(health)) {
+      const sourceCredentialMaterialized = await materializeClaudeSubscriptionNativeAuthHomeFromSourceCredential({
+        targetClaudeConfigDir: params.targetClaudeConfigDir,
+        sourceEnv: params.sourceEnv,
+        accountSettings: params.accountSettings ?? null,
+        sessionDirectory: params.sessionDirectory ?? null,
+        vendorResumeId: params.vendorResumeId ?? null,
+        candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+        ambientStateSourceDir: params.ambientStateSourceDir ?? null,
+        health,
+      });
+      if (sourceCredentialMaterialized) {
+        return {
+          ...sourceCredentialMaterialized,
+          identityDiagnostic,
+        };
+      }
+    }
     const materialized = await materializeClaudeCodeNativeAuth({
       record: params.record,
       claudeConfigDir: params.targetClaudeConfigDir,

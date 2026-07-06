@@ -108,6 +108,102 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     await expect(readFile(join(result!.env.CLAUDE_CONFIG_DIR!, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"source"}\n');
   });
 
+  it('repairs blank Claude subscription records from a valid native Claude credential file', async () => {
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
+    const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-source-config-'));
+    const existingTargetDir = join(
+      activeServerDir,
+      'daemon',
+      'connected-services',
+      'homes',
+      'claude-subscription',
+      'oauth-profile',
+      'claude',
+      'claude-config',
+    );
+    await mkdir(existingTargetDir, { recursive: true });
+    await writeFile(
+      join(existingTargetDir, '.credentials.json'),
+      `${JSON.stringify({
+        claudeAiOauth: {
+          accessToken: '',
+          refreshToken: '',
+          expiresAt: 0,
+          scopes: ['user:sessions:claude_code'],
+        },
+      })}\n`,
+    );
+    await writeFile(
+      join(sourceClaudeConfigDir, '.credentials.json'),
+      `${JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'native-access-placeholder',
+          refreshToken: 'native-refresh-placeholder',
+          expiresAt: REALISTIC_EXPIRES_AT_MS,
+          scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+          subscriptionType: 'max',
+        },
+      })}\n`,
+    );
+    await writeFile(join(sourceClaudeConfigDir, 'settings.json'), '{"theme":"source"}\n');
+    const validRecord = buildConnectedServiceCredentialRecord({
+      now: REALISTIC_ISSUED_AT_MS,
+      serviceId: 'claude-subscription',
+      profileId: 'oauth-profile',
+      kind: 'oauth',
+      expiresAt: REALISTIC_EXPIRES_AT_MS,
+      oauth: {
+        accessToken: 'will-be-blanked',
+        refreshToken: 'will-be-blanked',
+        idToken: null,
+        scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: null,
+        providerEmail: null,
+      },
+    });
+    const blankRecord = {
+      ...validRecord,
+      expiresAt: 0,
+      oauth: {
+        ...validRecord.oauth,
+        accessToken: '',
+        refreshToken: '',
+      },
+    } as typeof validRecord;
+
+    const materializer = createClaudeConnectedServicesMaterializer();
+    const result = await materializer({
+      agentId: 'claude',
+      activeServerDir,
+      rootDir,
+      recordsByServiceId: new Map([['claude-subscription', blankRecord]]),
+      processEnv: {
+        CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+        HOME: tmpdir(),
+      },
+      cleanupRoot: () => {},
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.env.CLAUDE_CONFIG_DIR).toBe(existingTargetDir);
+    expect(result!.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'claude_subscription_native_auth_source_credentials_used',
+      severity: 'warning',
+      reason: 'missing_access_token',
+    }));
+    expect(result!.diagnostics).not.toContainEqual(expect.objectContaining({
+      severity: 'blocking',
+    }));
+
+    const credential = JSON.parse(await readFile(join(existingTargetDir, '.credentials.json'), 'utf8'));
+    expect(credential.claudeAiOauth.accessToken).toBe('native-access-placeholder');
+    expect(credential.claudeAiOauth.refreshToken).toBe('native-refresh-placeholder');
+    expect(credential.claudeAiOauth.scopes).toContain('user:sessions:claude_code');
+    await expect(readFile(join(existingTargetDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"source"}\n');
+  });
+
   it('projects user-accepted Claude workspace trust without copying credentials or per-project approvals', async () => {
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
