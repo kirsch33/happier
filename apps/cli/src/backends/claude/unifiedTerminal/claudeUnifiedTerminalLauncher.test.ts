@@ -1639,6 +1639,95 @@ describe('claudeUnifiedTerminalLauncher', () => {
     }));
   });
 
+  it('rechecks native auth after runtime recovery misses and retries the restored prompt', async () => {
+    setProcessTty(false);
+    const previousSelectionEnv = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+    process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
+      kind: 'group',
+      serviceId: 'claude-subscription',
+      groupId: 'claude',
+      activeProfileId: 'claude-main',
+      fallbackProfileId: 'claude-main',
+      generation: 1,
+    }]);
+    mocks.verifyClaudeCodeNativeAuth
+      .mockResolvedValueOnce({
+        status: 'missing_credentials_file',
+        missingScopes: [],
+        credentialPath: '/tmp/missing/.credentials.json',
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        missingScopes: [],
+        credentialPath: '/home/tester/.claude/.credentials.json',
+      });
+    const session = createSession();
+    session.claudeArgs = ['-p', 'continue from the prompt that auth recovery stranded'];
+    const authError = {
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'authentication_failed',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+      },
+    };
+
+    mocks.runClaudeUnifiedTerminalSession
+      .mockImplementationOnce(async (opts: {
+        nextMessage?: () => Promise<{ message: string } | null>;
+        onRuntimeAuthFailureEvent?: (error: unknown) => Promise<unknown>;
+      }) => {
+        await expect(opts.nextMessage?.()).resolves.toMatchObject({
+          message: 'continue from the prompt that auth recovery stranded',
+        });
+        await expect(opts.onRuntimeAuthFailureEvent?.(authError)).resolves.toMatchObject({
+          action: 'restart_host',
+          reason: 'native_auth_healthy',
+        });
+        throw new ClaudeUnifiedTerminalRuntimeAuthRestartError(authError);
+      })
+      .mockImplementationOnce(async (opts: {
+        nextMessage?: () => Promise<{ message: string } | null>;
+        onPromptAcceptedByProvider?: (input: {
+          maxUserMessageSeq: number | null;
+          userMessageLocalIds: readonly string[];
+        }) => void;
+      }) => {
+        await expect(opts.nextMessage?.()).resolves.toMatchObject({
+          message: 'continue from the prompt that auth recovery stranded',
+        });
+        opts.onPromptAcceptedByProvider?.({
+          maxUserMessageSeq: null,
+          userMessageLocalIds: [],
+        });
+      });
+
+    try {
+      const result = await claudeUnifiedTerminalLauncher(session, {
+        initialMode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'auto',
+        },
+      });
+
+      expect(result).toEqual({ type: 'exit', code: 0 });
+      expect(mocks.runClaudeUnifiedTerminalSession).toHaveBeenCalledTimes(2);
+      expect(mocks.reportConnectedServiceRuntimeAuthFailureToDaemon).toHaveBeenCalledWith(expect.objectContaining({
+        timeoutMs: 15_000,
+      }));
+      expect(session.client.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('native Claude credentials now verify'),
+      }));
+    } finally {
+      if (previousSelectionEnv === undefined) {
+        delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+      } else {
+        process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = previousSelectionEnv;
+      }
+    }
+  });
+
   it('keeps provider auth evidence primary when terminal host death follows in the same failure window', async () => {
     setProcessTty(false);
     const previousSelectionEnv = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];

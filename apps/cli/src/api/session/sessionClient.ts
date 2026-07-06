@@ -1244,6 +1244,18 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    private markCommittedUserMessageLocalIdForAgentQueue(localId: string): void {
+        if (!localId) return;
+        if (this.hasPassiveCommittedUserMessageLocalId(localId)) return;
+        this.markAgentQueueEchoSuppressedLocalId(localId);
+        if (this.hasAgentQueueDeliveredLocalId(localId)) return;
+        if (this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) {
+            this.markAgentQueueInFlightLocalId(localId);
+        } else {
+            this.markAgentQueueDeliveredLocalId(localId);
+        }
+    }
+
     private markAgentQueueDeliveredLocalId(localId: string): void {
         if (!localId) return;
         this.clearAgentQueueInFlightLocalId(localId);
@@ -2108,8 +2120,7 @@ export class ApiSessionClient extends EventEmitter {
             if (ack && ack.ok === true) {
                 this.pendingCommitRetryAttemptsByLocalId.delete(localId);
                 if (params.markAsUserMessage === true) {
-                    this.markAgentQueueEchoSuppressedLocalId(ack.localId ?? localId);
-                    this.markAgentQueueDeliveredLocalId(ack.localId ?? localId);
+                    this.markCommittedUserMessageLocalIdForAgentQueue(ack.localId ?? localId);
                 }
                 this.markCommittedLocalIdAwaitingEcho(localId);
                 this.lastObservedMessageSeq = Math.max(this.lastObservedMessageSeq, ack.seq);
@@ -2191,8 +2202,7 @@ export class ApiSessionClient extends EventEmitter {
         if (ack && ack.ok === true) {
             this.pendingCommitRetryAttemptsByLocalId.delete(localId);
             if (params.markAsUserMessage === true) {
-                this.markAgentQueueEchoSuppressedLocalId(ack.localId ?? localId);
-                this.markAgentQueueDeliveredLocalId(ack.localId ?? localId);
+                this.markCommittedUserMessageLocalIdForAgentQueue(ack.localId ?? localId);
             }
             this.markCommittedLocalIdAwaitingEcho(localId);
             // ACK confirms persistence. Do not inject a synthetic update here: outbound sends are not prompts.

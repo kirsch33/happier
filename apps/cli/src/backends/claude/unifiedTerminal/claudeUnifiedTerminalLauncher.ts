@@ -67,6 +67,7 @@ function shouldForegroundAttachTerminal(): boolean {
 }
 
 const CLAUDE_UNIFIED_TERMINAL_AUTH_FAILURE_HOST_DEATH_WINDOW_MS = 5_000;
+const CLAUDE_UNIFIED_TERMINAL_RUNTIME_AUTH_REPORT_TIMEOUT_MS = 15_000;
 const MAX_CONSECUTIVE_RUNTIME_AUTH_RESTARTS = 2;
 
 type ParkedUnifiedTerminalMessage = Readonly<{
@@ -301,6 +302,21 @@ export async function claudeUnifiedTerminalLauncher(
     },
   });
   await binding.seedPersistedPromptEchoes();
+
+  const maybeRestartStaleClaudeTerminalAfterAuthFailure = async (
+    phase: 'before_recovery' | 'after_recovery',
+  ): Promise<ClaudeUnifiedRuntimeAuthFailureDisposition | null> => {
+    if (consecutiveRuntimeAuthRestarts >= MAX_CONSECUTIVE_RUNTIME_AUTH_RESTARTS) return null;
+    if (!await shouldRestartStaleClaudeTerminalAfterAuthFailure()) return null;
+    consecutiveRuntimeAuthRestarts += 1;
+    session.client.sendSessionEvent({
+      type: 'message',
+      message: phase === 'before_recovery'
+        ? 'Claude Code reported an auth failure in the active terminal, but native Claude credentials still verify. Restarting the Claude terminal...'
+        : 'Claude Code auth recovery did not complete cleanly, but native Claude credentials now verify. Restarting the Claude terminal...',
+    });
+    return { action: 'restart_host', reason: 'native_auth_healthy' };
+  };
 
   const surfaceRateLimit = (details: NormalizedProviderUsageLimitDetailsV1): void => {
     void surfaceClaudeRateLimitRuntimeIssue(session, details, '[unified]')
@@ -645,23 +661,20 @@ export async function claudeUnifiedTerminalLauncher(
       },
       onUsageLimitDetails: surfaceRateLimit,
       onRuntimeAuthFailureEvent: async (error): Promise<ClaudeUnifiedRuntimeAuthFailureDisposition | void> => {
-        if (
-          consecutiveRuntimeAuthRestarts < MAX_CONSECUTIVE_RUNTIME_AUTH_RESTARTS
-          && await shouldRestartStaleClaudeTerminalAfterAuthFailure()
-        ) {
-          consecutiveRuntimeAuthRestarts += 1;
-          session.client.sendSessionEvent({
-            type: 'message',
-            message: 'Claude Code reported an auth failure in the active terminal, but native Claude credentials still verify. Restarting the Claude terminal...',
-          });
+        const immediateRestart = await maybeRestartStaleClaudeTerminalAfterAuthFailure('before_recovery');
+        if (immediateRestart) {
           binding.notePromptTurnTerminal();
-          return { action: 'restart_host', reason: 'native_auth_healthy' };
+          return immediateRestart;
         }
         try {
-          const surfaced = await surfaceClaudeRuntimeAuthFailure(session, error, '[unified]');
+          const surfaced = await surfaceClaudeRuntimeAuthFailure(session, error, '[unified]', {
+            reportTimeoutMs: CLAUDE_UNIFIED_TERMINAL_RUNTIME_AUTH_REPORT_TIMEOUT_MS,
+          });
           if (surfaced) {
             lastSurfacedRuntimeAuthFailureAtMs = Date.now();
           }
+          const restartAfterRecovery = await maybeRestartStaleClaudeTerminalAfterAuthFailure('after_recovery');
+          if (restartAfterRecovery) return restartAfterRecovery;
         } finally {
           binding.notePromptTurnTerminal();
         }

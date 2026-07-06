@@ -132,6 +132,7 @@ export async function reportConnectedServiceRuntimeAuthFailureToDaemon(input: Re
 	  classification: unknown;
 	  notify?: RuntimeAuthFailureNotify;
 	  logger?: RuntimeAuthFailureLogger;
+  timeoutMs?: number;
   logPrefix?: string;
   reportOutboxDir?: string;
   nowMs?: () => number;
@@ -175,7 +176,7 @@ export async function reportConnectedServiceRuntimeAuthFailureToDaemon(input: Re
   async function performReport(): Promise<ConnectedServiceRuntimeAuthFailureDaemonReport> {
     try {
       const report = await notify(reportBody, {
-        timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS,
+        timeoutMs: input.timeoutMs ?? CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS,
       });
       const statusNote = resolveConnectedServiceRuntimeAuthFailureStatusMessage(report);
       const projection = normalizeConnectedServiceRuntimeAuthRecoveryProjection({

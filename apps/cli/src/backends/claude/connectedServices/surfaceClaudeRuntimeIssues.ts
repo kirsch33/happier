@@ -398,6 +398,7 @@ export async function surfaceClaudeRuntimeAuthFailure(
     session: RuntimeIssueSession,
     error: unknown,
     logPrefix: string,
+    opts: Readonly<{ reportTimeoutMs?: number }> = {},
 ): Promise<boolean> {
     if (isSubagentScopedRuntimeAuthEvidence(error)) return false;
     const selection =
@@ -433,6 +434,7 @@ export async function surfaceClaudeRuntimeAuthFailure(
         sessionId: session.client.sessionId,
         switchesThisTurn: 0,
         classification,
+        ...(opts.reportTimeoutMs === undefined ? {} : { timeoutMs: opts.reportTimeoutMs }),
         logPrefix,
     });
     projectClaudeRuntimeAuthRecoveryReport({

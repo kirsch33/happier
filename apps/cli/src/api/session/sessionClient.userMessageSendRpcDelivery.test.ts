@@ -367,7 +367,11 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       },
     });
 
+    await flushApiSessionClientMessageCommitQueue(client as any);
+
     expect(received).toHaveLength(1);
+    expect((client as any).hasAgentQueueInFlightLocalId('l1')).toBe(true);
+    expect((client as any).hasAgentQueueDeliveredLocalId('l1')).toBe(false);
     expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
 
     client.confirmUserMessageDeliveredToProvider(null, { localIds: ['l1'] });
