@@ -181,6 +181,27 @@ describe('clearUserAuthorizedClaudeComposerDraft', () => {
     expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU', 'CtrlE', 'CtrlU']);
   });
 
+  it('keeps clearing while Claude reveals older queued composer fragments', async () => {
+    const port = createFakeControlPort({
+      captures: [
+        idleDraft('newer stale queued fragment'),
+        idleDraft('newer stale queued fragment'),
+        idleDraft('older stale queued fragment'),
+        idleDraft('older stale queued fragment'),
+        EMPTY_COMPOSER,
+      ],
+    });
+
+    const result = await clearUserAuthorizedClaudeComposerDraft({
+      port,
+      wait: async () => undefined,
+      settleMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 2 });
+    expect(port.sentKeys).toEqual(['CtrlE', 'CtrlU', 'CtrlE', 'CtrlU']);
+  });
+
   it('clears a draft below assistant option prose that says "How do you want to proceed?"', async () => {
     const port = createFakeControlPort({
       captures: [ASSISTANT_OPTIONS_WITH_DRAFT, ASSISTANT_OPTIONS_WITH_DRAFT, EMPTY_COMPOSER],

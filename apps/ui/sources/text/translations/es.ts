@@ -5212,6 +5212,12 @@ export const es: TranslationStructure = {
             confirmBody: "Esto descarta el texto sin enviar que está escrito en el terminal. Los mensajes en cola podrán continuar después.",
             confirmButton: "Borrar compositor",
           },
+          submitTerminalComposer: {
+            action: "Enviar compositor",
+            confirmTitle: "¿Enviar el compositor del terminal?",
+            confirmBody: "Esto envía el texto sin enviar que está escrito en el terminal. Los mensajes en cola podrán continuar después.",
+            confirmButton: "Enviar compositor",
+          },
           actions: {
             up: "Arriba",
             down: "Abajo",
@@ -5256,6 +5262,9 @@ export const es: TranslationStructure = {
           clearTerminalComposerFailed: "No se pudo borrar el compositor del terminal",
           clearTerminalComposerUnsupported: "Esta sesión no permite borrar el compositor del terminal desde Happier.",
           clearTerminalComposerUnsafe: "El compositor del terminal no se puede borrar con seguridad ahora mismo.",
+          submitTerminalComposerFailed: "No se pudo enviar el compositor del terminal",
+          submitTerminalComposerUnsupported: "Esta sesión no permite enviar el compositor del terminal desde Happier.",
+          submitTerminalComposerUnsafe: "El compositor del terminal no se puede enviar con seguridad ahora mismo.",
         },
       },
 

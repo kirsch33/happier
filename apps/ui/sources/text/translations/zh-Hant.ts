@@ -4467,6 +4467,12 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
 	                    confirmBody: '這會捨棄目前在終端機中輸入但尚未傳送的文字。之後佇列中的訊息可以繼續傳送。',
 	                    confirmButton: '清空輸入框',
 	                },
+	                submitTerminalComposer: {
+	                    action: '提交輸入框',
+	                    confirmTitle: '提交終端機輸入框？',
+	                    confirmBody: '這會傳送目前在終端機中輸入但尚未傳送的文字。之後佇列中的訊息可以繼續傳送。',
+	                    confirmButton: '提交輸入框',
+	                },
 	                actions: {
                     up: '上移',
                     down: '下移',
@@ -4510,6 +4516,9 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                     clearTerminalComposerFailed: '清空終端機輸入框失敗',
                     clearTerminalComposerUnsupported: '此工作階段不支援從 Happier 清空終端機輸入框。',
                     clearTerminalComposerUnsafe: '目前無法安全地清空終端機輸入框。',
+                    submitTerminalComposerFailed: '提交終端機輸入框失敗',
+                    submitTerminalComposerUnsupported: '此工作階段不支援從 Happier 提交終端機輸入框。',
+                    submitTerminalComposerUnsafe: '目前無法安全地提交終端機輸入框。',
                 },
             },
           planOutput: {

@@ -5684,6 +5684,12 @@ export const ru: TranslationStructure = {
 	            confirmBody: "Это удалит неотправленный текст, введённый в терминале. После этого сообщения в очереди смогут продолжить отправку.",
 	            confirmButton: "Очистить поле",
 	          },
+	          submitTerminalComposer: {
+	            action: "Отправить поле",
+	            confirmTitle: "Отправить поле ввода терминала?",
+	            confirmBody: "Это отправит неотправленный текст, введённый в терминале. После этого сообщения в очереди смогут продолжить отправку.",
+	            confirmButton: "Отправить поле",
+	          },
 	          actions: {
           up: "Вверх",
           down: "Вниз",
@@ -5728,6 +5734,9 @@ export const ru: TranslationStructure = {
           clearTerminalComposerFailed: "Не удалось очистить поле ввода терминала",
           clearTerminalComposerUnsupported: "Эта сессия не поддерживает очистку поля терминала из Happier.",
           clearTerminalComposerUnsafe: "Сейчас нельзя безопасно очистить поле ввода терминала.",
+          submitTerminalComposerFailed: "Не удалось отправить поле ввода терминала",
+          submitTerminalComposerUnsupported: "Эта сессия не поддерживает отправку поля терминала из Happier.",
+          submitTerminalComposerUnsafe: "Сейчас нельзя безопасно отправить поле ввода терминала.",
         },
       },
       sharing: {

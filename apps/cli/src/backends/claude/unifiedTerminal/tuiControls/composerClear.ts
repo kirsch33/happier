@@ -11,7 +11,8 @@ import type { ClaudeScreenState } from './screenState';
 const DEFAULT_USER_AUTHORIZED_COMPOSER_CLEAR_SETTLE_MS = 250;
 // Same bounded keyboard behavior as the automatic own-leftover clear path. Do not use Escape here:
 // live Claude Code 2.1.193 can interpret Escape as Rewind rather than line clear.
-const MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS = 2;
+const MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS = 12;
+const MAX_USER_AUTHORIZED_COMPOSER_UNCHANGED_ATTEMPTS = 2;
 
 export type ClaudeComposerClearRefusalReason =
   | 'generating'
@@ -155,6 +156,8 @@ export async function clearUserAuthorizedClaudeComposerDraft(params: Readonly<{
   const draft = initialClassification.screen.composerContent ?? '';
   let lastScreen = initialClassification.screen;
   let lastRawText = initial.rawText;
+  let lastVisibleDraft = draft;
+  let unchangedDraftAttempts = 0;
   for (let attempt = 1; attempt <= MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS; attempt += 1) {
     const moveFailure = sendResultToFailure(await params.port.sendSpecialKey('CtrlE'));
     if (moveFailure && moveFailure.kind !== 'unsupported') return toComposerClearFailure(moveFailure);
@@ -189,6 +192,15 @@ export async function clearUserAuthorizedClaudeComposerDraft(params: Readonly<{
       case 'refused':
         return { status: 'refused', reason: classification.reason, screen: classification.screen };
       case 'clearable_draft':
+        if ((classification.screen.composerContent ?? '') === lastVisibleDraft) {
+          unchangedDraftAttempts += 1;
+          if (unchangedDraftAttempts >= MAX_USER_AUTHORIZED_COMPOSER_UNCHANGED_ATTEMPTS) {
+            return { status: 'failed', reason: 'clear_failed', screen: classification.screen };
+          }
+        } else {
+          lastVisibleDraft = classification.screen.composerContent ?? '';
+          unchangedDraftAttempts = 0;
+        }
         break;
     }
   }

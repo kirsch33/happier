@@ -5480,6 +5480,12 @@ localTailscale: {
 	          confirmBody: "ターミナルに入力中の未送信テキストを破棄します。その後、キュー内のメッセージを続行できます。",
 	          confirmButton: "入力欄を消去",
 	        },
+	        submitTerminalComposer: {
+	          action: "入力欄を送信",
+	          confirmTitle: "ターミナルの入力欄を送信しますか？",
+	          confirmBody: "ターミナルに入力中の未送信テキストを送信します。その後、キュー内のメッセージを続行できます。",
+	          confirmButton: "入力欄を送信",
+	        },
 	        actions: {
           up: "上へ",
           down: "下へ",
@@ -5524,6 +5530,9 @@ localTailscale: {
           clearTerminalComposerFailed: "ターミナルの入力欄を消去できませんでした",
           clearTerminalComposerUnsupported: "このセッションでは Happier からターミナル入力欄を消去できません。",
           clearTerminalComposerUnsafe: "現在、ターミナルの入力欄を安全に消去できません。",
+          submitTerminalComposerFailed: "ターミナルの入力欄を送信できませんでした",
+          submitTerminalComposerUnsupported: "このセッションでは Happier からターミナル入力欄を送信できません。",
+          submitTerminalComposerUnsafe: "現在、ターミナルの入力欄を安全に送信できません。",
         },
       },
       sharing: {

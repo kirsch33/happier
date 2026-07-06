@@ -571,6 +571,34 @@ describe('PendingMessagesTranscriptBlock', () => {
         expect(screen.findByTestId('pendingMessages.clearTerminalComposer')).toBeTruthy();
     });
 
+    it('offers composer recovery when a materialized message leaves no pending rows but the terminal draft still blocks delivery', async () => {
+        const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
+        sessionValue = {
+            thinking: false,
+            active: true,
+            presence: 'online',
+            agentStateVersion: 1,
+            agentState: {
+                controlledByUser: false,
+                capabilities: {
+                    terminalComposerClearSupported: true,
+                    terminalComposerDraftPresent: true,
+                },
+            },
+        };
+
+        const screen = await renderScreen(React.createElement(PendingMessagesTranscriptBlock, {
+            sessionId: 's1',
+            pendingMessages: [],
+            discardedMessages: [],
+        }));
+
+        expect(screen.findByTestId('pendingMessages.nonSteerableNotice')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.steerBlockedTerminalDraftNotice')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.submitTerminalComposer')).toBeTruthy();
+        expect(screen.findByTestId('pendingMessages.clearTerminalComposer')).toBeTruthy();
+    });
+
     it('invokes the submit-composer session action after confirmation', async () => {
         const PendingMessagesTranscriptBlock = await loadPendingMessagesTranscriptBlock();
         modalConfirm.mockResolvedValueOnce(true);

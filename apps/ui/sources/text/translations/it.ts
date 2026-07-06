@@ -5552,6 +5552,12 @@ export const it: TranslationStructure = {
 	            confirmBody: "Questo elimina il testo non inviato attualmente scritto nel terminale. I messaggi in coda potranno continuare dopo.",
 	            confirmButton: "Cancella compositore",
 	          },
+	          submitTerminalComposer: {
+	            action: "Invia compositore",
+	            confirmTitle: "Inviare il compositore del terminale?",
+	            confirmBody: "Questo invia il testo non inviato attualmente scritto nel terminale. I messaggi in coda potranno continuare dopo.",
+	            confirmButton: "Invia compositore",
+	          },
 	          actions: {
             up: "Su",
             down: "Giù",
@@ -5596,6 +5602,9 @@ export const it: TranslationStructure = {
           clearTerminalComposerFailed: "Impossibile cancellare il compositore del terminale",
           clearTerminalComposerUnsupported: "Questa sessione non supporta la cancellazione del compositore del terminale da Happier.",
           clearTerminalComposerUnsafe: "Il compositore del terminale non può essere cancellato in sicurezza in questo momento.",
+          submitTerminalComposerFailed: "Impossibile inviare il compositore del terminale",
+          submitTerminalComposerUnsupported: "Questa sessione non supporta l'invio del compositore del terminale da Happier.",
+          submitTerminalComposerUnsafe: "Il compositore del terminale non può essere inviato in sicurezza in questo momento.",
         },
       },
 

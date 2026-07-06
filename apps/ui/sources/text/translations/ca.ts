@@ -4879,6 +4879,12 @@ deps: {
 	                    confirmBody: 'Això descarta el text no enviat escrit al terminal. Els missatges en cua podran continuar després.',
 	                    confirmButton: 'Esborra el compositor',
 	                },
+	                submitTerminalComposer: {
+	                    action: 'Envia el compositor',
+	                    confirmTitle: 'Vols enviar el compositor del terminal?',
+	                    confirmBody: 'Això envia el text no enviat escrit al terminal. Els missatges en cua podran continuar després.',
+	                    confirmButton: 'Envia el compositor',
+	                },
 	                actions: {
                     up: 'Amunt',
                     down: 'Avall',
@@ -4922,6 +4928,9 @@ deps: {
                   clearTerminalComposerFailed: 'No s’ha pogut esborrar el compositor del terminal',
                   clearTerminalComposerUnsupported: 'Aquesta sessió no permet esborrar el compositor del terminal des de Happier.',
                   clearTerminalComposerUnsafe: 'El compositor del terminal no es pot esborrar amb seguretat ara mateix.',
+                  submitTerminalComposerFailed: 'No s’ha pogut enviar el compositor del terminal',
+                  submitTerminalComposerUnsupported: 'Aquesta sessió no permet enviar el compositor del terminal des de Happier.',
+                  submitTerminalComposerUnsafe: 'El compositor del terminal no es pot enviar amb seguretat ara mateix.',
               },
           },
 

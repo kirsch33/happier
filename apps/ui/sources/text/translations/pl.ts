@@ -5234,6 +5234,12 @@ export const pl: TranslationStructure = {
 	          confirmBody: "To odrzuci niewysłany tekst wpisany obecnie w terminalu. Wiadomości w kolejce będą mogły potem kontynuować.",
 	          confirmButton: "Wyczyść pole",
 	        },
+	        submitTerminalComposer: {
+	          action: "Wyślij pole",
+	          confirmTitle: "Wysłać pole terminala?",
+	          confirmBody: "To wyśle niewysłany tekst wpisany obecnie w terminalu. Wiadomości w kolejce będą mogły potem kontynuować.",
+	          confirmButton: "Wyślij pole",
+	        },
 	        actions: {
           up: "W górę",
           down: "W dół",
@@ -5278,6 +5284,9 @@ export const pl: TranslationStructure = {
           clearTerminalComposerFailed: "Nie udało się wyczyścić pola terminala",
           clearTerminalComposerUnsupported: "Ta sesja nie obsługuje czyszczenia pola terminala z Happier.",
           clearTerminalComposerUnsafe: "Nie można teraz bezpiecznie wyczyścić pola terminala.",
+          submitTerminalComposerFailed: "Nie udało się wysłać pola terminala",
+          submitTerminalComposerUnsupported: "Ta sesja nie obsługuje wysyłania pola terminala z Happier.",
+          submitTerminalComposerUnsafe: "Nie można teraz bezpiecznie wysłać pola terminala.",
         },
       },
 

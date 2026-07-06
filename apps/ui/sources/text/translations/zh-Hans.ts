@@ -5030,6 +5030,12 @@ export const zhHans: TranslationStructure = {
 	          confirmBody: "这会丢弃当前在终端中输入但尚未发送的文本。之后队列中的消息可以继续发送。",
 	          confirmButton: "清空输入框",
 	        },
+	        submitTerminalComposer: {
+	          action: "提交输入框",
+	          confirmTitle: "提交终端输入框？",
+	          confirmBody: "这会发送当前在终端中输入但尚未发送的文本。之后队列中的消息可以继续发送。",
+	          confirmButton: "提交输入框",
+	        },
 	        actions: {
           up: "上移",
           down: "下移",
@@ -5073,6 +5079,9 @@ export const zhHans: TranslationStructure = {
           clearTerminalComposerFailed: "清空终端输入框失败",
           clearTerminalComposerUnsupported: "此会话不支持从 Happier 清空终端输入框。",
           clearTerminalComposerUnsafe: "现在无法安全地清空终端输入框。",
+          submitTerminalComposerFailed: "提交终端输入框失败",
+          submitTerminalComposerUnsupported: "此会话不支持从 Happier 提交终端输入框。",
+          submitTerminalComposerUnsafe: "现在无法安全地提交终端输入框。",
         },
       },
       sharing: {

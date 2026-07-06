@@ -87,15 +87,17 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         session?.agentState?.capabilities?.terminalComposerDraftPresent === true;
     const terminalDraftBlocksPendingDelivery =
         steerBlockedByTerminalDraft || terminalComposerDraftPresent;
+    const showTerminalComposerRecoveryNotice = Boolean(
+        terminalComposerClearSupported
+        && terminalDraftBlocksPendingDelivery
+    );
     const showNonSteerableNotice = Boolean(
-        pendingCount > 0
-        && (
-            terminalDraftBlocksPendingDelivery
-            || (
-                runtimeStatus.working
-                && supportsInFlightSteer
-                && !canSteerNow
-            )
+        showTerminalComposerRecoveryNotice
+        || (
+            pendingCount > 0
+            && runtimeStatus.working
+            && supportsInFlightSteer
+            && !canSteerNow
         )
     );
 
@@ -716,7 +718,7 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
         edgeThreshold: 2,
     });
 
-    if (pendingCount <= 0 && discardedCount <= 0) return null;
+    if (pendingCount <= 0 && discardedCount <= 0 && !showTerminalComposerRecoveryNotice) return null;
 
     const canExpandPendingQueue =
         pendingCount > 0
@@ -728,14 +730,15 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     const headerLabel =
         pendingCount > 0
             ? `${t('session.pendingMessages.title')} (${pendingCount})`
-            : t('session.pendingMessages.discarded.title');
+            : discardedCount > 0
+                ? t('session.pendingMessages.discarded.title')
+                : t('session.pendingMessages.title');
     const clampedViewportHeightPx =
         typeof scrollContentHeightPx === 'number' && Number.isFinite(scrollContentHeightPx) && scrollContentHeightPx > 0
             ? Math.max(1, Math.min(Math.trunc(scrollContentHeightPx), maxHeight))
             : undefined;
     const showTerminalComposerClearAction = Boolean(
-        pendingCount > 0
-        && terminalComposerClearSupported
+        terminalComposerClearSupported
         && terminalDraftBlocksPendingDelivery
     );
 
