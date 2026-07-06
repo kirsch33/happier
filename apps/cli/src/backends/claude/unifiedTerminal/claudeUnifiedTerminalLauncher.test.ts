@@ -15,6 +15,11 @@ const mocks = vi.hoisted(() => ({
   runTmuxAttach: vi.fn(async () => 0),
   runZellijAttach: vi.fn(async () => 0),
   dispatchActivityNotificationAsync: vi.fn(async () => undefined),
+  verifyClaudeCodeNativeAuth: vi.fn(async () => ({
+    status: 'missing_credentials_file',
+    missingScopes: [],
+    credentialPath: '/tmp/missing/.credentials.json',
+  })),
   reportConnectedServiceRuntimeAuthFailureToDaemon: vi.fn(async () => ({
     handled: false,
     report: null,
@@ -39,6 +44,10 @@ vi.mock('@/activity/notifications/dispatchActivityNotification', () => ({
   dispatchActivityNotificationAsync: mocks.dispatchActivityNotificationAsync,
 }));
 
+vi.mock('../connectedServices/nativeAuth/verifyClaudeCodeNativeAuth', () => ({
+  verifyClaudeCodeNativeAuth: mocks.verifyClaudeCodeNativeAuth,
+}));
+
 vi.mock('@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon', () => ({
   reportConnectedServiceRuntimeAuthFailureToDaemon: mocks.reportConnectedServiceRuntimeAuthFailureToDaemon,
 }));
@@ -46,6 +55,7 @@ vi.mock('@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAut
 import { claudeUnifiedTerminalLauncher } from './claudeUnifiedTerminalLauncher';
 import { ClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
 import { ClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
+import { ClaudeUnifiedTerminalRuntimeAuthRestartError } from './claudeUnifiedTerminalRuntimeAuthRestartError';
 import { createFakeControlPort } from './tuiControls/fakeControlPort';
 import { parseClaudeScreenState } from './tuiControls/screenState';
 
@@ -1563,6 +1573,70 @@ describe('claudeUnifiedTerminalLauncher', () => {
         }),
       });
     });
+  });
+
+  it('restarts a stale Claude terminal auth process when native credentials still verify', async () => {
+    setProcessTty(false);
+    mocks.verifyClaudeCodeNativeAuth.mockResolvedValueOnce({
+      status: 'ok',
+      missingScopes: [],
+      credentialPath: '/home/tester/.claude/.credentials.json',
+    });
+    const session = createSession();
+    session.claudeArgs = ['-p', 'continue from the restored startup prompt'];
+    const authError = {
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'authentication_failed',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+      },
+    };
+
+    mocks.runClaudeUnifiedTerminalSession
+      .mockImplementationOnce(async (opts: {
+        nextMessage?: () => Promise<{ message: string } | null>;
+        onRuntimeAuthFailureEvent?: (error: unknown) => Promise<unknown>;
+      }) => {
+        await expect(opts.nextMessage?.()).resolves.toMatchObject({
+          message: 'continue from the restored startup prompt',
+        });
+        await expect(opts.onRuntimeAuthFailureEvent?.(authError)).resolves.toMatchObject({
+          action: 'restart_host',
+          reason: 'native_auth_healthy',
+        });
+        throw new ClaudeUnifiedTerminalRuntimeAuthRestartError(authError);
+      })
+      .mockImplementationOnce(async (opts: {
+        nextMessage?: () => Promise<{ message: string } | null>;
+        onPromptAcceptedByProvider?: (input: {
+          maxUserMessageSeq: number | null;
+          userMessageLocalIds: readonly string[];
+        }) => void;
+      }) => {
+        await expect(opts.nextMessage?.()).resolves.toMatchObject({
+          message: 'continue from the restored startup prompt',
+        });
+        opts.onPromptAcceptedByProvider?.({
+          maxUserMessageSeq: null,
+          userMessageLocalIds: [],
+        });
+      });
+
+    const result = await claudeUnifiedTerminalLauncher(session, {
+      initialMode: {
+        permissionMode: 'default',
+        claudeUnifiedTerminalHost: 'auto',
+      },
+    });
+
+    expect(result).toEqual({ type: 'exit', code: 0 });
+    expect(mocks.runClaudeUnifiedTerminalSession).toHaveBeenCalledTimes(2);
+    expect(mocks.reportConnectedServiceRuntimeAuthFailureToDaemon).not.toHaveBeenCalled();
+    expect(session.client.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('Restarting the Claude terminal'),
+    }));
   });
 
   it('keeps provider auth evidence primary when terminal host death follows in the same failure window', async () => {

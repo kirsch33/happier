@@ -1,3 +1,6 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 import { createClaudeReadyHandler } from '../ready/createClaudeReadyHandler';
 import { createClaudePendingAwareInputConsumer } from '../createClaudePendingAwareInputConsumer';
 import { PendingQueueMaterializationAuthError } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
@@ -52,12 +55,19 @@ import { shouldSendReadyPushNotification } from '@/settings/notifications/notifi
 import { configuration } from '@/configuration';
 import { delay } from '@/utils/time';
 import { readClaudeActiveUnifiedTerminalHost } from '../utils/readClaudeActiveTerminalMode';
+import { resolveClaudeConfigDirOverride } from '../utils/resolveClaudeConfigDirOverride';
+import { verifyClaudeCodeNativeAuth } from '../connectedServices/nativeAuth/verifyClaudeCodeNativeAuth';
+import {
+  isClaudeUnifiedTerminalRuntimeAuthRestartError,
+  type ClaudeUnifiedRuntimeAuthFailureDisposition,
+} from './claudeUnifiedTerminalRuntimeAuthRestartError';
 
 function shouldForegroundAttachTerminal(): boolean {
   return process.stdin.isTTY === true && process.stdout.isTTY === true;
 }
 
 const CLAUDE_UNIFIED_TERMINAL_AUTH_FAILURE_HOST_DEATH_WINDOW_MS = 5_000;
+const MAX_CONSECUTIVE_RUNTIME_AUTH_RESTARTS = 2;
 
 type ParkedUnifiedTerminalMessage = Readonly<{
   message: string;
@@ -177,6 +187,18 @@ function resolveCurrentRuntimeModeForActiveTerminalRuntime(session: Session, mod
   return asStandaloneUnifiedMode(applyActiveTerminalHostToStartupMode(session, mode));
 }
 
+function resolveClaudeNativeConfigDir(): string {
+  return resolveClaudeConfigDirOverride(process.env)
+    ?? join(process.env.HOME || homedir(), '.claude');
+}
+
+async function shouldRestartStaleClaudeTerminalAfterAuthFailure(): Promise<boolean> {
+  const result = await verifyClaudeCodeNativeAuth({
+    claudeConfigDir: resolveClaudeNativeConfigDir(),
+  }).catch(() => null);
+  return result?.status === 'ok';
+}
+
 export async function claudeUnifiedTerminalLauncher(
   session: Session,
   opts: Readonly<{
@@ -246,6 +268,7 @@ export async function claudeUnifiedTerminalLauncher(
   };
   session.addClaudeSessionHookCallback(transcriptHookCallback);
   let lastSurfacedRuntimeAuthFailureAtMs: number | null = null;
+  let consecutiveRuntimeAuthRestarts = 0;
   const readyHandler = createClaudeReadyHandler({
     session: session.client,
     pushSender: session.pushSender,
@@ -511,6 +534,7 @@ export async function claudeUnifiedTerminalLauncher(
       // provider provably accepted the batch — not when the row entered volatile memory.
       onPromptAcceptedByProvider: ({ maxUserMessageSeq, userMessageLocalIds }) => {
         consecutiveParkRelaunches = 0;
+        consecutiveRuntimeAuthRestarts = 0;
         inFlightStartupMessage = null;
         session.client.confirmUserMessageDeliveredToProvider?.(maxUserMessageSeq, {
           localIds: userMessageLocalIds,
@@ -620,7 +644,19 @@ export async function claudeUnifiedTerminalLauncher(
         session.onThinkingChange(thinking);
       },
       onUsageLimitDetails: surfaceRateLimit,
-      onRuntimeAuthFailureEvent: async (error) => {
+      onRuntimeAuthFailureEvent: async (error): Promise<ClaudeUnifiedRuntimeAuthFailureDisposition | void> => {
+        if (
+          consecutiveRuntimeAuthRestarts < MAX_CONSECUTIVE_RUNTIME_AUTH_RESTARTS
+          && await shouldRestartStaleClaudeTerminalAfterAuthFailure()
+        ) {
+          consecutiveRuntimeAuthRestarts += 1;
+          session.client.sendSessionEvent({
+            type: 'message',
+            message: 'Claude Code reported an auth failure in the active terminal, but native Claude credentials still verify. Restarting the Claude terminal...',
+          });
+          binding.notePromptTurnTerminal();
+          return { action: 'restart_host', reason: 'native_auth_healthy' };
+        }
         try {
           const surfaced = await surfaceClaudeRuntimeAuthFailure(session, error, '[unified]');
           if (surfaced) {
@@ -629,6 +665,7 @@ export async function claudeUnifiedTerminalLauncher(
         } finally {
           binding.notePromptTurnTerminal();
         }
+        return { action: 'surface' };
       },
       onPromptTurnTerminal: surfacePromptTurnTerminal,
       onTerminalInjectionFailure: surfaceTerminalRuntimeIssue,
@@ -690,6 +727,18 @@ export async function claudeUnifiedTerminalLauncher(
         await runUnifiedTerminalSessionOnce();
         return { type: 'exit', code: 0 };
       } catch (error) {
+        if (isClaudeUnifiedTerminalRuntimeAuthRestartError(error)) {
+          session.onThinkingChange(false);
+          await binding.recordPromptTurnFailed().catch((failureError) => {
+            logger.debug('[unified]: failed to mark Claude auth-restart turn failed (non-fatal)', failureError);
+          });
+          await flushUnifiedStartupFailureSurface(session, 'runtime_auth_restart');
+          const shouldRetryRestoredStartupMessage = restoreInFlightStartupMessageAfterHostStartupFailure();
+          if (!consumeParkRelaunchBudget()) return { type: 'exit', code: 1 };
+          if (shouldRetryRestoredStartupMessage) continue;
+          if (await parkForNextMessageAfterRuntimeIssue('runtime_auth_restart')) continue;
+          return { type: 'exit', code: 1 };
+        }
         if (isClaudeUnifiedTerminalHostDeadError(error)) {
           session.onThinkingChange(false);
           if (isRecentClaudeUnifiedTerminalAuthFailure({

@@ -16,6 +16,7 @@ import {
 import type { RawJSONLines } from '../types';
 import type { SessionHookData } from '../utils/startHookServer';
 import { isSidechainSessionHook } from '../utils/sessionHookAttribution';
+import type { ClaudeUnifiedRuntimeAuthFailureDisposition } from './claudeUnifiedTerminalRuntimeAuthRestartError';
 import type { ClaudeUnifiedInputArbiter, ClaudeUnifiedStartableDisposable } from './_types';
 import { logger } from '@/ui/logger';
 
@@ -67,6 +68,19 @@ function readSystemSubtype(message: RawJSONLines): string {
   return typeof raw === 'string' ? raw : '';
 }
 
+function readTrimmedString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isSidechainTranscriptMessage(message: RawJSONLines): boolean {
+  const record = message as Record<string, unknown>;
+  if (record.isSidechain === true) return true;
+  if (readTrimmedString(record.parent_tool_use_id).length > 0) return true;
+  if (readTrimmedString(record.parentToolUseId).length > 0) return true;
+  if (readTrimmedString(record.sidechainId).length > 0) return true;
+  return false;
+}
+
 export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   subscribeClaudeSessionHooks: ClaudeUnifiedSessionHookSubscription;
   arbiter: Pick<ClaudeUnifiedInputArbiter, 'observeLifecycle' | 'confirmPromptAcceptedByProvider' | 'drainWhenSafe'>;
@@ -74,7 +88,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
-  onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
+  onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void | ClaudeUnifiedRuntimeAuthFailureDisposition>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
   /**
    * Provider lifecycle evidence from `UserPromptSubmit` (e.g. the active permission mode). Used by the
@@ -112,7 +126,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
 
   const chainTerminalSideEffect = (
     label: string,
-    effect: (() => void | Promise<void>) | undefined,
+    effect: (() => void | Promise<void | ClaudeUnifiedRuntimeAuthFailureDisposition>) | undefined,
   ): void => {
     if (!effect) return;
     terminalSideEffects = terminalSideEffects
@@ -343,7 +357,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       if (readSystemSubtype(message) === 'compact_boundary') {
         observeCompactionCompleted();
       }
-      if (isClaudeRuntimeAuthFailureEvidence(message)) {
+      if (!isSidechainTranscriptMessage(message) && isClaudeRuntimeAuthFailureEvidence(message)) {
         chainTerminalSideEffect('runtime-auth', () => opts.onRuntimeAuthFailureEvent?.(message));
       }
       const usageLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);

@@ -84,6 +84,10 @@ import type {
   ClaudeUnifiedPromptBatch,
   ClaudeUnifiedStartableDisposable,
 } from './_types';
+import {
+  ClaudeUnifiedTerminalRuntimeAuthRestartError,
+  type ClaudeUnifiedRuntimeAuthFailureDisposition,
+} from './claudeUnifiedTerminalRuntimeAuthRestartError';
 import type { EnhancedMode } from '../loop';
 import type { RawJSONLines } from '../types';
 import type { SessionHookData } from '../utils/startHookServer';
@@ -205,7 +209,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
-  onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
+  onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void | ClaudeUnifiedRuntimeAuthFailureDisposition>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
   onPromptTurnTerminal?: ((event: ClaudeUnifiedPromptTurnTerminalEvent) => void | Promise<void>) | undefined;
   onMessage?: ((message: RawJSONLines) => void) | undefined;
@@ -1438,7 +1442,14 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               await opts.onReady?.();
             },
             onUsageLimitDetails: opts.onUsageLimitDetails,
-            onRuntimeAuthFailureEvent: opts.onRuntimeAuthFailureEvent,
+            onRuntimeAuthFailureEvent: async (error) => {
+              const disposition = await opts.onRuntimeAuthFailureEvent?.(error);
+              if (disposition?.action === 'restart_host') {
+                const restartError = new ClaudeUnifiedTerminalRuntimeAuthRestartError(error);
+                fatalRuntimeError ??= restartError;
+                runtimeAbortController.abort(restartError);
+              }
+            },
             onProviderPromptStarted: opts.onProviderPromptStarted,
             onProviderPromptSubmitMetadata: runtimeControlBridge
               ? (metadata) => runtimeControlBridge?.reconcileFromPromptSubmitMetadata(metadata)

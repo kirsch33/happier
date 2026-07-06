@@ -511,6 +511,54 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
     }
   });
 
+  it('does not surface sidechain Claude auth rows as parent runtime auth failures', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const observeLifecycle = vi.fn();
+    const onRuntimeAuthFailureEvent = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle,
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onRuntimeAuthFailureEvent,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      expect(hook).toBeTypeOf('function');
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
+      bridge.observeTranscript({
+        type: 'assistant',
+        uuid: 'sidechain-auth-failure',
+        isSidechain: true,
+        sidechainId: 'toolu_sidechain_1',
+        isApiErrorMessage: true,
+        error: 'authentication_failed',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+        },
+      } as any);
+
+      await Promise.resolve();
+      expect(onRuntimeAuthFailureEvent).not.toHaveBeenCalled();
+      expect(observeLifecycle).not.toHaveBeenCalledWith({ type: 'turn_state', state: 'idle' });
+    } finally {
+      bridge.dispose();
+    }
+  });
+
   it('runs the terminal prompt-failure projection before clearing the thinking state', async () => {
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     const order: string[] = [];
