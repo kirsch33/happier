@@ -543,7 +543,7 @@ function resolveNativeTelemetryMvcpPolicy(
     return 'default';
 }
 
-function readNativeTouchPageY(event: unknown): number | null {
+function readTouchPageY(event: unknown): number | null {
     const nativeEvent = (event as { nativeEvent?: unknown } | null | undefined)?.nativeEvent as Record<string, unknown> | undefined;
     if (!nativeEvent) return null;
     const candidates = [
@@ -1558,6 +1558,7 @@ const ChatListInternal = React.memo((props: {
     const pinThresholdPxRef = React.useRef(72);
     const lastUserScrollIntentAtMsRef = React.useRef(Number.NEGATIVE_INFINITY);
     const nativeTranscriptTouchStartYRef = React.useRef<number | null>(null);
+    const webTranscriptTouchStartYRef = React.useRef<number | null>(null);
     // Last web scroll-container `scrollTop` we observed or wrote programmatically. Used to detect a
     // genuine web user scroll-up (movement toward the top) without relying on `isTrusted`, which RNW
     // does not reliably set, while excluding our own programmatic pin/restore scroll writes.
@@ -1670,6 +1671,20 @@ const ChatListInternal = React.memo((props: {
         };
     }, []);
     const scheduledPinRef = React.useRef<ScheduledPinToBottom | null>(null);
+    const cancelScheduledPinToBottom = React.useCallback(() => {
+        pendingNativeMountSettleBottomPinRef.current = false;
+        const scheduled = scheduledPinRef.current;
+        if (!scheduled) return;
+        scheduledPinRef.current = null;
+        if (scheduled.kind === 'raf') {
+            const caf = (globalThis as any)?.cancelAnimationFrame as undefined | ((id: any) => void);
+            if (typeof caf === 'function') {
+                caf(scheduled.id);
+            }
+            return;
+        }
+        clearTimeout(scheduled.id);
+    }, []);
     const latestJumpToSeqRef = React.useRef<number | null>(props.jumpToSeq ?? null);
     latestJumpToSeqRef.current = props.jumpToSeq ?? null;
     const initialWebPinStabilizingRef = React.useRef(false);
@@ -1705,6 +1720,12 @@ const ChatListInternal = React.memo((props: {
     const sessionThinkingInlinePresentation = useSetting('sessionThinkingInlinePresentation');
     const sessionThinkingInlineChrome = useSetting('sessionThinkingInlineChrome');
 
+    const releaseWebBottomFollowIntent = React.useCallback(() => {
+        if (Platform.OS !== 'web') return;
+        wantsPinnedRef.current = false;
+        cancelScheduledPinToBottom();
+    }, [cancelScheduledPinToBottom]);
+
     const stopScrollEventPropagationOnWeb = React.useCallback((event: any) => {
         // Expo Router (Vaul/Radix) modals on web often install document-level scroll-lock listeners
         // that `preventDefault()` wheel/touch scroll, which breaks scrolling inside nested scroll views.
@@ -1713,15 +1734,44 @@ const ChatListInternal = React.memo((props: {
         preemptEntryRestoreTransaction();
         const nowMs = Date.now();
         lastUserScrollIntentAtMsRef.current = nowMs;
-        // If the user scrolls upward (away from the bottom), treat that as explicit intent to unpin
-        // immediately, even if they remain within the pinned threshold. This prevents mount-time
-        // stabilization retries from fighting the user for several seconds after entering a session.
+        // If the user scrolls away from the bottom, treat that as explicit intent to unpin
+        // immediately, even if a reliable scroll observation has not arrived yet. This prevents
+        // delayed bottom-follow pins from fighting touch scrolling in the web/PWA transcript.
         const deltaY = (event as any)?.deltaY;
         if (typeof deltaY === 'number' && Number.isFinite(deltaY) && deltaY < 0) {
-            wantsPinnedRef.current = false;
+            releaseWebBottomFollowIntent();
+        } else {
+            const currentY = readTouchPageY(event);
+            const startY = webTranscriptTouchStartYRef.current;
+            if (startY == null && currentY != null) {
+                webTranscriptTouchStartYRef.current = currentY;
+            }
+            const movedVertically =
+                startY != null &&
+                currentY != null &&
+                Math.abs(currentY - startY) >= TRANSCRIPT_NATIVE_TOUCH_ESCAPE_MOVE_THRESHOLD_PX;
+            if (movedVertically) {
+                if (currentY != null) {
+                    webTranscriptTouchStartYRef.current = currentY;
+                }
+                releaseWebBottomFollowIntent();
+            }
         }
         if (typeof event?.stopPropagation === 'function') event.stopPropagation();
-    }, [preemptEntryRestoreTransaction]);
+    }, [
+        preemptEntryRestoreTransaction,
+        releaseWebBottomFollowIntent,
+    ]);
+
+    const recordWebTranscriptTouchStartIntent = React.useCallback((event?: unknown) => {
+        if (Platform.OS !== 'web') return;
+        webTranscriptTouchStartYRef.current = readTouchPageY(event);
+    }, []);
+
+    const recordWebTranscriptTouchEndIntent = React.useCallback(() => {
+        if (Platform.OS !== 'web') return;
+        webTranscriptTouchStartYRef.current = null;
+    }, []);
 
     const markUserScrollIntentOnWeb = React.useCallback(() => {
         if (Platform.OS !== 'web') return;
@@ -2201,21 +2251,6 @@ const ChatListInternal = React.memo((props: {
         props.jumpToSeq,
     ]);
 
-    const cancelScheduledPinToBottom = React.useCallback(() => {
-        pendingNativeMountSettleBottomPinRef.current = false;
-        const scheduled = scheduledPinRef.current;
-        if (!scheduled) return;
-        scheduledPinRef.current = null;
-        if (scheduled.kind === 'raf') {
-            const caf = (globalThis as any)?.cancelAnimationFrame as undefined | ((id: any) => void);
-            if (typeof caf === 'function') {
-                caf(scheduled.id);
-            }
-            return;
-        }
-        clearTimeout(scheduled.id);
-    }, []);
-
     const commitBottomFollowModeState = React.useCallback((next: TranscriptBottomFollowModeState) => {
         const previous = bottomFollowModeStateRef.current;
         bottomFollowModeStateRef.current = next;
@@ -2264,7 +2299,7 @@ const ChatListInternal = React.memo((props: {
 
     const recordNativeTranscriptTouchStartIntent = React.useCallback((event?: unknown) => {
         if (Platform.OS === 'web') return;
-        nativeTranscriptTouchStartYRef.current = readNativeTouchPageY(event);
+        nativeTranscriptTouchStartYRef.current = readTouchPageY(event);
     }, []);
 
     const recordNativeTranscriptTouchEndIntent = React.useCallback(() => {
@@ -2275,7 +2310,7 @@ const ChatListInternal = React.memo((props: {
     const recordNativeTranscriptTouchIntent = React.useCallback((event?: unknown) => {
         if (Platform.OS === 'web') return;
         const hasActiveNativeRestore = hasActiveNativeViewportRestore();
-        const currentY = readNativeTouchPageY(event);
+        const currentY = readTouchPageY(event);
         const startY = nativeTranscriptTouchStartYRef.current;
         if (startY == null && currentY != null) {
             nativeTranscriptTouchStartYRef.current = currentY;
@@ -9279,7 +9314,10 @@ const ChatListInternal = React.memo((props: {
                         {...(Platform.OS === 'web'
                             ? ({
                                         onWheel: stopScrollEventPropagationOnWeb,
+                                        onTouchCancel: recordWebTranscriptTouchEndIntent,
+                                        onTouchEnd: recordWebTranscriptTouchEndIntent,
                                         onTouchMove: stopScrollEventPropagationOnWeb,
+                                        onTouchStart: recordWebTranscriptTouchStartIntent,
                                         onPointerDown: markUserScrollIntentOnWeb,
                                         onMouseDown: markUserScrollIntentOnWeb,
                                   } as any)

@@ -8692,6 +8692,73 @@ describe('ChatList (FlashList v2)', () => {
         });
     });
 
+    it('does not snap web touch scrolling back to bottom when content grows before onScroll', async () => {
+        await withWebFlashListFakeTimers(0, async () => {
+            flashListRefHandle = { scrollToOffset: vi.fn(), scrollToIndex: vi.fn() };
+            sessionMessagesState = {
+                isLoaded: true,
+                messages: [{ kind: 'user-text', id: 'u1', localId: null, createdAt: 1, text: 'hi' }],
+            };
+
+            const scrollEl = createFlashListChatListWebScroller({
+                clientHeight: 100,
+                scrollHeight: 1000,
+                scrollTop: 900,
+            });
+
+            await withFlashListChatListWebScrollerDom(
+                scrollEl,
+                async () => {
+                    const { ChatList } = await import('./ChatList');
+                    const screen = await renderTrackedFlashListChatList(<ChatList session={{ ...sessionState }} />);
+                    await primeFlashListMetrics(100, 1000, { turns: 1 });
+                    await scrollFlashListTo(900, { trusted: false, turns: 1 });
+
+                    await act(async () => {
+                        getCapturedFlashListProps()?.onTouchStart?.({
+                            nativeEvent: {
+                                pageY: 100,
+                                touches: [{ pageY: 100 }],
+                            },
+                        });
+                    });
+
+                    // Mobile Safari can move the DOM scroller under the finger before React Native Web
+                    // dispatches a trustworthy scroll observation. The touch gesture itself must release
+                    // bottom-follow so the delayed content-growth auto-pin cannot pull the user back down.
+                    scrollEl.scrollTop = 700;
+                    await act(async () => {
+                        getCapturedFlashListProps()?.onTouchMove?.({
+                            nativeEvent: {
+                                pageY: 125,
+                                touches: [{ pageY: 125 }],
+                            },
+                            stopPropagation: vi.fn(),
+                        });
+                    });
+
+                    scrollEl.scrollHeight = 1200;
+                    await triggerFlashListChatListContentSizeChange(400, 1200, {
+                        advanceTimersMs: 300,
+                        frames: 1,
+                        turns: 2,
+                    });
+                    await screen.settle({
+                        advanceTimersMs: 300,
+                        frames: 1,
+                        turns: 2,
+                    });
+
+                    expect(scrollEl.scrollTop).toBe(700);
+                },
+                {
+                    document: { getElementById: vi.fn(() => scrollEl) },
+                    window: { getComputedStyle: vi.fn(() => ({ overflowY: 'auto' })) },
+                },
+            );
+        });
+    });
+
     it('shows the jump-to-bottom affordance on web when unpinned even without new activity', async () => {
         await withWebFlashListFakeTimers(0, async () => {
             flashListRefHandle = { scrollToOffset: vi.fn(), scrollToIndex: vi.fn() };
