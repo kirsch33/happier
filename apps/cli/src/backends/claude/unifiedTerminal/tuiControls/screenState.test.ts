@@ -1023,6 +1023,30 @@ describe('parseClaudeScreenState — agents selection panel (live 11:36 incident
     expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('selection_list');
   });
 
+  it('treats focused option-label rows as selection UI, not user-authored drafts', () => {
+    const state = parseClaudeScreenState([
+      'Choose how to proceed',
+      '❯ Option B -- keep both, do the token swap',
+      '  Option C -- defer the token swap',
+    ].join('\n'));
+    expect(state.selectionListVisible).toBe(true);
+    expect(state.composerContent).toBeNull();
+    expect(state.userDraftPresent).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('selection_list');
+  });
+
+  it('still treats a normal composer draft starting with Option as user-authored text', () => {
+    const state = parseClaudeScreenState([
+      '──────────────',
+      '> Option B is what I want',
+      '──────────────',
+      '  ⏵⏵ bypass permissions on',
+    ].join('\n'));
+    expect(state.selectionListVisible).toBe(false);
+    expect(state.composerContent).toBe('Option B is what I want');
+    expect(state.userDraftPresent).toBe(true);
+  });
+
   it('does not flag a normal composer screen as a selection list', () => {
     const state = parseClaudeScreenState([
       '──────────────',

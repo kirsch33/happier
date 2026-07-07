@@ -563,6 +563,22 @@ export async function claudeUnifiedTerminalLauncher(
           localIds: userMessageLocalIds,
         });
       },
+      onPromptProviderAcceptanceFailed: ({ maxUserMessageSeq, userMessageLocalIds, reason }) => {
+        const hasSeqAcceptance =
+          maxUserMessageSeq !== null
+          && session.client.hasUserMessageProviderAcceptance?.({ userMessageSeq: maxUserMessageSeq }) === true;
+        const hasLocalIdAcceptance =
+          userMessageLocalIds.length > 0
+          && userMessageLocalIds.every((localId) =>
+            session.client.hasUserMessageProviderAcceptance?.({ localIds: [localId] }) === true,
+          );
+        if (hasSeqAcceptance || hasLocalIdAcceptance) return;
+        session.client.releaseUserMessagesAwaitingProviderAcceptanceForRetry?.({
+          userMessageSeq: maxUserMessageSeq,
+          localIds: userMessageLocalIds,
+          reason,
+        });
+      },
       registerTerminalComposerClearRuntimeControl: (clearTerminalComposer, submitTerminalComposer) =>
         session.client.registerSessionRuntimeControls?.({ clearTerminalComposer, submitTerminalComposer }) ?? (() => undefined),
       nextMessage: async () => {

@@ -445,6 +445,76 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect((client as any).hasAgentQueueDeliveredLocalId('l1')).toBe(false);
   });
 
+  it('releases provider-unaccepted in-flight RPC prompts for transcript retry', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l1' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
+
+    const received: any[] = [];
+    client.onUserMessage((msg) => received.push(msg));
+
+    await (client as any).enqueueSessionUserMessage({
+      text: 'selected option',
+      localId: 'l1',
+      meta: { source: 'ui', sentFrom: 'ios' },
+    });
+
+    const update = {
+      id: 'u1',
+      createdAt: Date.now(),
+      body: {
+        t: 'new-message',
+        sid: 's1',
+        message: {
+          id: 'm1',
+          seq: 1,
+          content: {
+            t: 'plain',
+            v: {
+              role: 'user',
+              content: { type: 'text', text: 'selected option' },
+              localId: 'l1',
+              meta: { source: 'ui', sentFrom: 'ios' },
+            },
+          },
+          localId: 'l1',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      },
+    };
+
+    (client as any).handleUpdate(update, { source: 'session-scoped' });
+    expect(received).toHaveLength(1);
+    expect((client as any).hasAgentQueueInFlightLocalId('l1')).toBe(true);
+    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
+
+    (client as any).releaseUserMessagesAwaitingProviderAcceptanceForRetry({
+      userMessageSeq: 1,
+      localIds: ['l1'],
+      reason: 'provider_acceptance_timeout',
+    });
+    (client as any).handleUpdate({
+      ...update,
+      id: 'catchup-m1',
+    }, {
+      source: 'session-scoped',
+      catchUpAfterSeq: 0,
+      catchUpAfterSeqIsExplicit: true,
+    });
+
+    expect(received).toHaveLength(2);
+    expect(received[1]?.localId).toBe('l1');
+    expect((client as any).hasAgentQueueInFlightLocalId('l1')).toBe(true);
+    expect((client as any).hasAgentQueueDeliveredLocalId('l1')).toBe(false);
+    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
+  });
+
   it('persists a deferred delivered watermark when provider acceptance resolves a prior echo seq by localId', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,

@@ -129,9 +129,10 @@ const EFFORT_STATUS_LINE = /\beffort:\s*([a-z]+)\b/im;
 
 // Composer prompt line: `>`, `›` (U+203A), or `❯` (U+276F, the real 2.1.170 glyph) followed by
 // optional content (inside an optional box border). The negative lookahead excludes menu-selection
-// lines (`❯ 1. Yes`) — the same `❯` glyph marks dialog choices — so a dialog never reads as an
-// interactive composer (fail-closed: an ambiguous numbered line is treated as not-a-composer).
-const COMPOSER_LINE = /(?:^|\n)[^\S\n]*(?:[│|][^\S\n]*)?(?:>|›|❯)(?![^\S\n]*(?:\d+\.|[◯◉○●◐◑]))[^\S\n]*(.*?)[^\S\n]*(?:[│|][^\S\n]*)?(?:\n|$)/;
+// rows (`❯ 1. Yes`, `❯ Option B`, `❯ ◯ agent`) — the same `❯` glyph marks choices — so a picker
+// never reads as an interactive composer. Keep the `Option` exclusion scoped to the `❯` glyph so a
+// normal composer draft like `> Option B is better` remains a draft.
+const COMPOSER_LINE = /(?:^|\n)[^\S\n]*(?:[│|][^\S\n]*)?(?:>|›|❯(?![^\S\n]*Option\b))(?![^\S\n]*(?:\d+\.|[◯◉○●◐◑]))[^\S\n]*(.*?)[^\S\n]*(?:[│|][^\S\n]*)?(?:\n|$)/i;
 const SLASH_SUGGESTION_LINE = /(?:^|\n)[^\S\n]*\/[a-z][a-z0-9-]*\b/i;
 // Agents/selection panel (live capture 2026-06-12 11:50, runner pid 58731): the selector header
 // renders `↑/↓ to select` and the focus cursor renders as `❯ ◯ <agent-type> <title>` rows. The
@@ -140,6 +141,7 @@ const SLASH_SUGGESTION_LINE = /(?:^|\n)[^\S\n]*\/[a-z][a-z0-9-]*\b/i;
 // blocking overlay for controls and steering.
 const SELECTION_LIST_HINT = /\u2191\/\u2193 to select/;
 const SELECTION_CURSOR_ROW = /(?:^|\n)[^\S\n]*\u276f[^\S\n]*[\u25ef\u25c9\u25cb\u25cf\u25d0\u25d1]/;
+const OPTION_SELECTION_CURSOR_ROW = /(?:^|\n)[^\S\n]*\u276f[^\S\n]*Option\b/i;
 const KNOWN_PLAIN_PLACEHOLDER = /^Try\s+(?:"[^"]+"|“[^”]+”)$/u;
 
 function tailLines(text: string, count: number): string {
@@ -518,7 +520,9 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     keptEffortNoticeCount: Array.from(text.matchAll(EFFORT_KEPT_NOTICE)).length,
     queuedMessageBannerVisible,
     userDraftPresent,
-    selectionListVisible: SELECTION_CURSOR_ROW.test(text) || (SELECTION_LIST_HINT.test(text) && !hasComposer),
+    selectionListVisible: SELECTION_CURSOR_ROW.test(text)
+        || OPTION_SELECTION_CURSOR_ROW.test(text)
+        || (SELECTION_LIST_HINT.test(text) && !hasComposer),
     composerContent,
     composerCursorRelation: composerState.cursorRelation,
     modeMarker,

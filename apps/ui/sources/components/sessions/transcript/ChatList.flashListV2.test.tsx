@@ -6763,14 +6763,14 @@ describe('ChatList (FlashList v2)', () => {
                 resolveLoadOlder?.({ loaded: 50, hasMore: true, status: 'loaded' });
                 await screen.settle();
 
-                expect(scrollEl.scrollTop).toBe(4100);
+                expect(scrollEl.scrollTop).toBe(100);
 
                 visibleAnchor.setRect({ top: 300, bottom: 400 });
                 scrollEl.scrollHeight = 5300;
                 scrollEl.setQuerySelectorAll('[data-testid]', [visibleAnchor]);
                 await primeFlashListMetrics(600, 5300);
 
-                expect(scrollEl.scrollTop).toBe(4280);
+                expect(scrollEl.scrollTop).toBe(280);
             },
             {
                 initialFill: false,

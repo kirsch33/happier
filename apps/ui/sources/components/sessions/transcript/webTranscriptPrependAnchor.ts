@@ -392,9 +392,12 @@ export function captureWebTranscriptPrependAnchor(params: Readonly<{
 
 export function restoreWebTranscriptPrependAnchor(
     anchor: WebTranscriptPrependAnchor,
-    options: WebTranscriptScrollTopWriteOptions,
+    options: WebTranscriptScrollTopWriteOptions & Readonly<{
+        allowGrowthFallback?: boolean;
+    }>,
 ): WebTranscriptPrependRestoreResult {
     const { element } = anchor.metrics;
+    const allowGrowthFallback = options.allowGrowthFallback !== false;
 
     const restoreFromScrollHeightGrowth = (): WebTranscriptPrependRestoreResult | null => {
         const nextScrollHeight = element.scrollHeight;
@@ -455,7 +458,7 @@ export function restoreWebTranscriptPrependAnchor(
         }
     }
 
-    const growthResult = restoreFromScrollHeightGrowth();
+    const growthResult = allowGrowthFallback ? restoreFromScrollHeightGrowth() : null;
     if (growthResult) return growthResult;
     return { didAdjustScroll: false, strategy: 'none' };
 }

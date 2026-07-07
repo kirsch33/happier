@@ -4413,8 +4413,10 @@ const ChatListInternal = React.memo((props: {
 
     const restoreWebPrependAnchorThroughViewportCommand = React.useCallback((
         anchor: WebTranscriptPrependAnchor,
+        options?: Readonly<{ allowGrowthFallback?: boolean }>,
     ): WebTranscriptPrependRestoreResult => {
         return restoreWebTranscriptPrependAnchor(anchor, {
+            allowGrowthFallback: options?.allowGrowthFallback,
             writeScrollTop: (targetScrollTop) => writeWebRestoreScrollTopThroughViewportCommand({
                 mode: 'restore-anchor',
                 reason: 'prepend-restore',
@@ -5695,6 +5697,10 @@ const ChatListInternal = React.memo((props: {
         return resolvePendingWebPrependAnchorIndex(pendingAnchor.anchorTestId) ?? resolvePendingWebPrependItemIndex(pendingAnchor.itemTestId);
     }, [resolvePendingWebPrependAnchorIndex, resolvePendingWebPrependItemIndex]);
 
+    const hasPendingWebPrependIdentity = React.useCallback((pendingAnchor: WebTranscriptPrependAnchor | null): boolean => {
+        return Boolean(pendingAnchor?.anchorTestId || pendingAnchor?.itemTestId);
+    }, []);
+
         const tryScrollPendingWebPrependItemIntoView = React.useCallback((pendingAnchor: WebTranscriptPrependAnchor | null): boolean => {
             if (Platform.OS !== 'web' || listImplementation !== 'flash_v2') return false;
             const index = resolvePendingWebPrependRecoveryIndex(pendingAnchor);
@@ -5708,10 +5714,7 @@ const ChatListInternal = React.memo((props: {
             });
             try {
                 if (target.kind === 'pin_to_bottom') {
-                    return executeViewportCommand(resolveViewportCommand({
-                        type: 'jump-to-bottom',
-                        sessionId: props.sessionId,
-                    }));
+                    return false;
                 }
                 return executeViewportCommand(resolveViewportCommand({
                     type: 'restore-anchor',
@@ -5765,7 +5768,9 @@ const ChatListInternal = React.memo((props: {
 
         pendingWebPrependIndexRecoveryRef.current = false;
         const retryAnchor = pendingWebPrependAnchorRef.current;
-        const retryRestoreResult = restoreWebPrependAnchorThroughViewportCommand(retryAnchor);
+        const retryRestoreResult = restoreWebPrependAnchorThroughViewportCommand(retryAnchor, {
+            allowGrowthFallback: false,
+        });
         recordWebPrependRestoreOutcome(retryRestoreResult);
         const retryMetrics = resolveWebScrollMetrics();
         if (!retryMetrics) {
@@ -6168,7 +6173,12 @@ const ChatListInternal = React.memo((props: {
                         userIntentAtMs: lastUserScrollIntentAtMsRef.current,
                     },
                 );
-                const restoreResult = restoreWebPrependAnchorThroughViewportCommand(pendingWebPrependAnchorRef.current);
+                const recoveryIndex = resolvePendingWebPrependRecoveryIndex(pendingWebPrependAnchorRef.current);
+                const hasIdentity = hasPendingWebPrependIdentity(pendingWebPrependAnchorRef.current);
+                const restoreResult = restoreWebPrependAnchorThroughViewportCommand(
+                    pendingWebPrependAnchorRef.current,
+                    { allowGrowthFallback: !hasIdentity && recoveryIndex == null },
+                );
                 recordWebPrependRestoreOutcome(restoreResult);
                 const metrics = resolveWebScrollMetrics();
                 updateWebPrependRangeReserve(webPrependAnchor, metrics);
@@ -6179,9 +6189,10 @@ const ChatListInternal = React.memo((props: {
                         resolvePendingWebPrependRefreshOptions(restoreResult.strategy),
                     );
                 }
-                pendingWebPrependIndexRecoveryRef.current = restoreResult.strategy === 'growth';
+                pendingWebPrependIndexRecoveryRef.current =
+                    restoreResult.strategy === 'growth' || (restoreResult.strategy === 'none' && recoveryIndex != null);
                 scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
-                if (restoreResult.strategy === 'growth') {
+                if (pendingWebPrependIndexRecoveryRef.current) {
                     schedulePendingWebPrependIndexRecovery();
                 }
             }
@@ -6232,6 +6243,7 @@ const ChatListInternal = React.memo((props: {
         captureCurrentWebPrependAnchor,
         clearOlderLoadSpinnerDelay,
         hasMoreOlder,
+        hasPendingWebPrependIdentity,
         hideOlderLoadSpinner,
         invalidateNativePrependTransaction,
         listImplementation,
@@ -6242,6 +6254,7 @@ const ChatListInternal = React.memo((props: {
         props.sessionId,
         recordRestoreDecisionTelemetry,
         recordWebPrependRestoreOutcome,
+        resolvePendingWebPrependRecoveryIndex,
         resolveSyncLoadOlderOptions,
         resolveWebScrollMetrics,
         scheduleWebPrependRestoreWindowExpiry,
@@ -6410,7 +6423,16 @@ const ChatListInternal = React.memo((props: {
             return;
         }
 
-        const restoreResult = restoreWebPrependAnchorThroughViewportCommand(pendingAnchor);
+        if (pendingWebPrependIndexRecoveryRef.current) {
+            attemptPendingWebPrependIndexRecovery();
+            return;
+        }
+
+        const recoveryIndex = resolvePendingWebPrependRecoveryIndex(pendingAnchor);
+        const hasIdentity = hasPendingWebPrependIdentity(pendingAnchor);
+        const restoreResult = restoreWebPrependAnchorThroughViewportCommand(pendingAnchor, {
+            allowGrowthFallback: !hasIdentity && recoveryIndex == null,
+        });
         recordWebPrependRestoreOutcome(restoreResult);
         const metrics = resolveWebScrollMetrics();
         if (!metrics) {
@@ -6425,11 +6447,13 @@ const ChatListInternal = React.memo((props: {
         );
         scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
         pendingWebPrependIndexRecoveryRef.current =
-            pendingWebPrependIndexRecoveryRef.current || restoreResult.strategy === 'growth';
+            pendingWebPrependIndexRecoveryRef.current
+            || restoreResult.strategy === 'growth'
+            || (restoreResult.strategy === 'none' && recoveryIndex != null);
         if (pendingWebPrependIndexRecoveryRef.current && pendingWebPrependAnchorRef.current) {
             attemptPendingWebPrependIndexRecovery();
         }
-    }, [attemptPendingWebPrependIndexRecovery, clearWebPrependRestoreWindow, listContentHeight, listData.length, listImplementation, props.sessionId, recordRestoreDecisionTelemetry, recordWebPrependRestoreOutcome, resolvePendingWebPrependRefreshOptions, resolveWebScrollMetrics, restoreWebPrependAnchorThroughViewportCommand, scheduleWebPrependRestoreWindowExpiry, updateWebPrependRangeReserve]);
+    }, [attemptPendingWebPrependIndexRecovery, clearWebPrependRestoreWindow, hasPendingWebPrependIdentity, listContentHeight, listData.length, listImplementation, props.sessionId, recordRestoreDecisionTelemetry, recordWebPrependRestoreOutcome, resolvePendingWebPrependRecoveryIndex, resolvePendingWebPrependRefreshOptions, resolveWebScrollMetrics, restoreWebPrependAnchorThroughViewportCommand, scheduleWebPrependRestoreWindowExpiry, updateWebPrependRangeReserve]);
 
         const tryPinToBottomDom = React.useCallback((reason: TranscriptViewportTelemetryScrollReason = 'initial-open'): boolean => {
             if (reason === 'jump-to-bottom') {

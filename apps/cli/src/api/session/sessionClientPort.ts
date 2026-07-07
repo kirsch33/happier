@@ -60,6 +60,9 @@ export interface SessionClientPort {
     seq: number | null | undefined,
     opts?: { localIds?: readonly string[] | null },
   ): void;
+  releaseUserMessagesAwaitingProviderAcceptanceForRetry?(query: UserMessageProviderAcceptanceQuery & {
+    reason?: string | null;
+  }): void;
   hasUserMessageProviderAcceptance?(query: UserMessageProviderAcceptanceQuery): boolean;
   getLastObservedMessageSeq?(): number;
   getCommittedUserMessageSeq?(localId: string): number | null;

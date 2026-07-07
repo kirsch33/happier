@@ -271,6 +271,7 @@ export class ApiSessionClient extends EventEmitter {
     private readonly pendingQueueMaterializedLocalIds = new Set<string>();
     private readonly agentQueueEchoSuppressedLocalIds = new Set<string>();
     private readonly agentQueueInFlightLocalIds = new Set<string>();
+    private readonly undeliveredAgentQueueInFlightSeqByLocalId = new Map<string, number>();
     private readonly agentQueueDeliveredLocalIds = new Set<string>();
     private readonly providerAcceptedUserMessageLocalIdsAwaitingSeq = new Set<string>();
     private readonly passiveCommittedUserMessageLocalIds = new Set<string>();
@@ -936,9 +937,11 @@ export class ApiSessionClient extends EventEmitter {
         }
         this.lastOwedUserMessageCatchUpAt = now;
         const watermarkState = this.readDeliveredUserMessageWatermarkState();
+        const earliestUndeliveredInFlightAfterSeq = this.readEarliestUndeliveredAgentQueueInFlightAfterSeq();
         const afterSeq = Math.max(0, Math.min(
             watermarkState.effective ?? Number.MAX_SAFE_INTEGER,
             this.lastObservedUserMessageSeq,
+            earliestUndeliveredInFlightAfterSeq ?? Number.MAX_SAFE_INTEGER,
         ));
         this.owedUserMessageCatchUpInFlight = true;
         logger.debug('[pendingQueue] owed user-message turn-end catch-up', {
@@ -946,6 +949,7 @@ export class ApiSessionClient extends EventEmitter {
             afterSeq,
             deliveredWatermark: watermarkState.effective,
             lastObservedUserMessageSeq: this.lastObservedUserMessageSeq,
+            earliestUndeliveredInFlightAfterSeq,
         });
         try {
             // Explicit cursor: this is a deliberate owed-delivery replay (the watermark/observed
@@ -1245,6 +1249,41 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    private recordUndeliveredAgentQueueInFlightUserMessage(info: Readonly<{
+        localId: string;
+        seq: number;
+    }>): void {
+        const localId = info.localId.trim();
+        if (!localId || !Number.isInteger(info.seq) || info.seq < 0) return;
+        const existing = this.undeliveredAgentQueueInFlightSeqByLocalId.get(localId);
+        if (existing === undefined || info.seq < existing) {
+            this.undeliveredAgentQueueInFlightSeqByLocalId.set(localId, info.seq);
+        }
+    }
+
+    private clearUndeliveredAgentQueueInFlightLocalId(localId: string): void {
+        if (!localId) return;
+        this.undeliveredAgentQueueInFlightSeqByLocalId.delete(localId);
+    }
+
+    private clearUndeliveredAgentQueueInFlightSeqsThrough(seq: number): void {
+        if (!Number.isInteger(seq) || seq < 0) return;
+        for (const [localId, candidateSeq] of this.undeliveredAgentQueueInFlightSeqByLocalId) {
+            if (candidateSeq <= seq) {
+                this.undeliveredAgentQueueInFlightSeqByLocalId.delete(localId);
+            }
+        }
+    }
+
+    private readEarliestUndeliveredAgentQueueInFlightAfterSeq(): number | null {
+        let earliestSeq: number | null = null;
+        for (const seq of this.undeliveredAgentQueueInFlightSeqByLocalId.values()) {
+            if (!Number.isInteger(seq) || seq < 0) continue;
+            earliestSeq = earliestSeq === null ? seq : Math.min(earliestSeq, seq);
+        }
+        return earliestSeq === null ? null : Math.max(0, earliestSeq - 1);
+    }
+
     private markCommittedUserMessageLocalIdForAgentQueue(localId: string): void {
         if (!localId) return;
         if (this.hasPassiveCommittedUserMessageLocalId(localId)) return;
@@ -1260,6 +1299,7 @@ export class ApiSessionClient extends EventEmitter {
     private markAgentQueueDeliveredLocalId(localId: string): void {
         if (!localId) return;
         this.clearAgentQueueInFlightLocalId(localId);
+        this.clearUndeliveredAgentQueueInFlightLocalId(localId);
         this.agentQueueDeliveredLocalIds.add(localId);
         const existingTimer = this.agentQueueDeliveredLocalIdCleanupTimers.get(localId) ?? null;
         if (existingTimer) {
@@ -1479,6 +1519,8 @@ export class ApiSessionClient extends EventEmitter {
                 markAgentQueueInFlightLocalId: (localId) => this.markAgentQueueInFlightLocalId(localId),
                 hasAgentQueueDeliveredLocalId: (localId) => this.hasAgentQueueDeliveredLocalId(localId),
                 markAgentQueueDeliveredLocalId: (localId) => this.markAgentQueueDeliveredLocalId(localId),
+                onUndeliveredAgentQueueInFlightUserMessageObserved: (info) =>
+                    this.recordUndeliveredAgentQueueInFlightUserMessage(info),
                 allowRetryUndeliveredAgentQueueInFlightLocalIds: opts.catchUpAfterSeqIsExplicit === true,
                 deferAgentQueueDeliveryProofToProviderAcceptance: this.deliveredUserMessageWatermarkDeferredToProviderAcceptance,
                 hasPendingQueueMaterializedLocalId: (localId) => this.hasPendingQueueMaterializedLocalId(localId),
@@ -3242,6 +3284,57 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    releaseUserMessagesAwaitingProviderAcceptanceForRetry(
+        query: UserMessageProviderAcceptanceQuery & { reason?: string | null },
+    ): void {
+        let earliestSeq =
+            Number.isInteger(query.userMessageSeq) && query.userMessageSeq! >= 0
+                ? query.userMessageSeq!
+                : null;
+        const explicitSeqs: number[] = [];
+        for (const seq of query.userMessageSeqs ?? []) {
+            if (!Number.isInteger(seq) || seq < 0) continue;
+            explicitSeqs.push(seq);
+            earliestSeq = earliestSeq === null ? seq : Math.min(earliestSeq, seq);
+        }
+
+        const localIds = this.normalizeProviderAcceptedUserMessageLocalIds(query.localIds);
+        for (const localId of localIds) {
+            const knownSeq =
+                this.undeliveredAgentQueueInFlightSeqByLocalId.get(localId)
+                ?? this.committedUserMessageSeqTracker.get(localId);
+            if (knownSeq !== null && knownSeq !== undefined) {
+                earliestSeq = earliestSeq === null ? knownSeq : Math.min(earliestSeq, knownSeq);
+                this.recordUndeliveredAgentQueueInFlightUserMessage({ localId, seq: knownSeq });
+            }
+            this.clearAgentQueueInFlightLocalId(localId);
+            this.agentQueueDeliveredLocalIds.delete(localId);
+        }
+
+        logger.debug('[pendingQueue] released provider-unaccepted user messages for retry', {
+            sessionId: this.sessionId,
+            reason: query.reason ?? null,
+            localIds,
+            userMessageSeq: query.userMessageSeq ?? null,
+            userMessageSeqs: explicitSeqs,
+            earliestSeq,
+        });
+
+        if (earliestSeq !== null) {
+            const afterSeq = Math.max(0, earliestSeq - 1);
+            void this.catchUpSessionMessages(afterSeq, { afterSeqIsExplicit: true }).catch((error) => {
+                logger.debug('[pendingQueue] released provider-unaccepted user-message catch-up failed (non-fatal)', {
+                    sessionId: this.sessionId,
+                    afterSeq,
+                    error: serializeAxiosErrorForLog(error),
+                });
+            });
+            return;
+        }
+
+        void this.catchUpOwedUserMessagesAfterTurnEnd().catch(() => undefined);
+    }
+
     hasUserMessageProviderAcceptance(query: UserMessageProviderAcceptanceQuery): boolean {
         const providerAccepted = this.readDeliveredUserMessageWatermarkState().providerAccepted;
         const explicitSeqs = new Set<number>();
@@ -3300,6 +3393,7 @@ export class ApiSessionClient extends EventEmitter {
 
     private persistDeliveredUserMessageWatermark(seq: number): void {
         if (!Number.isInteger(seq) || seq < 0) return;
+        this.clearUndeliveredAgentQueueInFlightSeqsThrough(seq);
         if (this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) {
             this.highestProviderAcceptedUserMessageSeq = Math.max(
                 this.highestProviderAcceptedUserMessageSeq ?? -1,
@@ -3524,6 +3618,7 @@ export class ApiSessionClient extends EventEmitter {
         this.committedUserMessageSeqTracker.clear();
         this.agentQueueEchoSuppressedLocalIds.clear();
         this.agentQueueInFlightLocalIds.clear();
+        this.undeliveredAgentQueueInFlightSeqByLocalId.clear();
         this.agentQueueDeliveredLocalIds.clear();
         this.providerAcceptedUserMessageLocalIdsAwaitingSeq.clear();
         this.passiveCommittedUserMessageLocalIds.clear();

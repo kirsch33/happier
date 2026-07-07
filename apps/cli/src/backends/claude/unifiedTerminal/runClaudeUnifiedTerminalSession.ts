@@ -191,6 +191,16 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
     userMessageLocalIds: readonly string[];
     reason: 'invalid_prompt_text';
   }>) => void) | undefined;
+  /**
+   * Fired when a prompt left local queue custody but provider acceptance was never proven. The
+   * launcher must release any in-flight localIds for retry; this is not a delivered watermark.
+   */
+  onPromptProviderAcceptanceFailed?: ((input: Readonly<{
+    message: string;
+    maxUserMessageSeq: number | null;
+    userMessageLocalIds: readonly string[];
+    reason: 'provider_acceptance_timeout';
+  }>) => void) | undefined;
   resolveHostAdapter?: ((preference: ClaudeUnifiedTerminalHostPreference) => Promise<TerminalHostResolution>) | undefined;
   buildSpawn?: ((params: Readonly<{
     first: ClaudeUnifiedTerminalQueuedInput<Mode>;
@@ -1302,6 +1312,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               });
               return;
             }
+            opts.onPromptProviderAcceptanceFailed?.({
+              message: failure.batch.message,
+              maxUserMessageSeq: failure.batch.maxUserMessageSeq ?? null,
+              userMessageLocalIds: failure.batch.userMessageLocalIds ?? [],
+              reason: 'provider_acceptance_timeout',
+            });
             fatalRuntimeError ??= error;
             runtimeAbortController.abort(error);
             return;

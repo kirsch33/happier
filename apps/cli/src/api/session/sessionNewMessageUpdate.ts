@@ -44,6 +44,10 @@ export function handleSessionNewMessageUpdate(params: {
     markAgentQueueInFlightLocalId?: (localId: string) => void;
     hasAgentQueueDeliveredLocalId?: (localId: string) => boolean;
     markAgentQueueDeliveredLocalId?: (localId: string) => void;
+    onUndeliveredAgentQueueInFlightUserMessageObserved?: (info: Readonly<{
+        localId: string;
+        seq: number;
+    }>) => void;
     /**
      * Explicit owed-delivery catch-up may see a local id that is still marked in-flight from a
      * prior volatile queue handoff even though the provider never accepted it. Live echoes must
@@ -284,6 +288,17 @@ export function handleSessionNewMessageUpdate(params: {
             if (isDeliveredLocalPromptEcho && typeof msgSeq === 'number' && Number.isFinite(msgSeq)) {
                 params.onUserMessageDeliveryProvenByLocalEcho?.(msgSeq);
             }
+            if (
+                isAgentQueueInFlightBlockingDelivery
+                && agentQueueLocalId
+                && typeof msgSeq === 'number'
+                && Number.isFinite(msgSeq)
+            ) {
+                params.onUndeliveredAgentQueueInFlightUserMessageObserved?.({
+                    localId: agentQueueLocalId,
+                    seq: Math.trunc(msgSeq),
+                });
+            }
             params.debug('[SOCKET] [UPDATE] Skipped user-message delivery to agent queue', {
                 source: source ?? null,
                 sentFrom: sentFrom ?? null,
@@ -397,6 +412,17 @@ export function handleSessionNewMessageUpdate(params: {
                         || isDeterministicDaemonInitialPrompt;
                     if (isDeliveredLocalPromptEcho && typeof msgSeq === 'number' && Number.isFinite(msgSeq)) {
                         params.onUserMessageDeliveryProvenByLocalEcho?.(msgSeq);
+                    }
+                    if (
+                        isAgentQueueInFlightBlockingDelivery
+                        && agentQueueLocalId
+                        && typeof msgSeq === 'number'
+                        && Number.isFinite(msgSeq)
+                    ) {
+                        params.onUndeliveredAgentQueueInFlightUserMessageObserved?.({
+                            localId: agentQueueLocalId,
+                            seq: Math.trunc(msgSeq),
+                        });
                     }
                     params.debug('[SOCKET] [UPDATE] Skipped coerced user-message delivery to agent queue', {
                         localId,

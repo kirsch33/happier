@@ -4501,6 +4501,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
     const injected: string[] = [];
     const onTerminalInjectionFailure = vi.fn();
     const returnUnconsumedMessage = vi.fn();
+    const onPromptProviderAcceptanceFailed = vi.fn();
     const handle: TerminalHostHandle = {
       kind: 'zellij',
       sessionName: 'happier-claude-session-test',
@@ -4549,6 +4550,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       providerAcceptanceTimeoutMs: 20,
       onTerminalInjectionFailure,
       returnUnconsumedMessage,
+      onPromptProviderAcceptanceFailed,
     })
       .then(() => {
         settlement = { kind: 'resolved' };
@@ -4577,6 +4579,12 @@ describe('runClaudeUnifiedTerminalSession', () => {
         failureState: 'failed_ambiguous',
       }));
       expect(returnUnconsumedMessage).not.toHaveBeenCalled();
+      expect(onPromptProviderAcceptanceFailed).toHaveBeenCalledWith({
+        message: 'steered prompt never accepted',
+        maxUserMessageSeq: null,
+        userMessageLocalIds: [],
+        reason: 'provider_acceptance_timeout',
+      });
     } finally {
       abortController.abort();
       await sessionPromise;
@@ -4587,6 +4595,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
     const abortController = createAbortableSignal();
     const injected: string[] = [];
     const telemetry = { emit: vi.fn() };
+    const onPromptProviderAcceptanceFailed = vi.fn();
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     let currentScreen = interactiveClaudeScreen;
     const handle: TerminalHostHandle = {
@@ -4646,6 +4655,7 @@ describe('runClaudeUnifiedTerminalSession', () => {
       lifecycleCompletionQuiescenceMs: 0,
       providerAcceptanceTimeoutMs: 20,
       telemetry,
+      onPromptProviderAcceptanceFailed,
       subscribeClaudeSessionHooks: (callback) => {
         subscribedHook = callback;
         return () => {
@@ -4706,6 +4716,12 @@ describe('runClaudeUnifiedTerminalSession', () => {
           duplicateRisk: 'likely',
           recoverable: true,
         }),
+      });
+      expect(onPromptProviderAcceptanceFailed).toHaveBeenCalledWith({
+        message: 'terminal custody loses acceptance proof',
+        maxUserMessageSeq: null,
+        userMessageLocalIds: [],
+        reason: 'provider_acceptance_timeout',
       });
     } finally {
       abortController.abort();

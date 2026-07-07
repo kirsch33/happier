@@ -409,6 +409,41 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     expect(catchUpMock).toHaveBeenCalledWith(expect.objectContaining({ afterSeq: 739 }));
   });
 
+  it('rewinds turn-end catch-up before an observed in-flight user row that provider acceptance never confirmed', async () => {
+    const client = await createClient({
+      pendingCount: 0,
+      pendingVersion: 0,
+    });
+    client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
+    const received: unknown[] = [];
+    client.onUserMessage((message) => {
+      received.push(message);
+    });
+
+    (client as any).enqueueSessionUserMessage({
+      text: 'missed provider acceptance',
+      localId: 'prompt-skipped-740',
+      meta: { source: 'ui', sentFrom: 'web' },
+    });
+    expect(received).toHaveLength(1);
+
+    triggerCommittedUserMessage({
+      seq: 1,
+      localId: 'prompt-skipped-740',
+      text: 'missed provider acceptance',
+    });
+    expect(received).toHaveLength(1);
+    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
+
+    await client.sessionTurnLifecycle.beginTurn({ provider: 'claude' });
+    catchUpMock.mockClear();
+    await client.sessionTurnLifecycle.completeTurn({ provider: 'claude' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(catchUpMock).toHaveBeenCalledTimes(1);
+    expect(catchUpMock).toHaveBeenCalledWith(expect.objectContaining({ afterSeq: 0 }));
+  });
+
   it('does not persist a volatile handoff-only seq when a lower provider-accepted seq is confirmed', async () => {
     const client = await createClient({
       pendingCount: 0,
