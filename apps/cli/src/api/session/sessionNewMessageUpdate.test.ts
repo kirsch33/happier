@@ -744,6 +744,70 @@ describe('handleSessionNewMessageUpdate', () => {
     expect(emitted.some((e: any) => e.event === 'user-message')).toBe(true);
   });
 
+  it('allows explicit owed catch-up to retry an undelivered in-flight local prompt', () => {
+    const delivered: any[] = [];
+    const provenSeqs: number[] = [];
+    const emitted: any[] = [];
+    const receivedMessageIds = new Set<string>(['m-in-flight']);
+
+    const update = {
+      id: 'catchup-m-in-flight',
+      createdAt: Date.now(),
+      body: {
+        t: 'new-message',
+        sid: 'sess_1',
+        message: {
+          id: 'm-in-flight',
+          seq: 19,
+          content: {
+            t: 'plain',
+            v: {
+              role: 'user',
+              content: { type: 'text', text: 'selected option' },
+              localId: 'in-flight-1',
+              meta: { source: 'ui', sentFrom: 'ios' },
+            },
+          },
+          localId: 'in-flight-1',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      },
+    } as unknown as Update;
+
+    handleSessionNewMessageUpdate({
+      update,
+      sessionId: 'sess_1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'legacy',
+      receivedMessageIds,
+      allowReprocessReceivedMessageIds: true,
+      allowRetryUndeliveredAgentQueueInFlightLocalIds: true,
+      lastObservedMessageSeq: 18,
+      lastObservedUserMessageSeq: 18,
+      hasSelfEchoSuppressedLocalId: () => true,
+      hasAgentQueueEchoSuppressedLocalId: () => true,
+      hasAgentQueueInFlightLocalId: (localId: string) => localId === 'in-flight-1',
+      hasAgentQueueDeliveredLocalId: () => false,
+      markAgentQueueEchoSuppressedLocalId: () => void 0,
+      markAgentQueueInFlightLocalId: () => void 0,
+      hasPendingQueueMaterializedLocalId: () => false,
+      deleteMaterializedLocalId: () => void 0,
+      pendingMessageCallback: (message, info) => delivered.push({ message, info }),
+      pendingMessages: [],
+      onUserMessageDeliveryProvenByLocalEcho: (seq) => provenSeqs.push(seq),
+      emit: (event, payload) => emitted.push({ event, payload }),
+      debug: () => void 0,
+      debugLargeJson: () => void 0,
+    });
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.message?.localId).toBe('in-flight-1');
+    expect(delivered[0]?.info).toEqual({ seq: 19 });
+    expect(provenSeqs).toEqual([]);
+    expect(emitted.some((e: any) => e.event === 'user-message')).toBe(true);
+  });
+
   it('does not redeliver deterministic daemon-initial-prompt user messages already sent by this agent process', () => {
     const pendingMessages: any[] = [];
     const emitted: any[] = [];

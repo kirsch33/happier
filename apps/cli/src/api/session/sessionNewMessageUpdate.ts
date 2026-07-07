@@ -44,6 +44,12 @@ export function handleSessionNewMessageUpdate(params: {
     markAgentQueueInFlightLocalId?: (localId: string) => void;
     hasAgentQueueDeliveredLocalId?: (localId: string) => boolean;
     markAgentQueueDeliveredLocalId?: (localId: string) => void;
+    /**
+     * Explicit owed-delivery catch-up may see a local id that is still marked in-flight from a
+     * prior volatile queue handoff even though the provider never accepted it. Live echoes must
+     * still suppress in-flight rows to prevent duplicate prompts; only catch-up should opt in.
+     */
+    allowRetryUndeliveredAgentQueueInFlightLocalIds?: boolean;
     deferAgentQueueDeliveryProofToProviderAcceptance?: boolean;
     hasPendingQueueMaterializedLocalId: (localId: string) => boolean;
     deleteMaterializedLocalId: (localId: string) => void;
@@ -227,9 +233,16 @@ export function handleSessionNewMessageUpdate(params: {
         const isEffectivelyAgentQueueEchoSuppressedLocalId =
             shouldRespectAgentQueueEchoSuppression
             && isAgentQueueEchoSuppressedForDelivery;
+        const canRetryUndeliveredAgentQueueInFlightLocalId =
+            params.allowRetryUndeliveredAgentQueueInFlightLocalIds === true
+            && isAgentQueueInFlightLocalId
+            && !isAgentQueueDeliveredLocalId
+            && !isAlreadyPendingAgentQueueMessage;
+        const isAgentQueueInFlightBlockingDelivery =
+            isAgentQueueInFlightLocalId && !canRetryUndeliveredAgentQueueInFlightLocalId;
         const shouldDeliverToAgentQueue =
             !isAgentQueueDeliveredLocalId
-            && !isAgentQueueInFlightLocalId
+            && !isAgentQueueInFlightBlockingDelivery
             && !isEffectivelyAgentQueueEchoSuppressedLocalId
             && !isAlreadyPendingAgentQueueMessage
             && !isSelfEchoSuppressedCliWrite
@@ -280,6 +293,7 @@ export function handleSessionNewMessageUpdate(params: {
                 isAgentQueueEchoSuppressedLocalId,
                 isAgentQueueEchoSuppressedForDelivery,
                 isAgentQueueInFlightLocalId,
+                canRetryUndeliveredAgentQueueInFlightLocalId,
                 isAgentQueueDeliveredLocalId,
                 isAlreadyPendingAgentQueueMessage,
                 isPendingQueueMaterializedLocalId,
@@ -319,6 +333,13 @@ export function handleSessionNewMessageUpdate(params: {
                 const isAgentQueueInFlightLocalId = Boolean(
                     agentQueueLocalId && params.hasAgentQueueInFlightLocalId?.(agentQueueLocalId),
                 );
+                const canRetryUndeliveredAgentQueueInFlightLocalId =
+                    params.allowRetryUndeliveredAgentQueueInFlightLocalIds === true
+                    && isAgentQueueInFlightLocalId
+                    && !isAgentQueueDeliveredLocalId
+                    && !isAlreadyPendingAgentQueueMessage;
+                const isAgentQueueInFlightBlockingDelivery =
+                    isAgentQueueInFlightLocalId && !canRetryUndeliveredAgentQueueInFlightLocalId;
                 const isEffectivelyAgentQueueEchoSuppressedLocalId =
                     isAlreadyPendingAgentQueueMessage
                     && isAgentQueueEchoSuppressedForDelivery;
@@ -340,7 +361,7 @@ export function handleSessionNewMessageUpdate(params: {
                 );
                 const shouldDeliverToAgentQueue =
                     !isAgentQueueDeliveredLocalId
-                    && !isAgentQueueInFlightLocalId
+                    && !isAgentQueueInFlightBlockingDelivery
                     && !isAlreadyPendingAgentQueueMessage
                     && !isEffectivelyAgentQueueEchoSuppressedLocalId
                     && !isSelfEchoSuppressedCliWrite
@@ -382,6 +403,8 @@ export function handleSessionNewMessageUpdate(params: {
                         agentQueueLocalId,
                         isAlreadyPendingAgentQueueMessage,
                         isAgentQueueEchoSuppressedForDelivery,
+                        isAgentQueueInFlightLocalId,
+                        canRetryUndeliveredAgentQueueInFlightLocalId,
                         isAgentQueueDeliveredLocalId,
                         isEffectivelyAgentQueueEchoSuppressedLocalId,
                         isSelfEchoSuppressedCliWrite,

@@ -902,6 +902,7 @@ export class ApiSessionClient extends EventEmitter {
         const mapped = latestTurnStatusForTurnLifecycleEvent(event, terminalStatus);
         if (mapped !== undefined) {
             this.latestTurnStatus = mapped;
+            this.keepAlive(mapped === 'in_progress', 'remote');
         }
         if (!isTerminalTurnLifecycleEvent(event) || this.closed) return;
         logger.debug('[pendingQueue] turn-end drain trigger', {
@@ -1478,6 +1479,7 @@ export class ApiSessionClient extends EventEmitter {
                 markAgentQueueInFlightLocalId: (localId) => this.markAgentQueueInFlightLocalId(localId),
                 hasAgentQueueDeliveredLocalId: (localId) => this.hasAgentQueueDeliveredLocalId(localId),
                 markAgentQueueDeliveredLocalId: (localId) => this.markAgentQueueDeliveredLocalId(localId),
+                allowRetryUndeliveredAgentQueueInFlightLocalIds: opts.catchUpAfterSeqIsExplicit === true,
                 deferAgentQueueDeliveryProofToProviderAcceptance: this.deliveredUserMessageWatermarkDeferredToProviderAcceptance,
                 hasPendingQueueMaterializedLocalId: (localId) => this.hasPendingQueueMaterializedLocalId(localId),
                 deleteMaterializedLocalId: (localId) => this.deleteMaterializedLocalId(localId),
@@ -2805,7 +2807,7 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         if (this.startedByDaemonProcess) {
-            await this.notifyDaemonConnectedServiceTurnLifecycle('prompt_or_steer');
+            void this.notifyDaemonConnectedServiceTurnLifecycle('prompt_or_steer');
         }
 
         // Deliver immediately to the agent queue: this RPC is a prompt input, not a passive transcript write.

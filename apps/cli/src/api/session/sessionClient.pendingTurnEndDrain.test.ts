@@ -185,6 +185,36 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     expect(client.shouldAttemptPendingMaterialization()).toBe(false);
   });
 
+  it('publishes browser presence immediately when canonical provider turns start and finish', async () => {
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 0,
+      pendingVersion: 1,
+    });
+
+    await client.sessionTurnLifecycle.beginTurn({ provider: 'claude' });
+
+    expect(sessionSocketStub?.emit).toHaveBeenCalledWith(
+      'session-alive',
+      expect.objectContaining({
+        sid: 's1',
+        thinking: true,
+        mode: 'remote',
+      }),
+    );
+
+    await client.sessionTurnLifecycle.completeTurn({ provider: 'claude' });
+
+    expect(sessionSocketStub?.volatile.emit).toHaveBeenCalledWith(
+      'session-alive',
+      expect.objectContaining({
+        sid: 's1',
+        thinking: false,
+        mode: 'remote',
+      }),
+    );
+  });
+
   it('allows live-delivery materialization while a canonical turn is active when the caller owns in-flight steer', async () => {
     const client = await createClient({
       latestTurnStatus: 'completed',
