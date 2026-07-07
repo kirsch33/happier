@@ -278,7 +278,7 @@ describe('createClaudeUnifiedInFlightSteerEvaluator', () => {
     expect(hiddenCustody).not.toHaveBeenCalled();
   });
 
-  it('reports terminal custody when the queued banner is visible even if the queued text still renders in the composer', async () => {
+  it('does not report terminal custody when the queued banner is visible but queued text still renders in the composer', async () => {
     const custody = vi.fn();
     const batch = pendingBatch('queued text may remain editable');
     const harness = createHarness({ screen: queuedBannerScreenWithDraft, onPromptCustodyByTerminal: custody });
@@ -298,8 +298,7 @@ describe('createClaudeUnifiedInFlightSteerEvaluator', () => {
         }),
       });
     });
-    expect(custody).toHaveBeenCalledTimes(1);
-    expect(custody).toHaveBeenCalledWith(batch);
+    expect(custody).not.toHaveBeenCalled();
   });
 
   it('does not run a queued-banner check once disposed', async () => {
