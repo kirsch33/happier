@@ -1461,6 +1461,21 @@ export class ApiSessionClient extends EventEmitter {
             return Boolean(expectedLocalId && localId === expectedLocalId);
         }
 
+        if (deliveryIntent === 'explicit_pending') {
+            logger.debug('[DELIVERY-DECISION] explicit pending catch-up user-message accepted', {
+                sessionId: this.sessionId,
+                updateId: update?.id,
+                msgSeq,
+                messageLocalId: message.localId,
+                catchUpAfterSeq: opts.catchUpAfterSeq,
+                catchUpAfterSeqIsExplicit: opts.catchUpAfterSeqIsExplicit,
+                latestTurnStatus: this.latestTurnStatus ?? null,
+                decision: true,
+                reason: 'explicit_pending_catchup',
+            });
+            return true;
+        }
+
         const rawCatchUpAfterSeq = opts.catchUpAfterSeq;
         const catchUpAfterSeq =
             typeof rawCatchUpAfterSeq === 'number' && Number.isFinite(rawCatchUpAfterSeq) && rawCatchUpAfterSeq >= 0

@@ -38,12 +38,6 @@ export function reduceTranscriptScrollPinState(
     }
 
     if (event.type === 'scroll') {
-        if (!event.enabled) {
-            // When disabled, treat as always-pinned and never accumulate new activity.
-            if (state.isPinned && state.newActivityCount === 0) return state;
-            return { ...state, isPinned: true, newActivityCount: 0 };
-        }
-
         const threshold =
             typeof event.pinnedOffsetThresholdPx === 'number' && Number.isFinite(event.pinnedOffsetThresholdPx)
                 ? Math.max(0, Math.trunc(event.pinnedOffsetThresholdPx))
@@ -51,6 +45,13 @@ export function reduceTranscriptScrollPinState(
         const offsetY =
             typeof event.offsetY === 'number' && Number.isFinite(event.offsetY) ? event.offsetY : 0;
         const nextPinned = offsetY <= threshold;
+
+        if (!event.enabled) {
+            // Disabling automatic pinning must not blind the jump-to-bottom UI.
+            // Keep tracking the visual bottom state, but do not retain activity badges.
+            if (state.isPinned === nextPinned && state.newActivityCount === 0) return state;
+            return { ...state, isPinned: nextPinned, newActivityCount: 0 };
+        }
 
         if (nextPinned) {
             if (state.isPinned && state.newActivityCount === 0) return state;

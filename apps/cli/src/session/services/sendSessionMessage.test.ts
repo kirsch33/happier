@@ -92,6 +92,14 @@ describe('sendSessionMessage', () => {
             waited: true,
         }));
 
+        expect(callSessionRpc).toHaveBeenCalledWith(expect.objectContaining({
+            request: expect.objectContaining({
+                meta: expect.objectContaining({
+                    happierDeliveryIntentV1: 'explicit_pending',
+                }),
+            }),
+        }));
+
         expect(waitForIdleViaSocket).toHaveBeenCalledWith(expect.objectContaining({
             initialTurnActivity: {
                 pendingUserTurns: 1,

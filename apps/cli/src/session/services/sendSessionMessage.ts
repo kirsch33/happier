@@ -9,6 +9,7 @@ import {
 } from '@happier-dev/agents';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { readRpcErrorCode } from '@happier-dev/protocol/rpcErrors';
+import { withSessionUserMessageDeliveryIntentMeta } from '@happier-dev/protocol';
 
 import { fetchEncryptedTranscriptPageAfterSeq } from '@/api/session/fetchEncryptedTranscriptWindow';
 import {
@@ -450,7 +451,7 @@ export async function sendSessionMessage(params: Readonly<{
   const record = {
     role: 'user',
     content: { type: 'text', text: params.message },
-    meta: {
+    meta: withSessionUserMessageDeliveryIntentMeta({
       sentFrom: 'cli',
       // Important: `source: 'cli'` is reserved for CLI-authored transcript traffic that
       // the running agent runtime should treat as "self-sent" (e.g. local provider echoes).
@@ -459,7 +460,7 @@ export async function sendSessionMessage(params: Readonly<{
       source: 'ui',
       permissionMode: permissionIntent,
       ...(modelId && modelId !== 'default' ? { model: modelId } : {}),
-    },
+    }, 'explicit_pending'),
   } as const;
 
   const content =

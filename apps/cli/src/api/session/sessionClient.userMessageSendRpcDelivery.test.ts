@@ -80,6 +80,37 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     })).toBe(true);
   });
 
+  it('delivers explicit pending catch-up rows after a replacement runner starts idle', () => {
+    const client = Object.create(ApiSessionClient.prototype) as any;
+    client.sessionId = 's1';
+    client.latestTurnStatus = 'completed';
+    client.userMessageCallbackAttachedAtMs = Date.now();
+
+    const message = {
+      role: 'user',
+      content: { type: 'text', text: 'recover after respawn' },
+      localId: 'pending-local',
+      meta: {
+        source: 'ui',
+        sentFrom: 'cli',
+        [SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY]: 'explicit_pending',
+      },
+      createdAt: Date.now() - 5_000,
+    };
+    const update = {
+      id: 'catchup-pending-local',
+      body: {
+        t: 'new-message',
+        message: { seq: 42 },
+      },
+    };
+
+    expect(client.shouldDeliverUserMessageToAgentQueueFromUpdate(message, update, {
+      catchUpAfterSeq: 0,
+      catchUpAfterSeqIsExplicit: false,
+    })).toBe(true);
+  });
+
   it('delivers the prompt to the agent queue eagerly and suppresses later transcript echo updates', async () => {
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,

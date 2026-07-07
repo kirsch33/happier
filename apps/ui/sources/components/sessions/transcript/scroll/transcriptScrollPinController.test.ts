@@ -108,4 +108,30 @@ describe('reduceTranscriptScrollPinState', () => {
         expect(pinned.isPinned).toBe(true);
         expect(pinned.newActivityCount).toBe(0);
     });
+
+    it('tracks visual bottom state while automatic pinning is disabled', () => {
+        const initial: TranscriptScrollPinState = {
+            isPinned: true,
+            newActivityCount: 2,
+            lastActivityKey: 'm2',
+        };
+
+        const away = reduceTranscriptScrollPinState(initial, {
+            type: 'scroll',
+            offsetY: 240,
+            pinnedOffsetThresholdPx: 72,
+            enabled: false,
+        });
+        expect(away.isPinned).toBe(false);
+        expect(away.newActivityCount).toBe(0);
+
+        const bottom = reduceTranscriptScrollPinState(away, {
+            type: 'scroll',
+            offsetY: 12,
+            pinnedOffsetThresholdPx: 72,
+            enabled: false,
+        });
+        expect(bottom.isPinned).toBe(true);
+        expect(bottom.newActivityCount).toBe(0);
+    });
 });

@@ -643,11 +643,7 @@ export type ChatListBottomNotice = {
     body: string;
 };
 
-function readSessionViewportForEntry(
-    sessionId: string,
-    options?: Readonly<{ jumpToSeq?: number | null; platformOS?: typeof Platform.OS }>,
-) {
-    if (options?.platformOS === 'web' && options.jumpToSeq == null) return null;
+function readSessionViewportForEntry(sessionId: string) {
     return typeof sync.getSessionViewport === 'function' ? sync.getSessionViewport(sessionId) : null;
 }
 
@@ -1571,7 +1567,7 @@ const ChatListInternal = React.memo((props: {
     const lastScrollOffsetForIntentRef = React.useRef<number | null>(null);
     const bottomFollowModeStateRef = React.useRef<TranscriptBottomFollowModeState>({
         dragSession: null,
-        mode: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId, { platformOS: Platform.OS, jumpToSeq: props.jumpToSeq }))
+        mode: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId))
             ? 'following'
             : 'released',
     });
@@ -2081,7 +2077,7 @@ const ChatListInternal = React.memo((props: {
     const transcriptToolCallsCollapsedPreviewCountSetting = useSetting('transcriptToolCallsCollapsedPreviewCount');
 
     const [scrollPin, setScrollPin] = React.useState<TranscriptScrollPinState>(() => ({
-        isPinned: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId, { platformOS: Platform.OS, jumpToSeq: props.jumpToSeq })),
+        isPinned: resolveSessionEntryBottomFollow(readSessionViewportForEntry(props.sessionId)),
         newActivityCount: 0,
         lastActivityKey: null,
     }));
@@ -2121,7 +2117,7 @@ const ChatListInternal = React.memo((props: {
         anchor: SessionViewportAnchorSnapshot | null;
     } | null>(null);
     if (sessionEntryViewportRef.current?.sessionId !== props.sessionId) {
-        const sessionViewport = readSessionViewportForEntry(props.sessionId, { platformOS: Platform.OS, jumpToSeq: props.jumpToSeq });
+        const sessionViewport = readSessionViewportForEntry(props.sessionId);
         const shouldFollowBottom = resolveSessionEntryBottomFollow(sessionViewport);
         // Persisted viewports are untrusted input: a non-finite stored offsetY must read as
         // "no remembered offset" everywhere downstream (entry restore, exit-flush fallback).
@@ -5784,8 +5780,13 @@ const ChatListInternal = React.memo((props: {
             resolvePendingWebPrependRefreshOptions(retryRestoreResult.strategy),
         );
         scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
+        const retryRecoveryIndex = resolvePendingWebPrependRecoveryIndex(pendingWebPrependAnchorRef.current);
+        const retryHasIdentity = hasPendingWebPrependIdentity(pendingWebPrependAnchorRef.current);
         if (
-            (retryRestoreResult.strategy === 'growth' || retryRestoreResult.strategy === 'none') &&
+            (
+                (retryRestoreResult.strategy === 'growth' && retryHasIdentity) ||
+                (retryRestoreResult.strategy === 'none' && retryRecoveryIndex != null)
+            ) &&
             pendingWebPrependAnchorRef.current &&
             Date.now() <= pendingWebPrependAnchorRef.current.expiresAtMs
         ) {
@@ -5799,6 +5800,7 @@ const ChatListInternal = React.memo((props: {
             recordRestoreDecisionTelemetry,
             recordWebPrependRestoreOutcome,
             resolvePendingWebPrependRefreshOptions,
+            resolvePendingWebPrependRecoveryIndex,
             resolveWebScrollMetrics,
             scheduleWebPrependRestoreWindowExpiry,
             restoreWebPrependAnchorThroughViewportCommand,
@@ -6190,7 +6192,8 @@ const ChatListInternal = React.memo((props: {
                     );
                 }
                 pendingWebPrependIndexRecoveryRef.current =
-                    restoreResult.strategy === 'growth' || (restoreResult.strategy === 'none' && recoveryIndex != null);
+                    (restoreResult.strategy === 'growth' && hasIdentity) ||
+                    (restoreResult.strategy === 'none' && recoveryIndex != null);
                 scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
                 if (pendingWebPrependIndexRecoveryRef.current) {
                     schedulePendingWebPrependIndexRecovery();
@@ -6448,7 +6451,7 @@ const ChatListInternal = React.memo((props: {
         scheduleWebPrependRestoreWindowExpiry(pendingWebPrependAnchorRef.current);
         pendingWebPrependIndexRecoveryRef.current =
             pendingWebPrependIndexRecoveryRef.current
-            || restoreResult.strategy === 'growth'
+            || (restoreResult.strategy === 'growth' && hasIdentity)
             || (restoreResult.strategy === 'none' && recoveryIndex != null);
         if (pendingWebPrependIndexRecoveryRef.current && pendingWebPrependAnchorRef.current) {
             attemptPendingWebPrependIndexRecovery();
