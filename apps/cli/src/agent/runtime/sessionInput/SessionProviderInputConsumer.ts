@@ -38,6 +38,7 @@ export interface SessionProviderInputConsumerOptions<Mode, Message> {
   messageQueue: MessageQueue2<Mode, Message>;
   session: SessionProviderInputConsumerSession;
   onMetadataUpdate?: (() => void | Promise<void>) | null | undefined;
+  onInputAvailable?: ((listener: () => void) => () => void) | undefined;
   reconcileWhenEmpty?: PendingMaterializationReconcileWhenEmpty | undefined;
   activeTurnDeliveryPolicy?: PendingMaterializationActiveTurnPolicy | undefined;
   resolveActiveTurnDeliveryPolicy?: (() => PendingMaterializationActiveTurnPolicy | undefined) | undefined;
@@ -104,6 +105,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
         drainOpts,
       ));
     },
+    ...(opts.onInputAvailable ? { onInputAvailable: opts.onInputAvailable } : {}),
   };
 }
 

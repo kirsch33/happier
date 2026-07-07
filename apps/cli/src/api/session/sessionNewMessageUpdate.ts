@@ -258,18 +258,18 @@ export function handleSessionNewMessageUpdate(params: {
         if (shouldDeliverToAgentQueue) {
             const deliverableSeq = typeof msgSeq === 'number' && Number.isFinite(msgSeq) ? msgSeq : null;
             if (params.pendingMessageCallback) {
+                if (agentQueueLocalId) {
+                    params.markAgentQueueEchoSuppressedLocalId(agentQueueLocalId);
+                    params.markAgentQueueInFlightLocalId?.(agentQueueLocalId);
+                    if (params.deferAgentQueueDeliveryProofToProviderAcceptance !== true) {
+                        params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
+                    }
+                }
                 params.pendingMessageCallback(userResult.data, { seq: deliverableSeq });
             } else {
                 params.pendingMessages.push(userResult.data);
             }
-            if (agentQueueLocalId) {
-                params.markAgentQueueEchoSuppressedLocalId(agentQueueLocalId);
-                params.markAgentQueueInFlightLocalId?.(agentQueueLocalId);
-                if (params.deferAgentQueueDeliveryProofToProviderAcceptance !== true) {
-                    params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
-                }
-            }
-            if (deliverableSeq !== null) {
+            if (params.pendingMessageCallback && deliverableSeq !== null) {
                 params.onUserMessageDeliveredToAgentQueue?.(deliverableSeq);
             }
         } else {
@@ -281,7 +281,6 @@ export function handleSessionNewMessageUpdate(params: {
             const isDeliveredLocalPromptEcho =
                 isAgentQueueDeliveredLocalId
                 || isEffectivelyAgentQueueEchoSuppressedLocalId
-                || isAlreadyPendingAgentQueueMessage
                 || isSelfEchoSuppressedCliWrite
                 || isAgentQueueEchoSuppressedCliWrite
                 || isDeterministicDaemonInitialPrompt;
@@ -388,25 +387,24 @@ export function handleSessionNewMessageUpdate(params: {
                 if (shouldDeliverToAgentQueue) {
                     const deliverableSeq = typeof msgSeq === 'number' && Number.isFinite(msgSeq) ? msgSeq : null;
                     if (params.pendingMessageCallback) {
+                        if (agentQueueLocalId) {
+                            params.markAgentQueueEchoSuppressedLocalId(agentQueueLocalId);
+                            params.markAgentQueueInFlightLocalId?.(agentQueueLocalId);
+                            if (params.deferAgentQueueDeliveryProofToProviderAcceptance !== true) {
+                                params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
+                            }
+                        }
                         params.pendingMessageCallback(parsedCandidate.data, { seq: deliverableSeq });
                     } else {
                         params.pendingMessages.push(parsedCandidate.data);
                     }
-                    if (agentQueueLocalId) {
-                        params.markAgentQueueEchoSuppressedLocalId(agentQueueLocalId);
-                        params.markAgentQueueInFlightLocalId?.(agentQueueLocalId);
-                        if (params.deferAgentQueueDeliveryProofToProviderAcceptance !== true) {
-                            params.markAgentQueueDeliveredLocalId?.(agentQueueLocalId);
-                        }
-                    }
-                    if (deliverableSeq !== null) {
+                    if (params.pendingMessageCallback && deliverableSeq !== null) {
                         params.onUserMessageDeliveredToAgentQueue?.(deliverableSeq);
                     }
                 } else {
                     const isDeliveredLocalPromptEcho =
                         isAgentQueueDeliveredLocalId
                         || isEffectivelyAgentQueueEchoSuppressedLocalId
-                        || isAlreadyPendingAgentQueueMessage
                         || isSelfEchoSuppressedCliWrite
                         || isAgentQueueEchoSuppressedCliWrite
                         || isDeterministicDaemonInitialPrompt;

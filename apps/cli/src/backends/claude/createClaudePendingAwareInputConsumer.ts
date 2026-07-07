@@ -69,6 +69,7 @@ export function createClaudePendingAwareInputConsumer(
         },
         pendingDrainMaxPopPerWake: resolveSessionPendingQueueMaxPopPerWake(session.accountSettings ?? null),
         resolveActiveTurnDeliveryPolicy: () => resolveClaudePendingActiveTurnDeliveryPolicy(session.accountSettings),
+        onInputAvailable: (listener) => session.queue.addOnMessageListener(() => listener()),
         ...(opts?.onMetadataUpdate ? { onMetadataUpdate: opts.onMetadataUpdate } : {}),
     });
 }

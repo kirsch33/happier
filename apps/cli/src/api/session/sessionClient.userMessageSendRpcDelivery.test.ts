@@ -215,6 +215,37 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect(received[0]?.localId).toBe('l1');
   });
 
+  it('does not mark buffered RPC prompts as in-flight until a runner callback attaches', async () => {
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAckResult: { ok: true, id: 'm1', seq: 1, localId: 'l-buffered' },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    client.deferDeliveredUserMessageWatermarkToProviderAcceptance();
+
+    await (client as any).enqueueSessionUserMessage({
+      text: 'queued before runner waits',
+      localId: 'l-buffered',
+      meta: { source: 'ui', sentFrom: 'web' },
+    });
+
+    expect((client as any).pendingMessages).toHaveLength(1);
+    expect((client as any).hasAgentQueueInFlightLocalId('l-buffered')).toBe(false);
+    expect((client as any).hasAgentQueueDeliveredLocalId('l-buffered')).toBe(false);
+
+    const received: any[] = [];
+    client.onUserMessage((msg) => received.push(msg));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.content?.text).toBe('queued before runner waits');
+    expect(received[0]?.localId).toBe('l-buffered');
+    expect((client as any).pendingMessages).toHaveLength(0);
+    expect((client as any).hasAgentQueueInFlightLocalId('l-buffered')).toBe(true);
+    expect((client as any).hasAgentQueueDeliveredLocalId('l-buffered')).toBe(false);
+  });
+
   it('refreshes echo suppression when the local user-message commit is acknowledged before a delayed transcript echo', async () => {
     vi.useFakeTimers();
     try {

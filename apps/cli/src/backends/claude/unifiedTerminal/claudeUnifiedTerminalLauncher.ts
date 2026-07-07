@@ -635,6 +635,7 @@ export async function claudeUnifiedTerminalLauncher(
           userMessageLocalIds: batch.userMessageLocalIds,
         };
       },
+      subscribeToNextMessageAvailable: sessionInputConsumer.onInputAvailable,
       subscribeClaudeSessionHooks: (callback) => {
         session.addClaudeSessionHookCallback(callback);
         return () => {

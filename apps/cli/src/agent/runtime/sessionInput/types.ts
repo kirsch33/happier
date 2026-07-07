@@ -54,4 +54,5 @@ export type DrainPendingResult = {
 export interface SessionProviderInputConsumer<Mode, Message> {
   waitForNextInput(opts: { abortSignal: AbortSignal }): Promise<MessageBatch<Mode, Message> | null>;
   drainPending(opts?: DrainPendingOptions): Promise<DrainPendingResult>;
+  onInputAvailable?(listener: () => void): () => void;
 }

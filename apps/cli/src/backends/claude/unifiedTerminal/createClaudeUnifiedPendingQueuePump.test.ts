@@ -64,6 +64,58 @@ describe('createClaudeUnifiedPendingQueuePump', () => {
     await expect(startResult).rejects.toBe(error);
   });
 
+  it('restarts an inactive pump when the input consumer reports new input', async () => {
+    const error = new Error('transient input failure');
+    const inputAvailableListeners: Array<() => void> = [];
+    let resolveThirdWait!: (value: null) => void;
+    const waitForNextInput = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce({
+        message: 'after wake',
+        mode: undefined,
+        isolate: false,
+        hash: 'h-wake',
+      })
+      .mockImplementationOnce(() => new Promise<null>((resolve) => {
+        resolveThirdWait = resolve;
+      }));
+    const enqueueUiMessage = vi.fn().mockResolvedValue(undefined);
+    const drainWhenSafe = vi.fn().mockResolvedValue(undefined);
+    const pump = createClaudeUnifiedPendingQueuePump({
+      inputConsumer: {
+        waitForNextInput,
+        onInputAvailable: (listener) => {
+          inputAvailableListeners.push(listener);
+          return () => {
+            const index = inputAvailableListeners.indexOf(listener);
+            if (index >= 0) {
+              inputAvailableListeners.splice(index, 1);
+            }
+          };
+        },
+      },
+      arbiter: { enqueueUiMessage, drainWhenSafe },
+    });
+
+    await expect(pump.start({ abortSignal: new AbortController().signal })).rejects.toBe(error);
+    expect(inputAvailableListeners).toHaveLength(1);
+
+    inputAvailableListeners[0]?.();
+
+    await vi.waitFor(() => {
+      expect(enqueueUiMessage).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'after wake',
+      }));
+    });
+    await vi.waitFor(() => {
+      expect(waitForNextInput).toHaveBeenCalledTimes(3);
+    });
+
+    pump.dispose();
+    resolveThirdWait(null);
+  });
+
   it('returns an observable running promise from start when safe drain fails', async () => {
     const error = new Error('drain failed');
     const pump = createClaudeUnifiedPendingQueuePump({

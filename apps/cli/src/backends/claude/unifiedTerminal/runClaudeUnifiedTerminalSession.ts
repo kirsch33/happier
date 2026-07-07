@@ -164,6 +164,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   signal?: AbortSignal | undefined;
   initialMode?: Mode | undefined;
   nextMessage: () => Promise<ClaudeUnifiedTerminalQueuedInput<Mode> | null>;
+  subscribeToNextMessageAvailable?: ((listener: () => void) => () => void) | undefined;
   /**
    * Hands back a queued message that was already consumed by the input pump but
    * can no longer be delivered (host-death/dispose unwind), so the owner can
@@ -611,6 +612,7 @@ function createCompositeBridge(
 function createInputConsumer<Mode>(
   first: ClaudeUnifiedTerminalQueuedInput<Mode> | null,
   nextMessage: () => Promise<ClaudeUnifiedTerminalQueuedInput<Mode> | null>,
+  subscribeToNextMessageAvailable?: ((listener: () => void) => () => void) | undefined,
 ): ClaudeUnifiedInputConsumer<Mode> {
   let firstPending = first !== null;
   return {
@@ -622,6 +624,7 @@ function createInputConsumer<Mode>(
       const next = await nextMessage();
       return next ? normalizeMessageBatch(next) : null;
     },
+    ...(subscribeToNextMessageAvailable ? { onInputAvailable: subscribeToNextMessageAvailable } : {}),
   };
 }
 
@@ -1167,7 +1170,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     });
     opts.setTurnInterrupt?.(() => hostResolution.adapter.interruptTurn(activeHandle));
     turnInterruptRegistered = true;
-    const baseInputConsumer = createInputConsumer(first, opts.nextMessage);
+    const baseInputConsumer = createInputConsumer(first, opts.nextMessage, opts.subscribeToNextMessageAvailable);
     // Track the mode of the most recently pulled batch so the injection gate applies the runtime config
     // desired by the prompt that is about to be injected.
     const inputConsumer: ClaudeUnifiedInputConsumer<Mode> = runtimeControlBridge
@@ -1177,6 +1180,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             if (batch) currentInjectionMode = batch.mode;
             return batch;
           },
+          ...(baseInputConsumer.onInputAvailable ? { onInputAvailable: baseInputConsumer.onInputAvailable } : {}),
         }
       : baseInputConsumer;
     controller = await (opts.createController?.({

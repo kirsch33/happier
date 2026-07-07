@@ -64,6 +64,7 @@ export class MessageQueue2<Mode, Message = string> {
   private waiter: ((hasMessages: boolean) => void) | null = null;
   private closed = false;
   private onMessageHandler: ((message: Message, mode: Mode) => void) | null = null;
+  private readonly onMessageListeners = new Set<(message: Message, mode: Mode) => void>();
   readonly modeHasher: (mode: Mode) => string;
   private readonly batcher: MessageBatcher<Message>;
   private lastWaitLogAt = 0;
@@ -84,6 +85,26 @@ export class MessageQueue2<Mode, Message = string> {
 
   setOnMessage(handler: ((message: Message, mode: Mode) => void) | null): void {
     this.onMessageHandler = handler;
+  }
+
+  addOnMessageListener(handler: (message: Message, mode: Mode) => void): () => void {
+    this.onMessageListeners.add(handler);
+    return () => {
+      this.onMessageListeners.delete(handler);
+    };
+  }
+
+  private notifyMessageHandlers(message: Message, mode: Mode): void {
+    if (this.onMessageHandler) {
+      this.onMessageHandler(message, mode);
+    }
+    for (const listener of this.onMessageListeners) {
+      try {
+        listener(message, mode);
+      } catch (error) {
+        logger.debug('[MessageQueue2] Message listener failed', { error });
+      }
+    }
   }
 
   push(
@@ -110,9 +131,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
     });
 
-    if (this.onMessageHandler) {
-      this.onMessageHandler(message, mode);
-    }
+    this.notifyMessageHandlers(message, mode);
 
     if (this.waiter) {
       const waiter = this.waiter;
@@ -150,9 +169,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
     });
 
-    if (this.onMessageHandler) {
-      this.onMessageHandler(message, mode);
-    }
+    this.notifyMessageHandlers(message, mode);
 
     if (this.waiter) {
       const waiter = this.waiter;
@@ -185,9 +202,7 @@ export class MessageQueue2<Mode, Message = string> {
       userMessageLocalIds: normalizeUserMessageLocalIds(opts),
     });
 
-    if (this.onMessageHandler) {
-      this.onMessageHandler(message, mode);
-    }
+    this.notifyMessageHandlers(message, mode);
 
     if (this.waiter) {
       const waiter = this.waiter;

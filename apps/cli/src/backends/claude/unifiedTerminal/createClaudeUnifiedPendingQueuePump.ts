@@ -1,4 +1,5 @@
 import type { DrainPendingOptions, DrainPendingResult, MessageBatch } from '@/agent/runtime/sessionInput/types';
+import { logger } from '@/ui/logger';
 
 import type {
   ClaudeUnifiedInputArbiter,
@@ -26,6 +27,8 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
 }>): ClaudeUnifiedPendingQueuePump<Mode> {
   let disposed = false;
   let runPromise: Promise<void> | null = null;
+  let activeAbortSignal: AbortSignal | null = null;
+  let unsubscribeInputAvailable: (() => void) | null = null;
 
   const pumpOnce = async (pumpOpts: { abortSignal: AbortSignal }): Promise<boolean> => {
     if (disposed || pumpOpts.abortSignal.aborted) {
@@ -60,21 +63,37 @@ export function createClaudeUnifiedPendingQueuePump<Mode = unknown>(opts: Readon
     }
   };
 
+  const startPump = (startOpts: { abortSignal: AbortSignal }): Promise<void> => {
+    activeAbortSignal = startOpts.abortSignal;
+    if (!unsubscribeInputAvailable && opts.inputConsumer.onInputAvailable) {
+      unsubscribeInputAvailable = opts.inputConsumer.onInputAvailable(() => {
+        if (disposed) return;
+        const signal = activeAbortSignal;
+        if (!signal || signal.aborted) return;
+        if (runPromise) return;
+        logger.debug('[unified]: pending queue pump wake restarted inactive pump');
+        void startPump({ abortSignal: signal }).catch(() => undefined);
+      });
+    }
+    if (runPromise) return runPromise;
+    if (disposed) return Promise.resolve();
+    runPromise = run(startOpts).finally(() => {
+      runPromise = null;
+    });
+    return runPromise;
+  };
+
   return {
     pumpOnce,
     async drainPending(drainOpts?: DrainPendingOptions): Promise<DrainPendingResult | null> {
       return await (opts.inputConsumer.drainPending?.(drainOpts) ?? Promise.resolve(null));
     },
-    start(startOpts) {
-      if (runPromise) return runPromise;
-      if (disposed) return Promise.resolve();
-      runPromise = run(startOpts).finally(() => {
-        runPromise = null;
-      });
-      return runPromise;
-    },
+    start: startPump,
     dispose() {
       disposed = true;
+      activeAbortSignal = null;
+      unsubscribeInputAvailable?.();
+      unsubscribeInputAvailable = null;
     },
   };
 }

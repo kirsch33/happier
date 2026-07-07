@@ -65,4 +65,22 @@ describe('createClaudePendingAwareInputConsumer', () => {
       reconcileWhenEmpty: 'force',
     });
   });
+
+  it('notifies input-available listeners when the session queue receives a message', () => {
+    const { session } = createSessionHarness(null);
+    const consumer = createClaudePendingAwareInputConsumer(session);
+    const listener = vi.fn();
+
+    const unsubscribe = consumer.onInputAvailable?.(listener);
+    expect(unsubscribe).toBeTypeOf('function');
+
+    session.queue.push('wake me', { claudeUnifiedTerminalEnabled: true } as EnhancedMode);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsubscribe?.();
+    session.queue.push('do not wake me', { claudeUnifiedTerminalEnabled: true } as EnhancedMode);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
 });

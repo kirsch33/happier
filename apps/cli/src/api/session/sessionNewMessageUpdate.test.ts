@@ -938,6 +938,60 @@ describe('handleSessionNewMessageUpdate', () => {
       expect(delivered).toEqual([]);
     });
 
+    it('does not report when the row is only buffered because no runner callback is attached', () => {
+      const pendingMessages: any[] = [];
+      const delivered = runWithDeliveredHook(
+        buildUserMessageUpdate({ role: 'user', content: { type: 'text', text: 'wait for runner' }, localId: 'local-buffered' }, 13),
+        {
+          pendingMessageCallback: null,
+          pendingMessages,
+        },
+      );
+
+      expect(pendingMessages).toHaveLength(1);
+      expect(pendingMessages[0]?.content?.text).toBe('wait for runner');
+      expect(delivered).toEqual([]);
+    });
+
+    it('does not treat a pending-buffer duplicate as local echo delivery proof by itself', () => {
+      const update = {
+        id: 'u-pending-duplicate',
+        createdAt: Date.now(),
+        body: {
+          t: 'new-message',
+          sid: 'sess_1',
+          message: {
+            id: 'm-pending-duplicate',
+            seq: 14,
+            content: {
+              t: 'plain',
+              v: {
+                role: 'user',
+                content: { type: 'text', text: 'wait for runner' },
+                localId: 'local-buffered',
+              },
+            },
+            localId: 'local-buffered',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+      } as unknown as Update;
+      const echoProven: number[] = [];
+      const delivered = runWithDeliveredHook(update, {
+        pendingMessages: [{
+          role: 'user',
+          content: { type: 'text', text: 'wait for runner' },
+          localId: 'local-buffered',
+          meta: {},
+        } as any],
+        onUserMessageDeliveryProvenByLocalEcho: (seq: number) => echoProven.push(seq),
+      });
+
+      expect(delivered).toEqual([]);
+      expect(echoProven).toEqual([]);
+    });
+
     it('routes an agent-queue echo of a locally delivered prompt to the echo-proof hook, NOT the queue-handoff hook', () => {
       // A3-HIGH-1: the queue-handoff hook means "row entered volatile memory"; an echo of a
       // locally handed prompt is a different custody chain (the loop already has it) and must

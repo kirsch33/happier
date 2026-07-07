@@ -1287,6 +1287,11 @@ export class ApiSessionClient extends EventEmitter {
     private markCommittedUserMessageLocalIdForAgentQueue(localId: string): void {
         if (!localId) return;
         if (this.hasPassiveCommittedUserMessageLocalId(localId)) return;
+        this.markUserMessageAgentQueueHandoff(localId);
+    }
+
+    private markUserMessageAgentQueueHandoff(localId: string): void {
+        if (!localId) return;
         this.markAgentQueueEchoSuppressedLocalId(localId);
         if (this.hasAgentQueueDeliveredLocalId(localId)) return;
         if (this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) {
@@ -1294,6 +1299,11 @@ export class ApiSessionClient extends EventEmitter {
         } else {
             this.markAgentQueueDeliveredLocalId(localId);
         }
+    }
+
+    private hasPendingAgentQueueMessageLocalId(localId: string): boolean {
+        if (!localId) return false;
+        return this.pendingMessages.some((message) => message.localId === localId);
     }
 
     private markAgentQueueDeliveredLocalId(localId: string): void {
@@ -1932,7 +1942,11 @@ export class ApiSessionClient extends EventEmitter {
         while (this.pendingMessages.length > 0) {
             // Buffered messages lost their seq attribution; null keeps the watermark behind
             // (at-least-once redelivery on resume, deduped) instead of over-covering.
-            callback(this.pendingMessages.shift()!, { seq: null });
+            const pendingMessage = this.pendingMessages.shift()!;
+            if (pendingMessage.localId && !this.hasAgentQueueDeliveredLocalId(pendingMessage.localId)) {
+                this.markUserMessageAgentQueueHandoff(pendingMessage.localId);
+            }
+            callback(pendingMessage, { seq: null });
         }
         if (!this.daemonInitialPromptSeeded && typeof this.daemonInitialPrompt === 'string') {
             this.daemonInitialPromptSeeded = true;
@@ -2881,16 +2895,15 @@ export class ApiSessionClient extends EventEmitter {
             meta,
             createdAt: Date.now(),
         } satisfies UserMessage;
-        if (!this.hasAgentQueueDeliveredLocalId(localId) && !this.hasAgentQueueInFlightLocalId(localId)) {
-            // Mark before invoking the callback: the runner may synchronously re-enter session
-            // handling and observe a transcript echo for this same localId before this RPC returns.
-            this.markAgentQueueEchoSuppressedLocalId(localId);
-            if (this.deliveredUserMessageWatermarkDeferredToProviderAcceptance) {
-                this.markAgentQueueInFlightLocalId(localId);
-            } else {
-                this.markAgentQueueDeliveredLocalId(localId);
-            }
+        if (
+            !this.hasAgentQueueDeliveredLocalId(localId)
+            && !this.hasAgentQueueInFlightLocalId(localId)
+            && !this.hasPendingAgentQueueMessageLocalId(localId)
+        ) {
             if (this.pendingMessageCallback) {
+                // Mark before invoking the callback: the runner may synchronously re-enter session
+                // handling and observe a transcript echo for this same localId before this RPC returns.
+                this.markUserMessageAgentQueueHandoff(localId);
                 this.pendingMessageCallback(prompt, { seq: null });
             } else {
                 this.pendingMessages.push(prompt);

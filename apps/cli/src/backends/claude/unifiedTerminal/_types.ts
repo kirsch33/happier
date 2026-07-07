@@ -135,6 +135,7 @@ export type ClaudeUnifiedPendingQueuePump<Mode = unknown> = Readonly<{
 export type ClaudeUnifiedInputConsumer<Mode> = Readonly<{
   waitForNextInput(opts: { abortSignal: AbortSignal }): Promise<MessageBatch<Mode, string> | null>;
   drainPending?: ((opts?: DrainPendingOptions) => Promise<DrainPendingResult>) | undefined;
+  onInputAvailable?: ((listener: () => void) => () => void) | undefined;
 }>;
 
 export type ClaudeUnifiedTerminalHost = Readonly<{
