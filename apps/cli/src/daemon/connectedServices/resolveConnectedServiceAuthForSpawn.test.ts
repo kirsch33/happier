@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
+import { openConnectedServiceCredentialCiphertext, sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
 
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 import type { Credentials } from '@/persistence';
@@ -150,6 +150,144 @@ describe('resolveConnectedServiceAuthForSpawn', () => {
         accessToken: 'fresh-access',
         refreshToken: 'rotated-refresh',
         scopes: expect.arrayContaining(['user:inference', 'user:profile', 'user:sessions:claude_code']),
+      },
+    });
+  });
+
+  it('adopts a fresher managed Claude native credential into the relay before materialization', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-test-'));
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-connected-services-server-test-'));
+    const processEnv = await createIsolatedClaudeSourceEnv();
+    const now = 1_000_000;
+    const relayExpiresAt = now + 60_000;
+    const nativeExpiresAt = now + 3_600_000;
+
+    const relayRecord = buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: relayExpiresAt,
+      oauth: {
+        accessToken: 'relay-stale-access',
+        refreshToken: 'relay-stale-refresh',
+        idToken: null,
+        scope: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: 'acct',
+        providerEmail: 'greatwhitelab@gmail.com',
+        raw: { claudeAiOauth: { subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x' } },
+      },
+    });
+
+    const credentials: Credentials = {
+      token: 'happy-token',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(17) },
+    };
+    if (credentials.encryption.type !== 'legacy') {
+      throw new Error('test fixture expected legacy encryption');
+    }
+
+    const ciphertext = sealAccountScopedBlobCiphertext({
+      kind: 'connected_service_credential',
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      payload: relayRecord,
+      randomBytes: (length) => randomBytes(length),
+    });
+
+    const stableClaudeConfigDir = join(
+      activeServerDir,
+      'daemon',
+      'connected-services',
+      'homes',
+      'claude-subscription',
+      'work',
+      'claude',
+      'claude-config',
+    );
+    await mkdir(stableClaudeConfigDir, { recursive: true });
+    await writeFile(
+      resolveClaudeCodeCredentialsFilePath(stableClaudeConfigDir),
+      `${JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'native-fresh-access',
+          refreshToken: 'native-fresh-refresh',
+          expiresAt: nativeExpiresAt,
+          scopes: CLAUDE_SUBSCRIPTION_OAUTH_SCOPE.split(' '),
+          subscriptionType: 'max',
+          rateLimitTier: 'default_claude_max_20x',
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const registerConnectedServiceCredentialSealed = vi.fn(async (_params: unknown) => {});
+    const api = {
+      getConnectedServiceCredentialSealed: async () => ({
+        sealed: { format: 'account_scoped_v1', ciphertext },
+        metadata: {
+          kind: 'oauth',
+          providerEmail: 'greatwhitelab@gmail.com',
+          providerAccountId: 'acct',
+          expiresAt: relayExpiresAt,
+        },
+      }),
+      registerConnectedServiceCredentialSealed,
+    } as unknown as ApiClient;
+
+    const connectedServiceAuth = await resolveConnectedServiceAuthForSpawn({
+      agentId: 'claude',
+      connectedServicesBindingsRaw: {
+        v: 1,
+        bindingsByServiceId: {
+          'claude-subscription': { source: 'connected', profileId: 'work' },
+        },
+      },
+      materializationKey: 'session-1',
+      activeServerDir,
+      baseDir,
+      credentials,
+      api,
+      nowMs: () => now,
+      processEnv,
+    });
+
+    expect(registerConnectedServiceCredentialSealed).toHaveBeenCalledTimes(1);
+    const firstRegisterCall = registerConnectedServiceCredentialSealed.mock.calls[0];
+    expect(firstRegisterCall).toBeDefined();
+    const registered = firstRegisterCall![0] as unknown as {
+      sealed: { ciphertext: string };
+      metadata: { expiresAt: number | null; providerEmail?: string | null; providerAccountId?: string | null };
+    };
+    expect(registered.metadata).toMatchObject({
+      expiresAt: nativeExpiresAt,
+      providerEmail: 'greatwhitelab@gmail.com',
+      providerAccountId: 'acct',
+    });
+    const opened = openConnectedServiceCredentialCiphertext({
+      material: { type: 'legacy', secret: credentials.encryption.secret },
+      ciphertext: registered.sealed.ciphertext,
+    });
+    expect(opened?.value).toMatchObject({
+      serviceId: 'claude-subscription',
+      profileId: 'work',
+      kind: 'oauth',
+      expiresAt: nativeExpiresAt,
+      oauth: {
+        accessToken: 'native-fresh-access',
+        refreshToken: 'native-fresh-refresh',
+        providerEmail: 'greatwhitelab@gmail.com',
+        providerAccountId: 'acct',
+      },
+    });
+
+    expect(connectedServiceAuth?.env.CLAUDE_CONFIG_DIR).toBe(stableClaudeConfigDir);
+    const credential = await readClaudeCodeNativeCredential(connectedServiceAuth!.env.CLAUDE_CONFIG_DIR!);
+    expect(credential).toMatchObject({
+      claudeAiOauth: {
+        accessToken: 'native-fresh-access',
+        refreshToken: 'native-fresh-refresh',
+        expiresAt: nativeExpiresAt,
       },
     });
   });

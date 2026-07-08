@@ -9,6 +9,7 @@ import type {
 } from '@happier-dev/protocol';
 
 import type { CatalogAgentId } from '@/backends/types';
+import { verifyClaudeCodeNativeAuth } from '@/backends/claude/connectedServices/nativeAuth/verifyClaudeCodeNativeAuth';
 import { resolveConnectedServiceCredentialLifecycleDescriptor } from '@/backends/catalog';
 import type { ApiClient } from '@/api/api';
 import type { Credentials } from '@/persistence';
@@ -42,6 +43,7 @@ import type {
   ConnectedServiceRecoverySoftSwitchGuardInput,
   ConnectedServiceRecoverySoftSwitchGuardResult,
 } from './recovery/connectedServiceRecoverySwitchGuard';
+import { adoptFresherClaudeSubscriptionNativeCredentialForSpawn } from './claudeSubscriptionNativeCredentialRelaySync';
 
 type ConnectedServiceAuthGroupResponse = Readonly<{
   v?: number;
@@ -1001,6 +1003,7 @@ async function materializeAndVerifyConnectedServiceAuthForSpawn(params: Readonly
   vendorResumeId: string | null;
   resumeReachabilityRequired: boolean;
   candidatePersistedSessionFile: string | null;
+  nowMs: number;
 }>): Promise<ConnectedServicesMaterializeResult | null> {
   const materialized = await materializeConnectedServicesForSpawn({
     agentId: params.agentId,
@@ -1023,6 +1026,12 @@ async function materializeAndVerifyConnectedServiceAuthForSpawn(params: Readonly
     agentId: params.agentId,
     diagnostics: materialized.diagnostics,
   });
+  await assertClaudeNativeAuthMaterializedForSpawn({
+    agentId: params.agentId,
+    recordsByServiceId: params.recordsByServiceId,
+    materializedEnv: materialized.env,
+    nowMs: params.nowMs,
+  });
   await assertSpawnResumeReachable({
     agentId: params.agentId,
     materializedEnv: materialized.env,
@@ -1032,6 +1041,45 @@ async function materializeAndVerifyConnectedServiceAuthForSpawn(params: Readonly
     candidatePersistedSessionFile: params.candidatePersistedSessionFile,
   });
   return materialized;
+}
+
+async function assertClaudeNativeAuthMaterializedForSpawn(params: Readonly<{
+  agentId: CatalogAgentId;
+  recordsByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceCredentialRecordV1>;
+  materializedEnv: Readonly<Record<string, string>>;
+  nowMs: number;
+}>): Promise<void> {
+  if (params.agentId !== 'claude' || !params.recordsByServiceId.has('claude-subscription')) return;
+  const claudeConfigDir = params.materializedEnv.CLAUDE_CONFIG_DIR?.trim();
+  if (!claudeConfigDir) {
+    throw new ConnectedServiceSpawnMaterializationError({
+      agentId: params.agentId,
+      diagnostics: [{
+        code: 'claude_native_auth_config_dir_missing',
+        providerId: 'claude',
+        serviceId: 'claude-subscription',
+        severity: 'blocking',
+        reason: 'missing_materialized_claude_config_dir',
+      }],
+    });
+  }
+
+  const verified = await verifyClaudeCodeNativeAuth({
+    claudeConfigDir,
+    now: params.nowMs,
+  });
+  if (verified.status === 'ok') return;
+
+  throw new ConnectedServiceSpawnMaterializationError({
+    agentId: params.agentId,
+    diagnostics: [{
+      code: `claude_native_auth_${verified.status}`,
+      providerId: 'claude',
+      serviceId: 'claude-subscription',
+      severity: 'blocking',
+      reason: verified.status,
+    }],
+  });
 }
 
 export async function resolveConnectedServiceAuthForSpawn(params: Readonly<{
@@ -1137,11 +1185,26 @@ export async function resolveConnectedServiceAuthForSpawn(params: Readonly<{
   }
   const maxMaterializationAttempts = resolveMaxSpawnMaterializationAttempts(groupSelections);
   for (let attempt = 0; attempt < maxMaterializationAttempts; attempt += 1) {
-    const selectionsByServiceId = buildSelectionsByServiceIdForSpawn({
+    let selectionsByServiceId = buildSelectionsByServiceIdForSpawn({
       selections,
       recordsByServiceId,
       groupSelections,
     });
+    const adoptedClaudeNativeCredential = await adoptFresherClaudeSubscriptionNativeCredentialForSpawn({
+      activeServerDir: params.activeServerDir,
+      credentials: params.credentials,
+      api: params.api,
+      nowMs,
+      selectionsByServiceId,
+      recordsByServiceId,
+    });
+    if (adoptedClaudeNativeCredential) {
+      selectionsByServiceId = buildSelectionsByServiceIdForSpawn({
+        selections,
+        recordsByServiceId,
+        groupSelections,
+      });
+    }
     const connectedServicesBindings = buildCanonicalConnectedServicesBindingsForSpawn({
       selections,
       groupSelections,
@@ -1162,6 +1225,7 @@ export async function resolveConnectedServiceAuthForSpawn(params: Readonly<{
         vendorResumeId: params.vendorResumeId ?? null,
         resumeReachabilityRequired: params.resumeReachabilityRequired ?? false,
         candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+        nowMs,
       });
       if (materialized === null) return null;
       return {

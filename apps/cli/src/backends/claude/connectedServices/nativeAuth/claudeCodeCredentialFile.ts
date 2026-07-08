@@ -37,6 +37,23 @@ export type ClaudeCodeCredentialFileParseResult =
       scopes: readonly string[];
     }>;
 
+export type ClaudeCodeNativeCredentialPayloadParseResult =
+  | Readonly<{
+      status: 'ok';
+      payload: ClaudeCodeNativeCredentialPayload;
+      expiresAt: number | null;
+      scopes: readonly string[];
+    }>
+  | Readonly<{
+      status: 'unsupported_shape';
+      reason:
+        | 'unsupported_shape'
+        | 'missing_access_token'
+        | 'missing_refresh_token';
+      expiresAt: number | null;
+      scopes: readonly string[];
+    }>;
+
 export type ClaudeCodeCredentialPayloadBuildResult =
   | Readonly<{ status: 'ok'; payload: ClaudeCodeNativeCredentialPayload }>
   | Readonly<{ status: 'diagnostic'; health: ClaudeCodeCredentialHealth }>;
@@ -108,6 +125,68 @@ export function parseClaudeCodeCredentialFile(value: unknown): ClaudeCodeCredent
           ? credential.scopes
           : null,
     ),
+  };
+}
+
+export function parseClaudeCodeNativeCredentialPayload(
+  value: unknown,
+): ClaudeCodeNativeCredentialPayloadParseResult {
+  const root = readObject(value);
+  const credential = readObject(root?.claudeAiOauth);
+  if (!credential) {
+    return {
+      status: 'unsupported_shape',
+      reason: 'unsupported_shape',
+      expiresAt: null,
+      scopes: [],
+    };
+  }
+
+  const accessToken = readString(credential.accessToken);
+  const refreshToken = readString(credential.refreshToken);
+  const expiresAt = readNumber(credential.expiresAt);
+  const scopes = parseClaudeCodeCredentialScopes(
+    Array.isArray(credential.scopes)
+      ? credential.scopes.filter((scope): scope is string => typeof scope === 'string')
+      : typeof credential.scopes === 'string'
+        ? credential.scopes
+        : null,
+  );
+  if (!accessToken) {
+    return {
+      status: 'unsupported_shape',
+      reason: 'missing_access_token',
+      expiresAt,
+      scopes,
+    };
+  }
+  if (!refreshToken) {
+    return {
+      status: 'unsupported_shape',
+      reason: 'missing_refresh_token',
+      expiresAt,
+      scopes,
+    };
+  }
+
+  return {
+    status: 'ok',
+    payload: {
+      claudeAiOauth: {
+        accessToken,
+        refreshToken,
+        ...(expiresAt !== null ? { expiresAt } : {}),
+        scopes,
+        ...(readOptionalString(credential.subscriptionType)
+          ? { subscriptionType: readOptionalString(credential.subscriptionType) }
+          : {}),
+        ...(readOptionalString(credential.rateLimitTier)
+          ? { rateLimitTier: readOptionalString(credential.rateLimitTier) }
+          : {}),
+      },
+    },
+    expiresAt,
+    scopes,
   };
 }
 
