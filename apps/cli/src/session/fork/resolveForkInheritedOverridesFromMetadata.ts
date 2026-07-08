@@ -3,6 +3,7 @@ import {
   AcpConfigOptionOverridesV1Schema,
   AcpSessionModeOverrideV1Schema,
   ConnectedServiceBindingsV1Schema,
+  readConnectedServiceQuotaRefsFromMetadata,
   ModelOverrideV1Schema,
   type ConnectedServiceBindingsV1,
 } from '@happier-dev/protocol';
@@ -169,7 +170,14 @@ function resolveInheritedConnectedServices(
   if (explicit.success) return explicit.data;
 
   if (!isNonEmptyString(providerId)) return null;
-  const derivedBindings = readSessionMetadataConnectedServiceBindings(metadata, providerId);
+  const derivedBindings = { ...readSessionMetadataConnectedServiceBindings(metadata, providerId) };
+  for (const ref of readConnectedServiceQuotaRefsFromMetadata(metadata)) {
+    derivedBindings[ref.serviceId] ??= {
+      source: 'connected',
+      selection: 'profile',
+      profileId: ref.profileId,
+    };
+  }
   if (Object.keys(derivedBindings).length === 0) return null;
 
   const derived = ConnectedServiceBindingsV1Schema.safeParse({

@@ -293,6 +293,47 @@ describe('resolveForkInheritedOverridesFromMetadata', () => {
     });
   });
 
+  it('derives connected-service fork inheritance from quota refs when explicit bindings are absent', () => {
+    const result = resolveForkInheritedOverridesFromMetadata({
+      connectedServiceQuotaRefsV1: {
+        v: 1,
+        refs: [
+          {
+            v: 1,
+            serviceId: 'claude-subscription',
+            profileId: 'claude',
+          },
+        ],
+        updatedAtMs: 123,
+      },
+    }, 'claude');
+
+    expect(result.spawn).toEqual({
+      connectedServices: {
+        v: 1,
+        bindingsByServiceId: {
+          'claude-subscription': {
+            source: 'connected',
+            selection: 'profile',
+            profileId: 'claude',
+          },
+        },
+      },
+    });
+    expect(result.metadata).toEqual({
+      connectedServices: {
+        v: 1,
+        bindingsByServiceId: {
+          'claude-subscription': {
+            source: 'connected',
+            selection: 'profile',
+            profileId: 'claude',
+          },
+        },
+      },
+    });
+  });
+
   it('preserves cleared mode overrides in metadata without seeding null spawn values', () => {
     const result = resolveForkInheritedOverridesFromMetadata({
       sessionModeOverrideV1: { v: 1, updatedAt: 101, modeId: null },
