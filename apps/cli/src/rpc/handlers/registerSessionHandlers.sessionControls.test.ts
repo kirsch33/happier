@@ -802,6 +802,43 @@ describe('registerSessionHandlers session controls', () => {
     });
   });
 
+  it('returns runtime queue-custody failures after enqueueing active-session messages', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const enqueueSessionUserMessage = vi.fn(async () => {});
+    const waitForUserMessageQueueCustody = vi.fn(async () => ({
+      ok: false,
+      errorCode: 'session_user_message_not_consumed',
+      error: 'session_user_message_not_consumed:local-review-command',
+    }));
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      enqueueSessionUserMessage,
+      sessionRuntimeControls: {
+        waitForUserMessageQueueCustody,
+      },
+    });
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.({
+      text: 'please continue',
+      localId: 'local-review-command',
+      meta: { source: 'test' },
+    })).resolves.toEqual({
+      ok: false,
+      errorCode: 'session_user_message_not_consumed',
+      error: 'session_user_message_not_consumed:local-review-command',
+    });
+
+    expect(enqueueSessionUserMessage).toHaveBeenCalledWith({
+      text: 'please continue',
+      localId: 'local-review-command',
+      meta: { source: 'test' },
+    });
+    expect(waitForUserMessageQueueCustody).toHaveBeenCalledWith({
+      localId: 'local-review-command',
+      timeoutMs: 5_000,
+    });
+  });
+
   it('uses the current goal objective for status-only goal updates', async () => {
     const { handlers, registrar } = createRegistrar();
     const setGoal = vi.fn(async () => {});

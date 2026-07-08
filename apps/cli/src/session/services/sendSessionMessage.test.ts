@@ -439,6 +439,76 @@ describe('sendSessionMessage', () => {
         expect(sendSessionMessageViaSocketCommitted).not.toHaveBeenCalled();
     });
 
+    it('treats runtime queue-custody failures as failed sends without duplicating the committed row', async () => {
+        const callSessionRpc = vi.fn(async () => ({
+            ok: false,
+            errorCode: 'session_user_message_not_consumed',
+            error: 'session_user_message_not_consumed:local-stuck',
+        }));
+        const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
+        const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({
+            didMaterialize: true,
+            message: {
+                id: 'msg-stuck',
+                seq: 9,
+                localId: 'local-stuck',
+                messageRole: 'user' as const,
+                content: null,
+                createdAt: 100,
+                updatedAt: 100,
+            },
+        }));
+
+        vi.doMock('@/session/transport/rpc/sessionRpc', () => ({
+            callSessionRpc,
+        }));
+        vi.doMock('@/session/transport/socket/sessionSocketSendMessage', () => ({
+            sendSessionMessageViaSocketCommitted,
+        }));
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
+            materializeNextPendingQueueV2MessageViaHttp,
+        }));
+        vi.doMock('./resolveSessionTransportContext', () => ({
+            resolveSessionTransportContext: vi.fn(async () => ({
+                ok: true,
+                sessionId: 'sess-1',
+                mode: 'plain',
+                ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'dataKey' },
+                rawSession: {
+                    id: 'sess-1',
+                    active: true,
+                    metadata: '{}',
+                    agentState: null,
+                    latestTurnStatus: 'completed',
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                },
+            })),
+        }));
+
+        const { sendSessionMessage } = await import('./sendSessionMessage');
+        const machineKey = new Uint8Array(32).fill(1);
+
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-1',
+            message: 'continue',
+            localId: 'local-stuck',
+            wait: false,
+            timeoutMs: 1,
+        })).resolves.toEqual({
+            ok: false,
+            code: 'wait_failed',
+            message: 'session_user_message_not_consumed:local-stuck',
+        });
+
+        expect(materializeNextPendingQueueV2MessageViaHttp).toHaveBeenCalledWith({
+            token: 'token',
+            sessionId: 'sess-1',
+        });
+        expect(sendSessionMessageViaSocketCommitted).not.toHaveBeenCalled();
+    });
+
     it('invokes onCommittedViaSocket when the message is committed through the pending queue path', async () => {
         const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
         const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({ didMaterialize: true }));

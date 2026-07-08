@@ -170,6 +170,7 @@ const SESSION_RUNTIME_CONTROL_KEYS = [
     'clearTerminalComposer',
     'submitTerminalComposer',
     'handleUserMessage',
+    'waitForUserMessageQueueCustody',
 ] as const satisfies readonly SessionRuntimeControlKey[];
 
 function copyCallableSessionRuntimeControls(

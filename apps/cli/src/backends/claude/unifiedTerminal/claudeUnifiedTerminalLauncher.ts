@@ -82,6 +82,16 @@ type InFlightStartupMessage = Readonly<{
   batch: ParkedUnifiedTerminalMessage;
 }>;
 
+type QueueCustodyResult =
+  | Readonly<{ ok: true; status: 'consumed' | 'already_observed' | 'queued_runtime_busy' | 'untracked' }>
+  | Readonly<{ ok: false; errorCode: 'session_user_message_not_consumed'; error: string }>;
+
+type QueueCustodyWaiter = {
+  localId: string;
+  resolve: (result: QueueCustodyResult) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 function areSameUserMessageLocalIds(a: readonly string[], b: readonly string[] | null | undefined): boolean {
   const rhs = b ?? [];
   if (a.length !== rhs.length) return false;
@@ -423,10 +433,120 @@ export async function claudeUnifiedTerminalLauncher(
   // A3-HIGH-1: this launcher confirms provider acceptance (runner onPromptAcceptedByProvider),
   // so the delivered-watermark must NOT advance at queue handoff anymore.
   session.client.deferDeliveredUserMessageWatermarkToProviderAcceptance?.();
+  const queueCustodyObservedAtByLocalId = new Map<string, number>();
+  const queueCustodyWaitersByLocalId = new Map<string, Set<QueueCustodyWaiter>>();
+  let activeQueueInputWaits = 0;
+
+  const pruneQueueCustodyObservedLocalIds = (nowMs: number): void => {
+    const maxAgeMs = 60_000;
+    for (const [localId, observedAt] of queueCustodyObservedAtByLocalId.entries()) {
+      if (nowMs - observedAt > maxAgeMs) {
+        queueCustodyObservedAtByLocalId.delete(localId);
+      }
+    }
+  };
+
+  const finishQueueCustodyWaiter = (waiter: QueueCustodyWaiter, result: QueueCustodyResult): void => {
+    clearTimeout(waiter.timeout);
+    const waiters = queueCustodyWaitersByLocalId.get(waiter.localId);
+    waiters?.delete(waiter);
+    if (waiters && waiters.size === 0) {
+      queueCustodyWaitersByLocalId.delete(waiter.localId);
+    }
+    waiter.resolve(result);
+  };
+
+  const markQueueCustodyObserved = (localIds: readonly string[]): void => {
+    if (localIds.length === 0) return;
+    const nowMs = Date.now();
+    pruneQueueCustodyObservedLocalIds(nowMs);
+    for (const localId of localIds) {
+      if (!localId) continue;
+      queueCustodyObservedAtByLocalId.set(localId, nowMs);
+      const waiters = queueCustodyWaitersByLocalId.get(localId);
+      if (!waiters) continue;
+      for (const waiter of [...waiters]) {
+        finishQueueCustodyWaiter(waiter, { ok: true, status: 'consumed' });
+      }
+    }
+  };
+
+  const releaseQueueCustodyTimeoutForRetry = (localId: string): void => {
+    session.client.releaseUserMessagesAwaitingProviderAcceptanceForRetry?.({
+      localIds: [localId],
+      reason: 'claude_unified_queue_custody_timeout',
+    });
+  };
+
+  const failQueueCustodyWaiters = (error: string): void => {
+    for (const waiters of [...queueCustodyWaitersByLocalId.values()]) {
+      for (const waiter of [...waiters]) {
+        releaseQueueCustodyTimeoutForRetry(waiter.localId);
+        finishQueueCustodyWaiter(waiter, {
+          ok: false,
+          errorCode: 'session_user_message_not_consumed',
+          error,
+        });
+      }
+    }
+  };
+
+  const waitForUserMessageQueueCustody = async (request: Readonly<{
+    localId: string;
+    timeoutMs?: number;
+  }>): Promise<QueueCustodyResult> => {
+    const localId = typeof request.localId === 'string' ? request.localId.trim() : '';
+    if (!localId) {
+      return { ok: true, status: 'untracked' };
+    }
+    if (session.client.hasUserMessageProviderAcceptance?.({ localIds: [localId] }) === true) {
+      return { ok: true, status: 'already_observed' };
+    }
+
+    const nowMs = Date.now();
+    pruneQueueCustodyObservedLocalIds(nowMs);
+    if (queueCustodyObservedAtByLocalId.has(localId)) {
+      return { ok: true, status: 'already_observed' };
+    }
+
+    const hasActiveTurn = session.client.hasActiveCanonicalTurn?.() === true;
+    if (activeQueueInputWaits === 0 && hasActiveTurn) {
+      return { ok: true, status: 'queued_runtime_busy' };
+    }
+
+    const timeoutMs = Math.max(250, Math.min(30_000, Math.trunc(request.timeoutMs ?? 5_000)));
+    return new Promise<QueueCustodyResult>((resolve) => {
+      const waiter: QueueCustodyWaiter = {
+        localId,
+        resolve,
+        timeout: setTimeout(() => {
+          releaseQueueCustodyTimeoutForRetry(localId);
+          finishQueueCustodyWaiter(waiter, {
+            ok: false,
+            errorCode: 'session_user_message_not_consumed',
+            error: `session_user_message_not_consumed:${localId}`,
+          });
+        }, timeoutMs),
+      };
+      const waiters = queueCustodyWaitersByLocalId.get(localId) ?? new Set<QueueCustodyWaiter>();
+      waiters.add(waiter);
+      queueCustodyWaitersByLocalId.set(localId, waiters);
+    });
+  };
+
+  const unregisterQueueCustodyRuntimeControl =
+    session.client.registerSessionRuntimeControls?.({ waitForUserMessageQueueCustody }) ?? (() => undefined);
+  const queueCustodyAbortListener = () => {
+    failQueueCustodyWaiters('session_user_message_not_consumed:runtime_aborted');
+  };
+  abortController.signal.addEventListener('abort', queueCustodyAbortListener, { once: true });
+
   const waitForNextSessionInputBatch = async (): Promise<ParkedUnifiedTerminalMessage | null> => {
+    activeQueueInputWaits += 1;
     try {
       const batch = await sessionInputConsumer.waitForNextInput({ abortSignal: abortController.signal });
       if (!batch) return null;
+      markQueueCustodyObserved(batch.userMessageLocalIds ?? []);
       return {
         message: batch.message,
         mode: batch.mode,
@@ -441,6 +561,8 @@ export async function claudeUnifiedTerminalLauncher(
         return null;
       }
       throw error;
+    } finally {
+      activeQueueInputWaits = Math.max(0, activeQueueInputWaits - 1);
     }
   };
 
@@ -846,6 +968,9 @@ export async function claudeUnifiedTerminalLauncher(
       }
     }
   } finally {
+    abortController.signal.removeEventListener('abort', queueCustodyAbortListener);
+    unregisterQueueCustodyRuntimeControl();
+    failQueueCustodyWaiters('session_user_message_not_consumed:runtime_disposed');
     resumeChoiceBroker.dispose();
     inFlightSteerCapabilityPublisher.dispose();
     removeExternalAbortListener?.();

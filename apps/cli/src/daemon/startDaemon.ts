@@ -185,6 +185,7 @@ import {
 } from './connectedServices/diagnostics/buildConnectedServiceDiagnosticSpawnErrorResult';
 import { buildConnectedServiceUxDiagnostic } from './connectedServices/diagnostics/connectedServiceUxDiagnostics';
 import { shouldResolveConnectedServiceAuthForSpawn } from './connectedServices/shouldResolveConnectedServiceAuthForSpawn';
+import { applySpawnConnectedServicesDefaultsForDaemon } from './connectedServices/applySpawnConnectedServicesDefaultsForDaemon';
 import { ConnectedServiceRefreshCoordinator } from './connectedServices/refresh/ConnectedServiceRefreshCoordinator';
 import { createConnectedServicesAuthUpdatedRestartHandler } from './connectedServices/refresh/createConnectedServicesAuthUpdatedRestartHandler';
 import { readConnectedServiceCredentialUpdateRefsFromAccountUpdate } from './connectedServices/refresh/readConnectedServiceCredentialUpdateRefsFromAccountUpdate';
@@ -2614,6 +2615,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     connectedServices: profileConnectedServices,
                   };
                 }
+                normalizedOptions = applySpawnConnectedServicesDefaultsForDaemon({
+                  options: normalizedOptions,
+                  agentId: catalogAgentId,
+                  accountSettings: await readAccountSettingsForProfileEnv(),
+                });
 
                 let connectedServiceAuth: Awaited<ReturnType<typeof resolveConnectedServiceAuthForSpawn>> = null;
                 const fallbackMaterializationKey =

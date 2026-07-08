@@ -108,6 +108,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function readRuntimeUserMessageSendFailure(value: unknown): Readonly<{
+  errorCode: string;
+  error: string;
+}> | null {
+  const record = asRecord(value);
+  if (!record || record.ok !== false) return null;
+  const errorCode = typeof record.errorCode === 'string' ? record.errorCode : 'runtime_send_failed';
+  const error = typeof record.error === 'string' ? record.error : errorCode;
+  return { errorCode, error };
+}
+
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
@@ -492,9 +503,10 @@ export async function sendSessionMessage(params: Readonly<{
     };
   }
   let socketCommitResult: SocketCommitResult | null = null;
+  let runtimeUserMessageSendFailure: Readonly<{ errorCode: string; error: string }> | null = null;
   if (shouldUseRuntimeRpc) {
     try {
-      await callSessionRpc({
+      const runtimeResult = await callSessionRpc({
         token: params.credentials.token,
         sessionId: sessionId,
         mode: sessionTarget.mode,
@@ -506,6 +518,28 @@ export async function sendSessionMessage(params: Readonly<{
           meta: record.meta,
         },
       });
+      runtimeUserMessageSendFailure = readRuntimeUserMessageSendFailure(runtimeResult);
+      if (runtimeUserMessageSendFailure) {
+        const materialized = await nudgePendingQueueBestEffort({
+          token: params.credentials.token,
+          sessionId,
+        });
+        socketCommitResult = {
+          materializedSeq: readMaterializedSeqForLocalId(materialized, localId),
+        };
+        await wakeSocketCommittedSessionBestEffort({
+          token: params.credentials.token,
+          sessionId,
+          localId,
+          rawSession: sessionTarget.rawSession,
+          decryptedMetadata,
+          materializedSeq: socketCommitResult.materializedSeq,
+          permissionModeOverride: params.permissionModeOverride,
+          permissionIntent,
+          modelOverride: params.modelOverride,
+          modelId,
+        });
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error ?? '');
       if (errorMessage === 'RPC call timeout') {
@@ -550,6 +584,13 @@ export async function sendSessionMessage(params: Readonly<{
   }
 
   if (!params.wait) {
+    if (runtimeUserMessageSendFailure) {
+      return {
+        ok: false,
+        code: 'wait_failed',
+        message: runtimeUserMessageSendFailure.error,
+      };
+    }
     return {
       ok: true,
       sessionId: sessionId,

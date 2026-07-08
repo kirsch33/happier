@@ -95,6 +95,12 @@ export type SessionRuntimeControls = {
   ) => Promise<Readonly<{ handled: false }> | Readonly<{ handled: true; result: unknown }>>
     | Readonly<{ handled: false }>
     | Readonly<{ handled: true; result: unknown }>;
+  waitForUserMessageQueueCustody?: (
+    request: Readonly<{
+      localId: string;
+      timeoutMs?: number;
+    }>,
+  ) => Promise<unknown> | unknown;
 };
 
 function unsupported(method: string): Readonly<{ ok: false; errorCode: string; error: string }> {

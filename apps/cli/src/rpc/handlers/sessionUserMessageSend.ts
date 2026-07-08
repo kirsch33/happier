@@ -55,6 +55,23 @@ export function registerSessionUserMessageSendHandler(
     }
 
     await opts.enqueueSessionUserMessage?.(request);
+    if (
+      request.localId
+      && typeof opts.sessionRuntimeControls?.waitForUserMessageQueueCustody === 'function'
+    ) {
+      const custodyResult = await opts.sessionRuntimeControls.waitForUserMessageQueueCustody({
+        localId: request.localId,
+        timeoutMs: 5_000,
+      });
+      if (
+        custodyResult
+        && typeof custodyResult === 'object'
+        && !Array.isArray(custodyResult)
+        && (custodyResult as { ok?: unknown }).ok === false
+      ) {
+        return custodyResult;
+      }
+    }
     return { ok: true };
   });
 }
