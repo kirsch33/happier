@@ -1,5 +1,8 @@
 import { existsSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
+
+import { resolveConfiguredClaudeConfigDir } from '../utils/resolveConfiguredClaudeConfigDir';
+import { getProjectPath } from '../utils/path';
 
 function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -45,9 +48,24 @@ function pathExistsAsRegularFile(path: string): boolean {
 
 export function resolveClaudeConnectedServiceCandidatePersistedSessionFile(input: Readonly<{
   metadata: unknown;
+  vendorResumeId?: string | null;
+  sessionDirectory?: string | null;
+  processEnv?: Readonly<Record<string, string | undefined>> | null;
 }>): string | null {
   const metadata = readRecord(input.metadata);
-  if (!metadata) return null;
+  const metadataCandidate = metadata ? resolveClaudeCandidateFromMetadata(metadata) : null;
+  if (metadataCandidate) return metadataCandidate;
+
+  return resolveClaudeCandidateFromAmbientStore({
+    vendorResumeId: input.vendorResumeId ?? null,
+    sessionDirectory: input.sessionDirectory ?? null,
+    processEnv: input.processEnv ?? null,
+  });
+}
+
+function resolveClaudeCandidateFromMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+): string | null {
 
   const sessionId = normalizeClaudeSessionId(metadata.claudeSessionId);
   const transcriptPath = readNonEmptyString(metadata.claudeTranscriptPath);
@@ -63,4 +81,30 @@ export function resolveClaudeConnectedServiceCandidatePersistedSessionFile(input
 
   if (!existsSync(transcriptPath) || !pathExistsAsRegularFile(transcriptPath)) return null;
   return transcriptPath;
+}
+
+function resolveClaudeAmbientConfigDir(
+  processEnv: Readonly<Record<string, string | undefined>> | null,
+): string {
+  const envWithoutOverrides: NodeJS.ProcessEnv = { ...(processEnv ?? process.env) };
+  delete envWithoutOverrides.CLAUDE_CONFIG_DIR;
+  delete envWithoutOverrides.HAPPIER_CLAUDE_CONFIG_DIR;
+  return resolveConfiguredClaudeConfigDir({ env: envWithoutOverrides });
+}
+
+function resolveClaudeCandidateFromAmbientStore(params: Readonly<{
+  vendorResumeId: string | null;
+  sessionDirectory: string | null;
+  processEnv: Readonly<Record<string, string | undefined>> | null;
+}>): string | null {
+  const sessionId = normalizeClaudeSessionId(params.vendorResumeId);
+  const sessionDirectory = readNonEmptyString(params.sessionDirectory);
+  if (!sessionId || !sessionDirectory || !isAbsolute(sessionDirectory)) return null;
+
+  const ambientConfigDir = resolveClaudeAmbientConfigDir(params.processEnv);
+  const transcriptPath = join(
+    getProjectPath(sessionDirectory, ambientConfigDir),
+    `${sessionId}.jsonl`,
+  );
+  return pathExistsAsRegularFile(transcriptPath) ? transcriptPath : null;
 }

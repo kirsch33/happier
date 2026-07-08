@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { resolveConnectedServiceCandidatePersistedSessionFile } from '@/backends/catalog';
+import { getProjectPath } from '@/backends/claude/utils/path';
 
 describe('resolveClaudeConnectedServiceCandidatePersistedSessionFile', () => {
   it('returns the persisted Claude transcript path when metadata proves the provider session file', async () => {
@@ -47,6 +48,55 @@ describe('resolveClaudeConnectedServiceCandidatePersistedSessionFile', () => {
     expect(resolveConnectedServiceCandidatePersistedSessionFile('claude', {
       claudeSessionId: '../escape',
       claudeTranscriptPath: join(root, 'projects', 'worktree', '../escape.jsonl'),
+    })).toBeNull();
+  });
+
+  it('falls back to the ambient Claude transcript store when resume metadata omits the transcript path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-claude-candidate-'));
+    const ambientHome = join(root, 'ambient-home');
+    const managedConfigDir = join(root, 'managed', 'claude-config');
+    const sessionDirectory = join(root, 'worktrees', 'dbtools');
+    const sessionId = 'f55b3644-befc-406a-90ac-b8fbcc33cbf6';
+    const ambientTranscriptPath = join(
+      getProjectPath(sessionDirectory, join(ambientHome, '.claude')),
+      `${sessionId}.jsonl`,
+    );
+    await mkdir(dirname(ambientTranscriptPath), { recursive: true });
+    await mkdir(managedConfigDir, { recursive: true });
+    await mkdir(sessionDirectory, { recursive: true });
+    await writeFile(ambientTranscriptPath, '{"type":"assistant"}\n');
+
+    expect(resolveConnectedServiceCandidatePersistedSessionFile('claude', {}, {
+      vendorResumeId: sessionId,
+      sessionDirectory,
+      processEnv: {
+        HOME: ambientHome,
+        CLAUDE_CONFIG_DIR: managedConfigDir,
+      },
+    })).toBe(ambientTranscriptPath);
+  });
+
+  it('does not treat the isolated connected-service Claude config as the ambient resume store', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-claude-candidate-'));
+    const ambientHome = join(root, 'ambient-home');
+    const managedConfigDir = join(root, 'managed', 'claude-config');
+    const sessionDirectory = join(root, 'worktrees', 'dbtools');
+    const sessionId = 'f55b3644-befc-406a-90ac-b8fbcc33cbf6';
+    const managedTranscriptPath = join(
+      getProjectPath(sessionDirectory, managedConfigDir),
+      `${sessionId}.jsonl`,
+    );
+    await mkdir(dirname(managedTranscriptPath), { recursive: true });
+    await mkdir(sessionDirectory, { recursive: true });
+    await writeFile(managedTranscriptPath, '{"type":"assistant"}\n');
+
+    expect(resolveConnectedServiceCandidatePersistedSessionFile('claude', {}, {
+      vendorResumeId: sessionId,
+      sessionDirectory,
+      processEnv: {
+        HOME: ambientHome,
+        CLAUDE_CONFIG_DIR: managedConfigDir,
+      },
     })).toBeNull();
   });
 });

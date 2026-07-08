@@ -2,6 +2,7 @@ import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers
 import { resolveCanonicalCodexBackendMode } from '@/rpc/handlers/codexBackendMode';
 import type { TerminalMode, TerminalSpawnOptions } from '@/terminal/runtime/terminalConfig';
 import { HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY } from '@/agent/runtime/sessionConnectedServiceMaterializationIdentityEnv';
+import { HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY } from '@/agent/runtime/sessionConnectedServicesBindingsEnv';
 import {
   AgentRuntimeDescriptorV1Schema,
   BackendTargetRefSchema,
@@ -18,6 +19,7 @@ const TERMINAL_MODES = ['plain', 'tmux', 'windows_terminal', 'windows_console'] 
 const SAFE_RESPAWN_ENVIRONMENT_VARIABLE_KEYS = [
   'CLAUDE_CONFIG_DIR',
   'CODEX_HOME',
+  HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY,
   HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY,
 ] as const;
 const MAX_SEALED_RESPAWN_ENVIRONMENT_CIPHERTEXT_CHARS = 65_536;

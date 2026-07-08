@@ -203,6 +203,9 @@ export type ConnectedServiceSwitchContinuityParams = Readonly<{
 
 export type ConnectedServicePersistedSessionCandidateParams = Readonly<{
   metadata: unknown;
+  vendorResumeId?: string | null;
+  sessionDirectory?: string | null;
+  processEnv?: Readonly<Record<string, string | undefined>> | null;
 }>;
 
 export type AgentChecklistContributions = Partial<

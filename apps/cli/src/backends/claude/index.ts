@@ -37,8 +37,8 @@ export const agent = {
   getConnectedServiceStateSharingDescriptor: async () => claudeConnectedServiceStateSharingDescriptor,
   getSessionUsageLimitRecoveryControlAdapter: async () => claudeUsageLimitRecoveryControlAdapter,
   resolveConnectedServiceSwitchContinuity: async (params) => await resolveClaudeConnectedServiceSwitchContinuity(params),
-  resolveConnectedServiceCandidatePersistedSessionFile: ({ metadata }) =>
-    resolveClaudeConnectedServiceCandidatePersistedSessionFile({ metadata }),
+  resolveConnectedServiceCandidatePersistedSessionFile: (input) =>
+    resolveClaudeConnectedServiceCandidatePersistedSessionFile(input),
   // Claude's underlying probe takes a `{ vendorResumeId, processEnv, ... }` shape rather than the
   // normalized `VerifyResumeReachableInput`. Adapt here — the materialized target env is the
   // process env Claude reads; the persisted candidate hint and the §2 strict flag pass through

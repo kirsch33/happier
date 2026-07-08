@@ -7,6 +7,7 @@ import {
 } from '@happier-dev/protocol';
 
 import type { CatalogAgentId } from '@/backends/types';
+import type { ConnectedServicePersistedSessionCandidateParams } from '@/backends/types';
 import type { TrackedSession } from '@/daemon/types';
 import {
   readConnectedServiceMaterializationIdentityV1,
@@ -28,6 +29,7 @@ type ResolvedTrackedResumeContext = Readonly<{
 type ResolveConnectedServiceCandidatePersistedSessionFile = (
   agentId: CatalogAgentId,
   metadata: unknown,
+  context?: Omit<ConnectedServicePersistedSessionCandidateParams, 'metadata'>,
 ) => string | null;
 
 export function resolveTrackedConnectedServiceMaterializationIdentity(input: Readonly<{
@@ -72,6 +74,7 @@ function resolveTrackedConnectedServiceResumeContext(input: Readonly<{
   tracked: ContinuityTrackedSession | null;
   persistedSessionMetadata?: unknown;
   vendorResumeId?: string | null;
+  cwd?: string | null;
   candidatePersistedSessionFile?: string | null;
   resolveCandidatePersistedSessionFile?: ResolveConnectedServiceCandidatePersistedSessionFile;
 }>): ResolvedTrackedResumeContext {
@@ -91,6 +94,15 @@ function resolveTrackedConnectedServiceResumeContext(input: Readonly<{
   const trackedSpawnResumeCandidate = normalizeOptionalAbsolutePath(trackedSpawnResume);
   const explicitVendorResumeId = normalizeOptionalString(input.vendorResumeId);
   const explicitCandidatePersistedSessionFile = normalizeOptionalString(input.candidatePersistedSessionFile);
+  const cwd = normalizeOptionalString(input.tracked?.spawnOptions?.directory) ?? normalizeOptionalString(input.cwd);
+  const resolveAmbientCandidate = (vendorResumeId: string | null): string | null => {
+    if (!vendorResumeId || !cwd || !resolveCandidatePersistedSessionFile) return null;
+    return resolveCandidatePersistedSessionFile(input.agentId, null, {
+      vendorResumeId,
+      sessionDirectory: cwd,
+      processEnv: process.env,
+    });
+  };
 
   if (trackedVendorResumeId) {
     return {
@@ -98,7 +110,8 @@ function resolveTrackedConnectedServiceResumeContext(input: Readonly<{
       candidatePersistedSessionFile: trackedSpawnResumeCandidate
         ?? (persistedMetadataVendorResumeId === trackedVendorResumeId ? persistedMetadataCandidatePersistedSessionFile : null)
         ?? (trackedMetadataVendorResumeId === trackedVendorResumeId ? trackedMetadataCandidatePersistedSessionFile : null)
-        ?? (explicitVendorResumeId === trackedVendorResumeId ? explicitCandidatePersistedSessionFile : null),
+        ?? (explicitVendorResumeId === trackedVendorResumeId ? explicitCandidatePersistedSessionFile : null)
+        ?? resolveAmbientCandidate(trackedVendorResumeId),
     };
   }
 
@@ -108,7 +121,8 @@ function resolveTrackedConnectedServiceResumeContext(input: Readonly<{
       candidatePersistedSessionFile: trackedSpawnResumeCandidate
         ?? (persistedMetadataVendorResumeId === trackedSpawnResume ? persistedMetadataCandidatePersistedSessionFile : null)
         ?? (trackedMetadataVendorResumeId === trackedSpawnResume ? trackedMetadataCandidatePersistedSessionFile : null)
-        ?? (explicitVendorResumeId === trackedSpawnResume ? explicitCandidatePersistedSessionFile : null),
+        ?? (explicitVendorResumeId === trackedSpawnResume ? explicitCandidatePersistedSessionFile : null)
+        ?? resolveAmbientCandidate(trackedSpawnResume),
     };
   }
 
@@ -116,7 +130,8 @@ function resolveTrackedConnectedServiceResumeContext(input: Readonly<{
     return {
       vendorResumeId: persistedMetadataVendorResumeId,
       candidatePersistedSessionFile: persistedMetadataCandidatePersistedSessionFile
-        ?? (explicitVendorResumeId === persistedMetadataVendorResumeId ? explicitCandidatePersistedSessionFile : null),
+        ?? (explicitVendorResumeId === persistedMetadataVendorResumeId ? explicitCandidatePersistedSessionFile : null)
+        ?? resolveAmbientCandidate(persistedMetadataVendorResumeId),
     };
   }
 
@@ -124,13 +139,15 @@ function resolveTrackedConnectedServiceResumeContext(input: Readonly<{
     return {
       vendorResumeId: trackedMetadataVendorResumeId,
       candidatePersistedSessionFile: trackedMetadataCandidatePersistedSessionFile
-        ?? (explicitVendorResumeId === trackedMetadataVendorResumeId ? explicitCandidatePersistedSessionFile : null),
+        ?? (explicitVendorResumeId === trackedMetadataVendorResumeId ? explicitCandidatePersistedSessionFile : null)
+        ?? resolveAmbientCandidate(trackedMetadataVendorResumeId),
     };
   }
 
   return {
     vendorResumeId: explicitVendorResumeId,
-    candidatePersistedSessionFile: explicitCandidatePersistedSessionFile,
+    candidatePersistedSessionFile: explicitCandidatePersistedSessionFile
+      ?? resolveAmbientCandidate(explicitVendorResumeId),
   };
 }
 
@@ -164,6 +181,7 @@ export function resolveTrackedConnectedServiceSwitchContinuityContext(input: Rea
     tracked: input.tracked,
     persistedSessionMetadata: input.persistedSessionMetadata,
     vendorResumeId: input.vendorResumeId,
+    cwd: input.cwd,
     candidatePersistedSessionFile: input.candidatePersistedSessionFile,
     resolveCandidatePersistedSessionFile: input.resolveCandidatePersistedSessionFile,
   });

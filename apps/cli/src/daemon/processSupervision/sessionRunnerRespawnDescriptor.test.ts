@@ -10,6 +10,7 @@ import {
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 import type { Credentials } from '@/persistence';
 import { HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY } from '@/agent/runtime/sessionConnectedServiceMaterializationIdentityEnv';
+import { HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY } from '@/agent/runtime/sessionConnectedServicesBindingsEnv';
 
 describe('sessionRunnerRespawnDescriptor', () => {
   it('round-trips mcpSelection through the respawn descriptor', () => {
@@ -434,6 +435,16 @@ describe('sessionRunnerRespawnDescriptor', () => {
       id: 'csm_tracked_env_1',
       createdAtMs: 123,
     });
+    const connectedServicesBindingsJson = JSON.stringify({
+      v: 1,
+      bindingsByServiceId: {
+        'claude-subscription': {
+          source: 'connected',
+          selection: 'profile',
+          profileId: 'claude',
+        },
+      },
+    });
 
     expect(buildTrackedSessionRespawnEnvironmentVariables({
       expandedEnvironmentVariables: {
@@ -446,6 +457,7 @@ describe('sessionRunnerRespawnDescriptor', () => {
         HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON: '["OPENAI_API_KEY"]',
         HAPPIER_SESSION_REQUESTED_DIRECTORY: '/tmp/repo',
         HAPPIER_CODEX_BACKEND_MODE: 'acp',
+        [HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY]: connectedServicesBindingsJson,
         [HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY]: materializationIdentityJson,
       },
     })).toEqual({
@@ -453,6 +465,7 @@ describe('sessionRunnerRespawnDescriptor', () => {
       ANTHROPIC_AUTH_TOKEN: 'sk-anthropic',
       CODEX_HOME: '/tmp/codex-home',
       CLAUDE_CONFIG_DIR: '/tmp/claude-config',
+      [HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY]: connectedServicesBindingsJson,
       [HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY]: materializationIdentityJson,
     });
   });

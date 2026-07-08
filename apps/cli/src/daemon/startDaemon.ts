@@ -155,6 +155,10 @@ import {
   readSpawnProfileId,
   resolveProfileEnvironmentVariablesForSpawn,
 } from './spawn/resolveProfileEnvironmentVariablesForSpawn';
+import {
+  HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY,
+  parseSessionConnectedServicesBindingsJson,
+} from '@/agent/runtime/sessionConnectedServicesBindingsEnv';
 import { buildSpawnChildProcessEnv } from './spawn/buildSpawnChildProcessEnv';
 import { resolveStackProcessKindOverrideForSessionSpawn } from './spawn/resolveStackProcessKindOverrideForSessionSpawn';
 import { createSpawnConcurrencyGate } from './spawn/createSpawnConcurrencyGate';
@@ -508,6 +512,37 @@ function shouldDowngradeLegacyImplicitTmuxRequest(params: Readonly<{
 function readConnectedServiceBindingsOrEmpty(raw: unknown): ConnectedServiceBindingsV1 {
   const parsed = ConnectedServiceBindingsV1Schema.safeParse(raw);
   return parsed.success ? parsed.data : { v: 1 as const, bindingsByServiceId: {} };
+}
+
+function readConnectedServiceBindingsFromEnvironment(
+  env: Readonly<Record<string, string>>,
+): ConnectedServiceBindingsV1 | null {
+  const explicit = parseSessionConnectedServicesBindingsJson(
+    env[HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY] ?? null,
+  );
+  if (explicit) return explicit;
+
+  const bindingsByServiceId: ConnectedServiceBindingsV1['bindingsByServiceId'] = {};
+  for (const selection of readConnectedServiceChildSelectionsFromEnv(env)) {
+    if (selection.kind === 'profile') {
+      bindingsByServiceId[selection.serviceId] = {
+        source: 'connected',
+        selection: 'profile',
+        profileId: selection.profileId,
+      };
+      continue;
+    }
+    bindingsByServiceId[selection.serviceId] = {
+      source: 'connected',
+      selection: 'group',
+      groupId: selection.groupId,
+      profileId: selection.activeProfileId,
+    };
+  }
+
+  return Object.keys(bindingsByServiceId).length > 0
+    ? { v: 1, bindingsByServiceId }
+    : null;
 }
 
 function hasConnectedServiceRegistrationBindings(raw: unknown): boolean {
@@ -2523,6 +2558,63 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   }
                 };
 
+                let profileEnvironmentVariables = environmentVariablesValidation.env;
+                let profileEnvironmentVariablesResolved = false;
+                const resolveProfileEnvironmentVariablesOnce = async (): Promise<
+                  | Readonly<{ ok: true; env: Record<string, string> }>
+                  | Readonly<{ ok: false; result: Extract<SpawnSessionResult, { type: 'error' }> }>
+                > => {
+                  if (profileEnvironmentVariablesResolved) {
+                    return { ok: true, env: profileEnvironmentVariables };
+                  }
+                  try {
+                    profileEnvironmentVariables = await resolveProfileEnvironmentVariablesForSpawn({
+                      options: { ...normalizedOptions, directory: resolvedDirectory },
+                      providedEnvironmentVariables: environmentVariablesValidation.env,
+                      credentials,
+                      processEnv: process.env,
+                      accountSettings: await readAccountSettingsForProfileEnv(),
+                      logDebug: (message) => logger.debug(message),
+                    });
+                    profileEnvironmentVariablesResolved = true;
+                    return { ok: true, env: profileEnvironmentVariables };
+                  } catch (error) {
+                    const errorMessage =
+                      error instanceof Error
+                        ? `Profile environment resolution failed: ${error.message}`
+                        : 'Profile environment resolution failed.';
+                    logger.warn('[DAEMON RUN] Profile environment resolution failed before spawn', {
+                      profileId: readSpawnProfileId(normalizedOptions),
+                      error: error instanceof Error ? error.message : String(error),
+                    });
+                    return {
+                      ok: false,
+                      result: {
+                        type: 'error',
+                        errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+                        errorMessage,
+                      },
+                    };
+                  }
+                };
+
+                const resolvedProfileEnvironmentVariables = await resolveProfileEnvironmentVariablesOnce();
+                if (!resolvedProfileEnvironmentVariables.ok) {
+                  return resolvedProfileEnvironmentVariables.result;
+                }
+                const profileConnectedServices = readConnectedServiceBindingsFromEnvironment(
+                  resolvedProfileEnvironmentVariables.env,
+                );
+                if (
+                  profileConnectedServices
+                  && !hasConnectedServiceRegistrationBindings(normalizedOptions.connectedServices)
+                ) {
+                  normalizedOptions = {
+                    ...normalizedOptions,
+                    connectedServices: profileConnectedServices,
+                  };
+                }
+
                 let connectedServiceAuth: Awaited<ReturnType<typeof resolveConnectedServiceAuthForSpawn>> = null;
                 const fallbackMaterializationKey =
                   normalizedExistingSessionId ||
@@ -2691,6 +2783,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                       candidatePersistedSessionFile: resolveConnectedServiceCandidatePersistedSessionFile(
                         catalogAgentId,
                         existingSessionPersistedMetadata,
+                        {
+                          vendorResumeId: effectiveResume || null,
+                          sessionDirectory: resolvedDirectory,
+                          processEnv: process.env,
+                        },
                       ),
                     });
                   } catch (error) {
@@ -2757,32 +2854,6 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     ? { connectedServices: effectiveConnectedServicesBindings }
                     : {}),
                 };
-
-                let profileEnvironmentVariables = environmentVariablesValidation.env;
-                try {
-                  profileEnvironmentVariables = await resolveProfileEnvironmentVariablesForSpawn({
-                    options: { ...effectiveSpawnOptionsBase, directory: resolvedDirectory },
-                    providedEnvironmentVariables: environmentVariablesValidation.env,
-                    credentials,
-                    processEnv: process.env,
-                    accountSettings: await readAccountSettingsForProfileEnv(),
-                    logDebug: (message) => logger.debug(message),
-                  });
-                } catch (error) {
-                  const errorMessage =
-                    error instanceof Error
-                      ? `Profile environment resolution failed: ${error.message}`
-                      : 'Profile environment resolution failed.';
-                  logger.warn('[DAEMON RUN] Profile environment resolution failed before spawn', {
-                    profileId: readSpawnProfileId(effectiveSpawnOptionsBase),
-                    error: error instanceof Error ? error.message : String(error),
-                  });
-                  return {
-                    type: 'error',
-                    errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
-                    errorMessage,
-                  };
-                }
 
                 const spawnEnvironment = await resolveSpawnChildEnvironment({
                   options: { ...effectiveSpawnOptionsBase, directory: resolvedDirectory },
@@ -4882,6 +4953,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             const candidatePersistedSessionFile = resolveConnectedServiceCandidatePersistedSessionFile(
               inactive.agentId,
               inactive.metadata ?? null,
+              {
+                vendorResumeId: inactive.vendorResumeId ?? null,
+                sessionDirectory: inactive.cwd ?? null,
+                processEnv: process.env,
+              },
             );
             return {
               ...inactive,

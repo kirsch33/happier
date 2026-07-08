@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import { HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY } from '@/agent/runtime/sessionConnectedServicesBindingsEnv';
 import { resolveSessionRuntimeSnapshot } from './resolveSessionRuntimeSnapshot';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 
@@ -369,5 +371,44 @@ describe('resolveSessionRuntimeSnapshot', () => {
     // Durable runtime controls are preserved.
     expect(result.spawnOptions.permissionMode).toBe('yolo');
     expect(result.spawnOptions.directory).toBe('/tmp/repo');
+  });
+
+  it('recovers connected-service bindings from tracked child selection env before resume spawn', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions(),
+      trackedSpawnOptions: baseIncomingOptions({
+        environmentVariables: {
+          [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
+            kind: 'profile',
+            serviceId: 'claude-subscription',
+            profileId: 'claude',
+          }]),
+        },
+      }),
+    });
+
+    expect(result.spawnOptions.connectedServices).toEqual({
+      v: 1,
+      bindingsByServiceId: {
+        'claude-subscription': {
+          source: 'connected',
+          selection: 'profile',
+          profileId: 'claude',
+        },
+      },
+    });
+  });
+
+  it('recovers connected-service bindings from tracked session binding env before resume spawn', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions(),
+      trackedSpawnOptions: baseIncomingOptions({
+        environmentVariables: {
+          [HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY]: JSON.stringify(persistedConnectedServices),
+        },
+      }),
+    });
+
+    expect(result.spawnOptions.connectedServices).toEqual(persistedConnectedServices);
   });
 });

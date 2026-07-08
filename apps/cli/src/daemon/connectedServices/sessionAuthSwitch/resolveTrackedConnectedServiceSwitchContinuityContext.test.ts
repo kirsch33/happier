@@ -193,6 +193,37 @@ describe('resolveTrackedConnectedServiceSwitchContinuityContext', () => {
     });
   });
 
+  it('derives a provider candidate from the vendor resume id and cwd when metadata has no transcript path', () => {
+    const baseDir = '/tmp/happier-connected-services';
+    const candidateSessionFile = '/home/user/.claude/projects/-tmp-project/claude-session-1.jsonl';
+
+    expect(resolveTrackedConnectedServiceSwitchContinuityContext({
+      agentId: 'claude',
+      baseDir,
+      tracked: {
+        spawnOptions: {
+          directory: '/tmp/project',
+          resume: 'claude-session-1',
+        },
+      },
+      connectedServiceMaterializationIdentityV1: null,
+      vendorResumeId: null,
+      cwd: null,
+      candidatePersistedSessionFile: null,
+      resolveCandidatePersistedSessionFile: (_agentId, metadata, context) => {
+        if (metadata !== null) return null;
+        return context?.vendorResumeId === 'claude-session-1'
+          && context.sessionDirectory === '/tmp/project'
+          ? candidateSessionFile
+          : null;
+      },
+    })).toMatchObject({
+      vendorResumeId: 'claude-session-1',
+      cwd: '/tmp/project',
+      candidatePersistedSessionFile: candidateSessionFile,
+    });
+  });
+
   it('prefers latest persisted metadata over stale tracked webhook metadata without overriding explicit tracked resume state', () => {
     const baseDir = '/tmp/happier-connected-services';
     const stalePiSessionFile = join(

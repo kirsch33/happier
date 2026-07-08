@@ -22,6 +22,11 @@ import {
   HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY,
   parseSessionConnectedServiceMaterializationIdentityJson,
 } from '@/agent/runtime/sessionConnectedServiceMaterializationIdentityEnv';
+import {
+  HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY,
+  parseSessionConnectedServicesBindingsJson,
+} from '@/agent/runtime/sessionConnectedServicesBindingsEnv';
+import { readConnectedServiceChildSelectionsFromEnv } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 
 type SnapshotValue<T extends string> = Readonly<{ value: T; updatedAt: number }>;
 
@@ -132,6 +137,51 @@ function readConnectedServicesCandidate(
     value: parsed,
     updatedAt: normalizeFiniteTimestamp(updatedAtValue),
   };
+}
+
+function connectedServiceSelectionsToBindings(
+  options: SpawnSessionOptions | null | undefined,
+): ConnectedServiceBindingsV1 | null {
+  const selections = readConnectedServiceChildSelectionsFromEnv(options?.environmentVariables ?? {});
+  if (selections.length < 1) return null;
+
+  const bindingsByServiceId: ConnectedServiceBindingsV1['bindingsByServiceId'] = {};
+  for (const selection of selections) {
+    if (selection.kind === 'profile') {
+      bindingsByServiceId[selection.serviceId] = {
+        source: 'connected',
+        selection: 'profile',
+        profileId: selection.profileId,
+      };
+      continue;
+    }
+    bindingsByServiceId[selection.serviceId] = {
+      source: 'connected',
+      selection: 'group',
+      groupId: selection.groupId,
+      profileId: selection.activeProfileId,
+    };
+  }
+
+  return Object.keys(bindingsByServiceId).length > 0
+    ? { v: 1, bindingsByServiceId }
+    : null;
+}
+
+function readConnectedServicesCandidateFromOptionsEnv(
+  options: SpawnSessionOptions | null | undefined,
+  source: CandidateSource,
+): ConnectedServicesCandidate | null {
+  const rawBindings = options?.environmentVariables?.[HAPPIER_SESSION_CONNECTED_SERVICES_BINDINGS_ENV_KEY];
+  const bindings = parseSessionConnectedServicesBindingsJson(typeof rawBindings === 'string' ? rawBindings : null)
+    ?? connectedServiceSelectionsToBindings(options);
+  return bindings
+    ? {
+        source,
+        value: bindings,
+        updatedAt: normalizeFiniteTimestamp(options?.connectedServicesUpdatedAt),
+      }
+    : null;
 }
 
 function chooseConnectedServicesCandidate(
@@ -349,11 +399,13 @@ export function resolveSessionRuntimeSnapshot(
       params.trackedSpawnOptions?.connectedServicesUpdatedAt,
       'tracked',
     ),
+    readConnectedServicesCandidateFromOptionsEnv(params.trackedSpawnOptions, 'tracked'),
     readConnectedServicesCandidate(
       params.incomingOptions.connectedServices,
       params.incomingOptions.connectedServicesUpdatedAt,
       'incoming',
     ),
+    readConnectedServicesCandidateFromOptionsEnv(params.incomingOptions, 'incoming'),
   ]);
 
   const snapshot: SessionRuntimeSnapshot = {

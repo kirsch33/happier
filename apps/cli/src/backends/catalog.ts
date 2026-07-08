@@ -18,6 +18,7 @@ import type {
   AcpForkContinuationHandler,
   AgentCatalogEntry,
   CatalogAgentId,
+  ConnectedServicePersistedSessionCandidateParams,
   ConnectedServiceStateSharingDescriptor,
   ConnectedServiceSwitchContinuityParams,
   ConnectedServiceSwitchContinuityResult,
@@ -227,10 +228,11 @@ export async function verifyResumeReachableThroughCatalog(
 export function resolveConnectedServiceCandidatePersistedSessionFile(
   agentId: AgentId | null | undefined,
   metadata: unknown,
+  context: Omit<ConnectedServicePersistedSessionCandidateParams, 'metadata'> = {},
 ): string | null {
   const catalogId = resolveCatalogAgentId(agentId);
   const entry = AGENTS[catalogId];
-  return entry?.resolveConnectedServiceCandidatePersistedSessionFile?.({ metadata }) ?? null;
+  return entry?.resolveConnectedServiceCandidatePersistedSessionFile?.({ metadata, ...context }) ?? null;
 }
 
 export async function getSessionGoalControlAdapter(agentId?: AgentId | null): Promise<SessionGoalControlAdapter | null> {
