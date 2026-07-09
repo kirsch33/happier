@@ -25,6 +25,9 @@ describe('sessionMessages meta', () => {
     expect(protocol.readSessionUserMessageDeliveryIntentMeta(meta)).toBe('explicit_pending');
     expect((meta as any).happierDeliveryIntentV1).toBe('explicit_pending');
     expect(protocol.readSessionUserMessageDeliveryIntentMeta({
+      happierDeliveryIntentV1: 'transcript_only',
+    })).toBe('transcript_only');
+    expect(protocol.readSessionUserMessageDeliveryIntentMeta({
       happierDeliveryIntentV1: '__future__',
     })).toBeNull();
   });

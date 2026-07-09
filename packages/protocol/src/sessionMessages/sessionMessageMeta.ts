@@ -7,13 +7,15 @@ export type SessionUserMessageDeliveryIntentV1 =
   | 'default'
   | 'explicit_pending'
   | 'explicit_immediate'
-  | 'interrupt';
+  | 'interrupt'
+  | 'transcript_only';
 
 const SESSION_USER_MESSAGE_DELIVERY_INTENTS = new Set<SessionUserMessageDeliveryIntentV1>([
   'default',
   'explicit_pending',
   'explicit_immediate',
   'interrupt',
+  'transcript_only',
 ]);
 
 export const SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY = 'happierDeliveryIntentV1';

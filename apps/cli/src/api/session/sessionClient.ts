@@ -273,6 +273,10 @@ export class ApiSessionClient extends EventEmitter {
     private readonly agentQueueEchoSuppressedLocalIds = new Set<string>();
     private readonly agentQueueInFlightLocalIds = new Set<string>();
     private readonly undeliveredAgentQueueInFlightSeqByLocalId = new Map<string, number>();
+    private readonly undeliveredAgentQueueInFlightMessageByLocalId = new Map<string, {
+        message: UserMessage;
+        seq: number;
+    }>();
     private readonly agentQueueDeliveredLocalIds = new Set<string>();
     private readonly providerAcceptedUserMessageLocalIdsAwaitingSeq = new Set<string>();
     private readonly passiveCommittedUserMessageLocalIds = new Set<string>();
@@ -523,6 +527,12 @@ export class ApiSessionClient extends EventEmitter {
             getSessionMetadata: () => this.getMetadataSnapshot(),
             updateSessionMetadata: (handler) => this.updateMetadata(handler),
             enqueueSessionUserMessage: (request) => this.enqueueSessionUserMessage(request),
+            commitSessionUserMessage: (request) => this.sendUserTextMessageCommitted(request.text, {
+                localId: typeof request.localId === 'string' && request.localId.length > 0
+                    ? request.localId
+                    : randomUUID(),
+                meta: request.meta,
+            }),
             materializeNextPendingMessageSafely: (opts) => this.materializeNextPendingMessageSafely(opts),
             sessionRuntimeControls: this.sessionRuntimeControls,
             // QAE-1: a user "Stop waiting" handled session-side (provider runtime
@@ -1203,6 +1213,10 @@ export class ApiSessionClient extends EventEmitter {
         return this.agentQueueDeliveredLocalIds.has(localId);
     }
 
+    private hasUndeliveredAgentQueueInFlightLocalId(localId: string): boolean {
+        return this.undeliveredAgentQueueInFlightSeqByLocalId.has(localId);
+    }
+
     private hasPassiveCommittedUserMessageLocalId(localId: string): boolean {
         return this.passiveCommittedUserMessageLocalIds.has(localId);
     }
@@ -1253,27 +1267,63 @@ export class ApiSessionClient extends EventEmitter {
     private recordUndeliveredAgentQueueInFlightUserMessage(info: Readonly<{
         localId: string;
         seq: number;
+        message?: UserMessage;
     }>): void {
         const localId = info.localId.trim();
         if (!localId || !Number.isInteger(info.seq) || info.seq < 0) return;
         const existing = this.undeliveredAgentQueueInFlightSeqByLocalId.get(localId);
         if (existing === undefined || info.seq < existing) {
             this.undeliveredAgentQueueInFlightSeqByLocalId.set(localId, info.seq);
+            if (info.message) {
+                this.undeliveredAgentQueueInFlightMessageByLocalId.set(localId, {
+                    message: info.message,
+                    seq: info.seq,
+                });
+            } else {
+                this.undeliveredAgentQueueInFlightMessageByLocalId.delete(localId);
+            }
+        } else if (existing === info.seq && info.message && !this.undeliveredAgentQueueInFlightMessageByLocalId.has(localId)) {
+            this.undeliveredAgentQueueInFlightMessageByLocalId.set(localId, {
+                message: info.message,
+                seq: info.seq,
+            });
         }
     }
 
     private clearUndeliveredAgentQueueInFlightLocalId(localId: string): void {
         if (!localId) return;
         this.undeliveredAgentQueueInFlightSeqByLocalId.delete(localId);
+        this.undeliveredAgentQueueInFlightMessageByLocalId.delete(localId);
     }
 
     private clearUndeliveredAgentQueueInFlightSeqsThrough(seq: number): void {
         if (!Number.isInteger(seq) || seq < 0) return;
         for (const [localId, candidateSeq] of this.undeliveredAgentQueueInFlightSeqByLocalId) {
             if (candidateSeq <= seq) {
-                this.undeliveredAgentQueueInFlightSeqByLocalId.delete(localId);
+                this.clearUndeliveredAgentQueueInFlightLocalId(localId);
             }
         }
+    }
+
+    private redeliverUndeliveredAgentQueueInFlightLocalIds(localIds: readonly string[]): string[] {
+        if (!this.pendingMessageCallback) return [];
+        const redeliveredLocalIds: string[] = [];
+        const seen = new Set<string>();
+        for (const rawLocalId of localIds) {
+            const localId = rawLocalId.trim();
+            if (!localId || seen.has(localId)) continue;
+            seen.add(localId);
+            if (this.hasAgentQueueDeliveredLocalId(localId) || this.hasPendingAgentQueueMessageLocalId(localId)) {
+                continue;
+            }
+            const stored = this.undeliveredAgentQueueInFlightMessageByLocalId.get(localId);
+            if (!stored) continue;
+            this.clearUndeliveredAgentQueueInFlightLocalId(localId);
+            this.markUserMessageAgentQueueHandoff(localId);
+            this.pendingMessageCallback(stored.message, { seq: stored.seq });
+            redeliveredLocalIds.push(localId);
+        }
+        return redeliveredLocalIds;
     }
 
     private readEarliestUndeliveredAgentQueueInFlightAfterSeq(): number | null {
@@ -1446,6 +1496,19 @@ export class ApiSessionClient extends EventEmitter {
         };
 
         const deliveryIntent = readSessionUserMessageDeliveryIntentMeta(message.meta);
+        if (deliveryIntent === 'transcript_only') {
+            logger.debug('[DELIVERY-DECISION] transcript-only user-message suppressed', {
+                sessionId: this.sessionId,
+                updateId: update?.id,
+                msgSeq,
+                messageLocalId: message.localId,
+                catchUpAfterSeq: opts.catchUpAfterSeq,
+                catchUpAfterSeqIsExplicit: opts.catchUpAfterSeqIsExplicit,
+                decision: false,
+                reason: 'transcript_only',
+            });
+            return false;
+        }
         if (
             deliveryIntent === 'explicit_pending'
             && isActiveLatestTurnStatus(this.latestTurnStatus)
@@ -1545,6 +1608,8 @@ export class ApiSessionClient extends EventEmitter {
                 markAgentQueueInFlightLocalId: (localId) => this.markAgentQueueInFlightLocalId(localId),
                 hasAgentQueueDeliveredLocalId: (localId) => this.hasAgentQueueDeliveredLocalId(localId),
                 markAgentQueueDeliveredLocalId: (localId) => this.markAgentQueueDeliveredLocalId(localId),
+                hasUndeliveredAgentQueueInFlightLocalId: (localId) =>
+                    this.hasUndeliveredAgentQueueInFlightLocalId(localId),
                 onUndeliveredAgentQueueInFlightUserMessageObserved: (info) =>
                     this.recordUndeliveredAgentQueueInFlightUserMessage(info),
                 allowRetryUndeliveredAgentQueueInFlightLocalIds: opts.catchUpAfterSeqIsExplicit === true,
@@ -3339,15 +3404,21 @@ export class ApiSessionClient extends EventEmitter {
             this.clearAgentQueueInFlightLocalId(localId);
             this.agentQueueDeliveredLocalIds.delete(localId);
         }
+        const redeliveredLocalIds = this.redeliverUndeliveredAgentQueueInFlightLocalIds(localIds);
 
         logger.debug('[pendingQueue] released provider-unaccepted user messages for retry', {
             sessionId: this.sessionId,
             reason: query.reason ?? null,
             localIds,
+            redeliveredLocalIds,
             userMessageSeq: query.userMessageSeq ?? null,
             userMessageSeqs: explicitSeqs,
             earliestSeq,
         });
+
+        if (redeliveredLocalIds.length > 0) {
+            return;
+        }
 
         if (earliestSeq !== null) {
             const afterSeq = Math.max(0, earliestSeq - 1);
@@ -3648,6 +3719,7 @@ export class ApiSessionClient extends EventEmitter {
         this.agentQueueEchoSuppressedLocalIds.clear();
         this.agentQueueInFlightLocalIds.clear();
         this.undeliveredAgentQueueInFlightSeqByLocalId.clear();
+        this.undeliveredAgentQueueInFlightMessageByLocalId.clear();
         this.agentQueueDeliveredLocalIds.clear();
         this.providerAcceptedUserMessageLocalIdsAwaitingSeq.clear();
         this.passiveCommittedUserMessageLocalIds.clear();

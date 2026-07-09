@@ -46,6 +46,36 @@ vi.mock('@happier-dev/connection-supervisor', () => ({
 import { ApiSessionClient } from './sessionClient';
 
 describe('ApiSessionClient session.userMessage.send delivery', () => {
+  it('suppresses transcript-only user messages by delivery intent metadata', () => {
+    const client = Object.create(ApiSessionClient.prototype) as any;
+    client.sessionId = 's1';
+    client.latestTurnStatus = null;
+    client.userMessageCallbackAttachedAtMs = Date.now();
+
+    const shouldDeliver = client.shouldDeliverUserMessageToAgentQueueFromUpdate({
+      role: 'user',
+      content: { type: 'text', text: 'artifact uploaded' },
+      localId: 'transcript-only-1',
+      meta: {
+        [SESSION_USER_MESSAGE_DELIVERY_INTENT_META_KEY]: 'transcript_only',
+        source: 'cli',
+        sentFrom: 'cli',
+      },
+      createdAt: Date.now(),
+    }, {
+      id: 'catchup-transcript-only',
+      body: {
+        t: 'new-message',
+        message: { seq: 14 },
+      },
+    }, {
+      catchUpAfterSeq: 0,
+      catchUpAfterSeqIsExplicit: true,
+    });
+
+    expect(shouldDeliver).toBe(false);
+  });
+
   it('holds explicit server-pending materialized rows during active turns until authorized catch-up', () => {
     const client = Object.create(ApiSessionClient.prototype) as any;
     client.sessionId = 's1';
@@ -561,6 +591,13 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
       localIds: ['l1'],
       reason: 'provider_acceptance_timeout',
     });
+    expect(received).toHaveLength(2);
+    expect(received[1]?.localId).toBe('l1');
+    expect(received[1]?.content?.text).toBe('selected option');
+    expect((client as any).hasAgentQueueInFlightLocalId('l1')).toBe(true);
+    expect((client as any).hasAgentQueueDeliveredLocalId('l1')).toBe(false);
+    expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);
+
     (client as any).handleUpdate({
       ...update,
       id: 'catchup-m1',
@@ -571,7 +608,6 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     });
 
     expect(received).toHaveLength(2);
-    expect(received[1]?.localId).toBe('l1');
     expect((client as any).hasAgentQueueInFlightLocalId('l1')).toBe(true);
     expect((client as any).hasAgentQueueDeliveredLocalId('l1')).toBe(false);
     expect(client.hasUserMessageProviderAcceptance({ userMessageSeq: 1 })).toBe(false);

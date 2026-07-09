@@ -690,6 +690,7 @@ describe('handleSessionNewMessageUpdate', () => {
     const delivered: any[] = [];
     const provenSeqs: number[] = [];
     const emitted: any[] = [];
+    const undelivered: any[] = [];
 
     const update = {
       id: 'u-in-flight',
@@ -733,6 +734,7 @@ describe('handleSessionNewMessageUpdate', () => {
       deleteMaterializedLocalId: () => void 0,
       pendingMessageCallback: (message, info) => delivered.push({ message, info }),
       pendingMessages: [],
+      onUndeliveredAgentQueueInFlightUserMessageObserved: (info) => undelivered.push(info),
       onUserMessageDeliveryProvenByLocalEcho: (seq) => provenSeqs.push(seq),
       emit: (event, payload) => emitted.push({ event, payload }),
       debug: () => void 0,
@@ -741,6 +743,10 @@ describe('handleSessionNewMessageUpdate', () => {
 
     expect(delivered).toEqual([]);
     expect(provenSeqs).toEqual([]);
+    expect(undelivered).toHaveLength(1);
+    expect(undelivered[0]?.localId).toBe('in-flight-1');
+    expect(undelivered[0]?.seq).toBe(19);
+    expect(undelivered[0]?.message?.content?.text).toBe('selected option');
     expect(emitted.some((e: any) => e.event === 'user-message')).toBe(true);
   });
 

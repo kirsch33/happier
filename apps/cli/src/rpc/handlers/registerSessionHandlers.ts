@@ -231,6 +231,11 @@ export function registerSessionHandlers(
             localId?: string;
             meta: Record<string, unknown>;
         }) => Promise<void> | void) | null;
+        commitSessionUserMessage?: ((request: {
+            text: string;
+            localId?: string;
+            meta: Record<string, unknown>;
+        }) => Promise<void> | void) | null;
         materializeNextPendingMessageSafely?: ((opts?: {
             reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
         }) => Promise<MaterializeNextPendingResult>) | null;
@@ -279,6 +284,7 @@ export function registerSessionHandlers(
     registerSessionUserMessageSendHandler(rpcHandlerManager, {
         workingDirectory: effectiveWorkingDirectory,
         enqueueSessionUserMessage: opts?.enqueueSessionUserMessage ?? null,
+        commitSessionUserMessage: opts?.commitSessionUserMessage ?? null,
         sessionRuntimeControls: opts?.sessionRuntimeControls ?? null,
     });
     registerSessionPendingQueueMaterializeNextHandler(rpcHandlerManager, {

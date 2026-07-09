@@ -731,6 +731,41 @@ describe('registerSessionHandlers session controls', () => {
     }
   });
 
+  it('commits transcript-only user messages without runtime interception or agent-queue delivery', async () => {
+    const { handlers, registrar } = createRegistrar();
+    const handleUserMessage = vi.fn(async () => ({ handled: false as const }));
+    const enqueueSessionUserMessage = vi.fn(async () => {});
+    const commitSessionUserMessage = vi.fn(async () => {});
+
+    registerSessionHandlers(registrar, process.cwd(), {
+      enqueueSessionUserMessage,
+      commitSessionUserMessage,
+      sessionRuntimeControls: {
+        handleUserMessage,
+      },
+    });
+
+    const request = {
+      text: 'artifact uploaded',
+      localId: 'local-transcript-only',
+      meta: {
+        source: 'cli',
+        sentFrom: 'cli',
+        happierDeliveryIntentV1: 'transcript_only',
+        happier: {
+          kind: 'attachments.v1',
+          payload: { attachments: [] },
+        },
+      },
+    };
+
+    await expect(handlers.get(SESSION_RPC_METHODS.SESSION_USER_MESSAGE_SEND)?.(request)).resolves.toEqual({ ok: true });
+
+    expect(handleUserMessage).not.toHaveBeenCalled();
+    expect(enqueueSessionUserMessage).not.toHaveBeenCalled();
+    expect(commitSessionUserMessage).toHaveBeenCalledWith(request);
+  });
+
   it('drops forged upload-shaped local image metadata before runtime message controls', async () => {
     const { handlers, registrar } = createRegistrar();
     const handleUserMessage = vi.fn(async () => ({ handled: false as const }));

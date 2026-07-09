@@ -44,9 +44,11 @@ export function handleSessionNewMessageUpdate(params: {
     markAgentQueueInFlightLocalId?: (localId: string) => void;
     hasAgentQueueDeliveredLocalId?: (localId: string) => boolean;
     markAgentQueueDeliveredLocalId?: (localId: string) => void;
+    hasUndeliveredAgentQueueInFlightLocalId?: (localId: string) => boolean;
     onUndeliveredAgentQueueInFlightUserMessageObserved?: (info: Readonly<{
         localId: string;
         seq: number;
+        message: UserMessage;
     }>) => void;
     /**
      * Explicit owed-delivery catch-up may see a local id that is still marked in-flight from a
@@ -237,11 +239,16 @@ export function handleSessionNewMessageUpdate(params: {
         const isEffectivelyAgentQueueEchoSuppressedLocalId =
             shouldRespectAgentQueueEchoSuppression
             && isAgentQueueEchoSuppressedForDelivery;
+        const hasUndeliveredAgentQueueInFlightLocalId = Boolean(
+            agentQueueLocalId
+            && (params.hasUndeliveredAgentQueueInFlightLocalId?.(agentQueueLocalId) ?? true),
+        );
         const canRetryUndeliveredAgentQueueInFlightLocalId =
             params.allowRetryUndeliveredAgentQueueInFlightLocalIds === true
             && isAgentQueueInFlightLocalId
             && !isAgentQueueDeliveredLocalId
-            && !isAlreadyPendingAgentQueueMessage;
+            && !isAlreadyPendingAgentQueueMessage
+            && hasUndeliveredAgentQueueInFlightLocalId;
         const isAgentQueueInFlightBlockingDelivery =
             isAgentQueueInFlightLocalId && !canRetryUndeliveredAgentQueueInFlightLocalId;
         const shouldDeliverToAgentQueue =
@@ -296,6 +303,7 @@ export function handleSessionNewMessageUpdate(params: {
                 params.onUndeliveredAgentQueueInFlightUserMessageObserved?.({
                     localId: agentQueueLocalId,
                     seq: Math.trunc(msgSeq),
+                    message: userResult.data,
                 });
             }
             params.debug('[SOCKET] [UPDATE] Skipped user-message delivery to agent queue', {
@@ -308,6 +316,7 @@ export function handleSessionNewMessageUpdate(params: {
                 isAgentQueueEchoSuppressedForDelivery,
                 isAgentQueueInFlightLocalId,
                 canRetryUndeliveredAgentQueueInFlightLocalId,
+                hasUndeliveredAgentQueueInFlightLocalId,
                 isAgentQueueDeliveredLocalId,
                 isAlreadyPendingAgentQueueMessage,
                 isPendingQueueMaterializedLocalId,
@@ -347,11 +356,16 @@ export function handleSessionNewMessageUpdate(params: {
                 const isAgentQueueInFlightLocalId = Boolean(
                     agentQueueLocalId && params.hasAgentQueueInFlightLocalId?.(agentQueueLocalId),
                 );
+                const hasUndeliveredAgentQueueInFlightLocalId = Boolean(
+                    agentQueueLocalId
+                    && (params.hasUndeliveredAgentQueueInFlightLocalId?.(agentQueueLocalId) ?? true),
+                );
                 const canRetryUndeliveredAgentQueueInFlightLocalId =
                     params.allowRetryUndeliveredAgentQueueInFlightLocalIds === true
                     && isAgentQueueInFlightLocalId
                     && !isAgentQueueDeliveredLocalId
-                    && !isAlreadyPendingAgentQueueMessage;
+                    && !isAlreadyPendingAgentQueueMessage
+                    && hasUndeliveredAgentQueueInFlightLocalId;
                 const isAgentQueueInFlightBlockingDelivery =
                     isAgentQueueInFlightLocalId && !canRetryUndeliveredAgentQueueInFlightLocalId;
                 const isEffectivelyAgentQueueEchoSuppressedLocalId =
@@ -420,6 +434,7 @@ export function handleSessionNewMessageUpdate(params: {
                         params.onUndeliveredAgentQueueInFlightUserMessageObserved?.({
                             localId: agentQueueLocalId,
                             seq: Math.trunc(msgSeq),
+                            message: parsedCandidate.data,
                         });
                     }
                     params.debug('[SOCKET] [UPDATE] Skipped coerced user-message delivery to agent queue', {
@@ -429,6 +444,7 @@ export function handleSessionNewMessageUpdate(params: {
                         isAgentQueueEchoSuppressedForDelivery,
                         isAgentQueueInFlightLocalId,
                         canRetryUndeliveredAgentQueueInFlightLocalId,
+                        hasUndeliveredAgentQueueInFlightLocalId,
                         isAgentQueueDeliveredLocalId,
                         isEffectivelyAgentQueueEchoSuppressedLocalId,
                         isSelfEchoSuppressedCliWrite,
