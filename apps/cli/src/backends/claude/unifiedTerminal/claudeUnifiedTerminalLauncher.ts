@@ -56,8 +56,9 @@ import { configuration } from '@/configuration';
 import { delay } from '@/utils/time';
 import { readClaudeActiveUnifiedTerminalHost } from '../utils/readClaudeActiveTerminalMode';
 import { resolveClaudeConfigDirOverride } from '../utils/resolveClaudeConfigDirOverride';
-import { verifyClaudeCodeNativeAuth } from '../connectedServices/nativeAuth/verifyClaudeCodeNativeAuth';
+import { verifyClaudeCodeNativeAuthStatus } from '../connectedServices/nativeAuth/verifyClaudeCodeNativeAuthStatus';
 import {
+  isClaudeUnifiedTerminalRuntimeAuthUnavailableError,
   isClaudeUnifiedTerminalRuntimeAuthRestartError,
   type ClaudeUnifiedRuntimeAuthFailureDisposition,
 } from './claudeUnifiedTerminalRuntimeAuthRestartError';
@@ -204,7 +205,7 @@ function resolveClaudeNativeConfigDir(): string {
 }
 
 async function shouldRestartStaleClaudeTerminalAfterAuthFailure(): Promise<boolean> {
-  const result = await verifyClaudeCodeNativeAuth({
+  const result = await verifyClaudeCodeNativeAuthStatus({
     claudeConfigDir: resolveClaudeNativeConfigDir(),
   }).catch(() => null);
   return result?.status === 'ok';
@@ -814,6 +815,9 @@ export async function claudeUnifiedTerminalLauncher(
           }
           const restartAfterRecovery = await maybeRestartStaleClaudeTerminalAfterAuthFailure('after_recovery');
           if (restartAfterRecovery) return restartAfterRecovery;
+          if (surfaced) {
+            return { action: 'terminate_host', reason: 'runtime_auth_surface' };
+          }
         } finally {
           binding.notePromptTurnTerminal();
         }
@@ -889,6 +893,15 @@ export async function claudeUnifiedTerminalLauncher(
           if (!consumeParkRelaunchBudget()) return { type: 'exit', code: 1 };
           if (shouldRetryRestoredStartupMessage) continue;
           if (await parkForNextMessageAfterRuntimeIssue('runtime_auth_restart')) continue;
+          return { type: 'exit', code: 1 };
+        }
+        if (isClaudeUnifiedTerminalRuntimeAuthUnavailableError(error)) {
+          session.onThinkingChange(false);
+          await binding.recordPromptTurnFailed().catch((failureError) => {
+            logger.debug('[unified]: failed to mark Claude auth-unavailable turn failed (non-fatal)', failureError);
+          });
+          await flushUnifiedStartupFailureSurface(session, 'runtime_auth_unavailable');
+          restoreInFlightStartupMessageAfterHostStartupFailure();
           return { type: 'exit', code: 1 };
         }
         if (isClaudeUnifiedTerminalHostDeadError(error)) {

@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +29,7 @@ import {
   isClaudeUnifiedTerminalReadinessTimeoutError,
 } from './createClaudeUnifiedTerminalReadinessBridge';
 import { reloadConfiguration } from '@/configuration';
+import { HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 
 type ReadinessEnvSnapshot = Readonly<{
   timeout: string | undefined;
@@ -4584,6 +4585,246 @@ describe('runClaudeUnifiedTerminalSession', () => {
         maxUserMessageSeq: null,
         userMessageLocalIds: [],
         reason: 'provider_acceptance_timeout',
+      });
+    } finally {
+      abortController.abort();
+      await sessionPromise;
+    }
+  });
+
+  it('fails before terminal injection and requeues the batch when connected-service native auth is unavailable', async () => {
+    const abortController = createAbortableSignal();
+    const returnUnconsumedMessage = vi.fn();
+    const onRuntimeAuthFailureEvent = vi.fn(async () => ({
+      action: 'terminate_host' as const,
+      reason: 'runtime_auth_surface' as const,
+    }));
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => ({
+        status: 'injected',
+        at: Date.now(),
+        bytesWritten: input.text.length,
+      } as const)),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    let consumed = false;
+    let settlement: { kind: 'resolved' } | { kind: 'rejected'; error: unknown } | null = null;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      sessionId: 'claude-session-id',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'prompt must not enter logged-out Claude',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'tmux',
+          },
+          maxUserMessageSeq: 42,
+          userMessageLocalIds: ['local-42'],
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved' as const, adapter, reason: 'test' }),
+      buildSpawn: async () => ({ spawnArgv: ['/bin/claude'], spawnEnv: {} }),
+      createSessionName: () => 'happier-claude-session-test',
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      verifyRuntimeAuthBeforePrompt: vi.fn(async () => ({
+        status: 'native_cli_logged_out' as const,
+        missingScopes: [],
+        credentialPath: '/tmp/claude-config/.credentials.json',
+      })),
+      onRuntimeAuthFailureEvent,
+      returnUnconsumedMessage,
+    })
+      .then(() => {
+        settlement = { kind: 'resolved' };
+      })
+      .catch((error: unknown) => {
+        settlement = { kind: 'rejected', error };
+      });
+
+    try {
+      await waitUntil(() => typeof subscribedHook === 'function' || settlement !== null, 5_000);
+      if (typeof subscribedHook === 'function') {
+        subscribedHook({
+          hook_event_name: 'SessionStart',
+          session_id: 'claude-session-id',
+          transcript_path: '/tmp/claude-session.jsonl',
+        });
+      }
+      await waitUntil(() => onRuntimeAuthFailureEvent.mock.calls.length > 0 || settlement !== null, 5_000);
+      await waitUntil(() => settlement !== null, 5_000);
+
+      expect(adapter.injectUserPrompt).not.toHaveBeenCalled();
+      expect(onRuntimeAuthFailureEvent).toHaveBeenCalledWith(expect.objectContaining({
+        error: 'authentication_failed',
+        nativeAuthStatus: 'native_cli_logged_out',
+      }));
+      expect(returnUnconsumedMessage).toHaveBeenCalledWith({
+        message: 'prompt must not enter logged-out Claude',
+        mode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'tmux',
+        },
+        maxUserMessageSeq: 42,
+        userMessageLocalIds: ['local-42'],
+      });
+      expect(settlement).toMatchObject({
+        kind: 'rejected',
+        error: expect.objectContaining({
+          code: 'claude_unified_terminal_runtime_auth_unavailable',
+          reason: 'runtime_auth_surface',
+        }),
+      });
+    } finally {
+      abortController.abort();
+      await sessionPromise;
+    }
+  });
+
+  it('guards connected-service auth from the terminal launch-spec env before prompt injection', async () => {
+    const abortController = createAbortableSignal();
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-launch-spec-auth-'));
+    tempDirs.push(dir);
+    const claudeConfigDir = join(dir, 'claude-config');
+    await mkdir(claudeConfigDir, { recursive: true });
+    await writeFile(join(claudeConfigDir, '.credentials.json'), JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        expiresAt: Date.now() + 60_000,
+        scopes: ['user:inference', 'user:profile', 'user:sessions:claude_code'],
+      },
+    }));
+    const fakeClaudePath = join(dir, 'claude');
+    await writeFile(fakeClaudePath, [
+      '#!/usr/bin/env node',
+      'if (process.argv[2] === "auth" && process.argv[3] === "status") {',
+      '  process.stdout.write(JSON.stringify({ loggedIn: false, authMethod: "none", apiProvider: "firstParty", claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }));',
+      '  process.exit(0);',
+      '}',
+      'process.exit(64);',
+      '',
+    ].join('\n'));
+    await chmod(fakeClaudePath, 0o755);
+    const launchSpecPath = join(dir, 'launch.json');
+    await writeFile(launchSpecPath, JSON.stringify({
+      command: fakeClaudePath,
+      args: [],
+      cwd: '/workspace/project',
+      env: {
+        [HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY]: join(dir, 'materialized'),
+        CLAUDE_CONFIG_DIR: claudeConfigDir,
+        HAPPIER_CLAUDE_PATH: fakeClaudePath,
+      },
+    }));
+    const returnUnconsumedMessage = vi.fn();
+    const onRuntimeAuthFailureEvent = vi.fn(async () => ({
+      action: 'terminate_host' as const,
+      reason: 'runtime_auth_surface' as const,
+    }));
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-session-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => handle),
+      injectUserPrompt: vi.fn(async (_handle, input) => ({
+        status: 'injected',
+        at: Date.now(),
+        bytesWritten: input.text.length,
+      } as const)),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({ stable: true, currentInput: interactiveClaudeScreen, observedAt: Date.now() })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+    let consumed = false;
+    let settlement: { kind: 'resolved' } | { kind: 'rejected'; error: unknown } | null = null;
+    const sessionPromise = runClaudeUnifiedTerminalSession({
+      path: '/workspace/project',
+      sessionId: 'claude-session-id',
+      signal: abortController.signal,
+      nextMessage: async () => {
+        if (consumed) return null;
+        consumed = true;
+        return {
+          message: 'launch-spec connected service prompt',
+          mode: {
+            permissionMode: 'default',
+            claudeUnifiedTerminalHost: 'tmux',
+          },
+          maxUserMessageSeq: 43,
+          userMessageLocalIds: ['local-43'],
+        };
+      },
+      resolveHostAdapter: async () => ({ status: 'resolved' as const, adapter, reason: 'test' }),
+      buildSpawn: async () => ({
+        spawnArgv: ['/bin/true'],
+        spawnEnv: {},
+        launchSpecPath,
+      }),
+      createSessionName: () => 'happier-claude-session-test',
+      onRuntimeAuthFailureEvent,
+      returnUnconsumedMessage,
+    })
+      .then(() => {
+        settlement = { kind: 'resolved' };
+      })
+      .catch((error: unknown) => {
+        settlement = { kind: 'rejected', error };
+      });
+
+    try {
+      await waitUntil(() => onRuntimeAuthFailureEvent.mock.calls.length > 0 || settlement !== null, 5_000);
+      await waitUntil(() => settlement !== null, 5_000);
+
+      expect(adapter.injectUserPrompt).not.toHaveBeenCalled();
+      expect(onRuntimeAuthFailureEvent).toHaveBeenCalledWith(expect.objectContaining({
+        error: 'authentication_failed',
+        nativeAuthStatus: 'native_cli_logged_out',
+      }));
+      expect(returnUnconsumedMessage).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'launch-spec connected service prompt',
+        maxUserMessageSeq: 43,
+      }));
+      expect(settlement).toMatchObject({
+        kind: 'rejected',
+        error: expect.objectContaining({
+          code: 'claude_unified_terminal_runtime_auth_unavailable',
+        }),
       });
     } finally {
       abortController.abort();

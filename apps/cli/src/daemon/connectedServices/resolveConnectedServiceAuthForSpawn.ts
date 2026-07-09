@@ -9,7 +9,7 @@ import type {
 } from '@happier-dev/protocol';
 
 import type { CatalogAgentId } from '@/backends/types';
-import { verifyClaudeCodeNativeAuth } from '@/backends/claude/connectedServices/nativeAuth/verifyClaudeCodeNativeAuth';
+import { verifyClaudeCodeNativeAuthStatus } from '@/backends/claude/connectedServices/nativeAuth/verifyClaudeCodeNativeAuthStatus';
 import {
   buildClaudeConnectedServiceHomeProvenance,
   matchesClaudeConnectedServiceHomeProvenance,
@@ -1075,9 +1075,10 @@ async function assertClaudeNativeAuthMaterializedForSpawn(params: Readonly<{
     });
   }
 
-  const verified = await verifyClaudeCodeNativeAuth({
+  const verified = await verifyClaudeCodeNativeAuthStatus({
     claudeConfigDir,
     now: params.nowMs,
+    env: { ...process.env, ...params.materializedEnv },
   });
   if (verified.status === 'ok') {
     const expectedProvenance = buildClaudeConnectedServiceHomeProvenance({

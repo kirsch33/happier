@@ -2,13 +2,15 @@ import { resolveProviderCliCommand } from '@happier-dev/cli-common/providers';
 
 let cachedResolvedClaudeCliPath: string | null = null;
 
-export function resolveClaudeCliPath(): string {
-  if (cachedResolvedClaudeCliPath) {
+export function resolveClaudeCliPath(opts: Readonly<{ processEnv?: NodeJS.ProcessEnv }> = {}): string {
+  const processEnv = opts.processEnv ?? process.env;
+  const canUseGlobalCache = opts.processEnv === undefined || opts.processEnv === process.env;
+  if (canUseGlobalCache && cachedResolvedClaudeCliPath) {
     return cachedResolvedClaudeCliPath;
   }
 
   const resolved = resolveProviderCliCommand('claude', {
-    processEnv: process.env,
+    processEnv,
     currentExecPath: process.execPath,
   });
   if (!resolved) {
@@ -17,8 +19,10 @@ export function resolveClaudeCliPath(): string {
     );
   }
 
-  cachedResolvedClaudeCliPath = resolved.command;
-  return cachedResolvedClaudeCliPath;
+  if (canUseGlobalCache) {
+    cachedResolvedClaudeCliPath = resolved.command;
+  }
+  return resolved.command;
 }
 
 export function isClaudeCliJavaScriptFile(cliPath: string): boolean {

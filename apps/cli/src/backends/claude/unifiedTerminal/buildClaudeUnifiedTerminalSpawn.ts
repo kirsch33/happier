@@ -104,7 +104,7 @@ function chmodPrivateFileIfSupported(path: string): void {
 }
 
 type ClaudeUnifiedTerminalSpawnDeps = Readonly<{
-  resolveClaudeCliPath: () => string;
+  resolveClaudeCliPath: (env?: NodeJS.ProcessEnv) => string;
   isClaudeCliJavaScriptFile: (path: string) => boolean;
   ensureClaudeJsRuntimeExecutable: () => Promise<string | null>;
   claudeLocalLauncherPath: string;
@@ -473,7 +473,7 @@ async function writeTerminalLaunchSpec(spec: TerminalLaunchSpec): Promise<string
 
 function defaultDeps(inputDeps: Partial<ClaudeUnifiedTerminalSpawnDeps> | undefined): ClaudeUnifiedTerminalSpawnDeps {
   return {
-    resolveClaudeCliPath: inputDeps?.resolveClaudeCliPath ?? resolveClaudeCliPath,
+    resolveClaudeCliPath: inputDeps?.resolveClaudeCliPath ?? ((env) => resolveClaudeCliPath({ processEnv: env })),
     isClaudeCliJavaScriptFile: inputDeps?.isClaudeCliJavaScriptFile ?? isClaudeCliJavaScriptFile,
     ensureClaudeJsRuntimeExecutable:
       inputDeps?.ensureClaudeJsRuntimeExecutable
@@ -505,10 +505,10 @@ export async function buildClaudeUnifiedTerminalSpawn<Mode extends EnhancedMode 
 ): Promise<ClaudeUnifiedTerminalSpawn> {
   assertNoUserSettingsArg(input.claudeArgs);
   const deps = defaultDeps(input.deps);
-  const resolvedClaudeCliPath = deps.resolveClaudeCliPath();
   // Env first: the statusline overlay resolves the user's original statusline command from the
   // EFFECTIVE config root of the spawned process (CLAUDE_CONFIG_DIR / HOME in the child env).
   const env = buildClaudeEnv(input.envOverlay);
+  const resolvedClaudeCliPath = deps.resolveClaudeCliPath(env);
   const statuslineSettings = resolveStatuslineOverlaySettings({ input, deps, env });
   const args = buildClaudeArgs(input, statuslineSettings, { env, isRootUser: deps.isRootUser() });
 

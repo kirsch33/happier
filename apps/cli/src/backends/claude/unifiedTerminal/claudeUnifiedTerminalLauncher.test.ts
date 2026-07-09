@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   runTmuxAttach: vi.fn(async () => 0),
   runZellijAttach: vi.fn(async () => 0),
   dispatchActivityNotificationAsync: vi.fn(async () => undefined),
-  verifyClaudeCodeNativeAuth: vi.fn(async () => ({
+  verifyClaudeCodeNativeAuthStatus: vi.fn(async () => ({
     status: 'missing_credentials_file',
     missingScopes: [],
     credentialPath: '/tmp/missing/.credentials.json',
@@ -44,8 +44,8 @@ vi.mock('@/activity/notifications/dispatchActivityNotification', () => ({
   dispatchActivityNotificationAsync: mocks.dispatchActivityNotificationAsync,
 }));
 
-vi.mock('../connectedServices/nativeAuth/verifyClaudeCodeNativeAuth', () => ({
-  verifyClaudeCodeNativeAuth: mocks.verifyClaudeCodeNativeAuth,
+vi.mock('../connectedServices/nativeAuth/verifyClaudeCodeNativeAuthStatus', () => ({
+  verifyClaudeCodeNativeAuthStatus: mocks.verifyClaudeCodeNativeAuthStatus,
 }));
 
 vi.mock('@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon', () => ({
@@ -55,7 +55,10 @@ vi.mock('@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAut
 import { claudeUnifiedTerminalLauncher } from './claudeUnifiedTerminalLauncher';
 import { ClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUnifiedTerminalSpawn';
 import { ClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
-import { ClaudeUnifiedTerminalRuntimeAuthRestartError } from './claudeUnifiedTerminalRuntimeAuthRestartError';
+import {
+  ClaudeUnifiedTerminalRuntimeAuthRestartError,
+  ClaudeUnifiedTerminalRuntimeAuthUnavailableError,
+} from './claudeUnifiedTerminalRuntimeAuthRestartError';
 import { createFakeControlPort } from './tuiControls/fakeControlPort';
 import { parseClaudeScreenState } from './tuiControls/screenState';
 
@@ -1672,7 +1675,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
 
   it('restarts a stale Claude terminal auth process when native credentials still verify', async () => {
     setProcessTty(false);
-    mocks.verifyClaudeCodeNativeAuth.mockResolvedValueOnce({
+    mocks.verifyClaudeCodeNativeAuthStatus.mockResolvedValueOnce({
       status: 'ok',
       missingScopes: [],
       credentialPath: '/home/tester/.claude/.credentials.json',
@@ -1734,6 +1737,73 @@ describe('claudeUnifiedTerminalLauncher', () => {
     }));
   });
 
+  it('terminates instead of restarting when Claude native status is logged out', async () => {
+    setProcessTty(false);
+    const previousSelectionEnv = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+    process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
+      kind: 'group',
+      serviceId: 'claude-subscription',
+      groupId: 'claude',
+      activeProfileId: 'claude-main',
+      fallbackProfileId: 'claude-main',
+      generation: 1,
+    }]);
+    mocks.verifyClaudeCodeNativeAuthStatus.mockResolvedValue({
+      status: 'native_cli_logged_out',
+      missingScopes: [],
+      credentialPath: '/home/tester/.claude/.credentials.json',
+    });
+    const session = createSession();
+    const authError = {
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'authentication_failed',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+      },
+    };
+
+    mocks.runClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: {
+      onRuntimeAuthFailureEvent?: (error: unknown) => Promise<unknown>;
+    }) => {
+      await expect(opts.onRuntimeAuthFailureEvent?.(authError)).resolves.toMatchObject({
+        action: 'terminate_host',
+        reason: 'runtime_auth_surface',
+      });
+      throw new ClaudeUnifiedTerminalRuntimeAuthUnavailableError(authError, 'runtime_auth_surface');
+    });
+
+    try {
+      const result = await claudeUnifiedTerminalLauncher(session, {
+        initialMode: {
+          permissionMode: 'default',
+          claudeUnifiedTerminalHost: 'auto',
+        },
+      });
+
+      expect(result).toEqual({ type: 'exit', code: 1 });
+      expect(mocks.runClaudeUnifiedTerminalSession).toHaveBeenCalledTimes(1);
+      expect(session.client.sessionTurnLifecycle?.failTurn).toHaveBeenCalledWith({
+        provider: 'claude',
+        issue: expect.objectContaining({
+          code: 'auth_error',
+          source: 'auth_error',
+          provider: 'claude',
+        }),
+      });
+      expect(session.client.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('Restarting the Claude terminal'),
+      }));
+    } finally {
+      if (previousSelectionEnv === undefined) {
+        delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+      } else {
+        process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = previousSelectionEnv;
+      }
+    }
+  });
+
   it('rechecks native auth after runtime recovery misses and retries the restored prompt', async () => {
     setProcessTty(false);
     const previousSelectionEnv = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
@@ -1745,7 +1815,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
       fallbackProfileId: 'claude-main',
       generation: 1,
     }]);
-    mocks.verifyClaudeCodeNativeAuth
+    mocks.verifyClaudeCodeNativeAuthStatus
       .mockResolvedValueOnce({
         status: 'missing_credentials_file',
         missingScopes: [],

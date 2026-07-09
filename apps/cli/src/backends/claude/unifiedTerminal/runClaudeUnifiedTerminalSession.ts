@@ -1,4 +1,4 @@
-import { rmdir, unlink } from 'node:fs/promises';
+import { readFile, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 
 import type {
@@ -86,8 +86,13 @@ import type {
 } from './_types';
 import {
   ClaudeUnifiedTerminalRuntimeAuthRestartError,
+  ClaudeUnifiedTerminalRuntimeAuthUnavailableError,
   type ClaudeUnifiedRuntimeAuthFailureDisposition,
 } from './claudeUnifiedTerminalRuntimeAuthRestartError';
+import {
+  verifyClaudeCodeNativeAuthStatus,
+  type ClaudeCodeNativeAuthStatusVerificationResult,
+} from '../connectedServices/nativeAuth/verifyClaudeCodeNativeAuthStatus';
 import type { EnhancedMode } from '../loop';
 import type { RawJSONLines } from '../types';
 import type { SessionHookData } from '../utils/startHookServer';
@@ -106,6 +111,10 @@ import { createPtyTerminalHostAdapter } from '@/integrations/pty';
 import { createZellijTerminalHostAdapter } from '@/integrations/zellij/adapter';
 import { createWindowsTerminalZellijForegroundClientLauncher } from '@/integrations/zellij/windowsForegroundClient';
 import { configuration } from '@/configuration';
+import {
+  findConnectedServiceChildSelection,
+  HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY,
+} from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import {
   buildClaudeUnifiedTerminalSpawn,
   type ClaudeUnifiedTerminalSpawn,
@@ -221,6 +230,11 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
   onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void | ClaudeUnifiedRuntimeAuthFailureDisposition>) | undefined;
+  /**
+   * Prompt-custody auth guard for connected-service Claude native homes. Runs immediately before
+   * prompt bytes are typed so an auth-dead TUI cannot keep accepting Happier messages as a sink.
+   */
+  verifyRuntimeAuthBeforePrompt?: (() => Promise<ClaudeCodeNativeAuthStatusVerificationResult>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
   onPromptTurnTerminal?: ((event: ClaudeUnifiedPromptTurnTerminalEvent) => void | Promise<void>) | undefined;
   onMessage?: ((message: RawJSONLines) => void) | undefined;
@@ -473,6 +487,42 @@ async function removeUnreadLaunchSpec(spawn: ClaudeUnifiedTerminalSpawn): Promis
   }
 }
 
+function readStringRecord(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out: Record<string, string> = Object.create(null);
+  for (const [key, envValue] of Object.entries(value)) {
+    if (typeof envValue !== 'string') return null;
+    out[key] = envValue;
+  }
+  return out;
+}
+
+function readStringArray(value: unknown): readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : [];
+}
+
+async function resolveClaudeRuntimeEnvSnapshot(spawn: ClaudeUnifiedTerminalSpawn): Promise<Record<string, string>> {
+  if (!spawn.launchSpecPath) return { ...spawn.spawnEnv };
+  try {
+    const parsed = JSON.parse(await readFile(spawn.launchSpecPath, 'utf8')) as unknown;
+    const record = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+    const persistedEnv = readStringRecord(record?.env);
+    if (!persistedEnv) return { ...spawn.spawnEnv };
+    const env = { ...persistedEnv };
+    for (const key of readStringArray(record?.envPassthroughKeys)) {
+      const value = spawn.spawnEnv[key];
+      if (typeof value === 'string') {
+        env[key] = value;
+      }
+    }
+    return env;
+  } catch {
+    return { ...spawn.spawnEnv };
+  }
+}
+
 function isClaudePromptInputExit(event: ClaudeUnifiedSessionEndEvent): boolean {
   return event.reason === 'prompt_input_exit';
 }
@@ -558,6 +608,31 @@ function normalizeMessageBatch<Mode>(input: ClaudeUnifiedTerminalQueuedInput<Mod
     hash: 'claude-unified-terminal',
     maxUserMessageSeq: input.maxUserMessageSeq ?? null,
     userMessageLocalIds: input.userMessageLocalIds ?? [],
+  };
+}
+
+function shouldGuardClaudeConnectedServiceRuntimeAuth(env: Pick<NodeJS.ProcessEnv, string>): boolean {
+  const materializedRoot = env[HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY]?.trim();
+  return Boolean(materializedRoot)
+    || Boolean(findConnectedServiceChildSelection(env, 'claude-subscription'))
+    || Boolean(findConnectedServiceChildSelection(env, 'anthropic'));
+}
+
+function buildRuntimeAuthUnavailableEvidence(
+  verification: ClaudeCodeNativeAuthStatusVerificationResult,
+): Readonly<Record<string, unknown>> {
+  return {
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'authentication_failed',
+    nativeAuthStatus: verification.status,
+    message: {
+      role: 'assistant',
+      content: [{
+        type: 'text',
+        text: `Not logged in · Please run /login. Claude native auth verification failed before prompt submission: ${verification.status}`,
+      }],
+    },
   };
 }
 
@@ -850,6 +925,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     systemPromptText: opts.systemPromptText,
     statuslineForwarder: opts.statuslineForwarder,
   });
+  const runtimeChildEnv = await resolveClaudeRuntimeEnvSnapshot(spawn);
   const hookSubscription = createReplayableHookSubscription(opts.subscribeClaudeSessionHooks);
   const sessionName = opts.createSessionName?.() ?? createDefaultSessionName();
   let handle: TerminalHostHandle | null = null;
@@ -1125,6 +1201,43 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       threshold: runtimeControlOptions?.blockedApplyStarvationThreshold,
       onStarvation: (info: BlockedApplyStarvationInfo) => runtimeControlOptions?.onBlockedApplyStarvation?.(info),
     });
+    const defaultRuntimeAuthVerifier = shouldGuardClaudeConnectedServiceRuntimeAuth(runtimeChildEnv)
+      ? async (): Promise<ClaudeCodeNativeAuthStatusVerificationResult> => {
+          const claudeConfigDir = resolveClaudeConfigDirOverride(runtimeChildEnv);
+          if (!claudeConfigDir) {
+            return {
+              status: 'missing_credentials_file',
+              missingScopes: [],
+              credentialPath: '',
+            };
+          }
+          return verifyClaudeCodeNativeAuthStatus({ claudeConfigDir, env: runtimeChildEnv });
+        }
+      : null;
+    const verifyRuntimeAuthBeforePrompt =
+      opts.verifyRuntimeAuthBeforePrompt ?? defaultRuntimeAuthVerifier;
+    const ensureRuntimeAuthBeforePrompt = async (): Promise<void> => {
+      if (!verifyRuntimeAuthBeforePrompt) return;
+      const verification = await verifyRuntimeAuthBeforePrompt();
+      if (verification.status === 'ok') return;
+      const authError = buildRuntimeAuthUnavailableEvidence(verification);
+      const disposition = await opts.onRuntimeAuthFailureEvent?.(authError);
+      if (disposition?.action === 'restart_host') {
+        const restartError = new ClaudeUnifiedTerminalRuntimeAuthRestartError(authError);
+        fatalRuntimeError ??= restartError;
+        runtimeAbortController.abort(restartError);
+        throw restartError;
+      }
+      const unavailableError = new ClaudeUnifiedTerminalRuntimeAuthUnavailableError(
+        authError,
+        disposition?.action === 'terminate_host'
+          ? disposition.reason
+          : verification.status,
+      );
+      fatalRuntimeError ??= unavailableError;
+      runtimeAbortController.abort(unavailableError);
+      throw unavailableError;
+    };
     // The gate is armed only for the default controller wiring (which constructs the readiness
     // bridge below); a custom `createController` seam owns its own readiness.
     const startupReadinessGateArmed = !opts.createController;
@@ -1138,6 +1251,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             retryAfterMs: 250,
           };
         }
+        await ensureRuntimeAuthBeforePrompt();
         if (runtimeControlBridge) {
           // Apply verified runtime controls before the prompt is written. A blocked apply must NOT inject
           // under the wrong config; returning a `deferred` result hands the message back to the arbiter's
@@ -1468,6 +1582,10 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                 const restartError = new ClaudeUnifiedTerminalRuntimeAuthRestartError(error);
                 fatalRuntimeError ??= restartError;
                 runtimeAbortController.abort(restartError);
+              } else if (disposition?.action === 'terminate_host') {
+                const unavailableError = new ClaudeUnifiedTerminalRuntimeAuthUnavailableError(error, disposition.reason);
+                fatalRuntimeError ??= unavailableError;
+                runtimeAbortController.abort(unavailableError);
               }
             },
             onProviderPromptStarted: opts.onProviderPromptStarted,
@@ -1492,7 +1610,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             sessionId: opts.sessionId ?? null,
             transcriptPath: opts.transcriptPath,
             workingDirectory: opts.path,
-            claudeConfigDir: resolveClaudeConfigDirOverride(process.env),
+            claudeConfigDir: resolveClaudeConfigDirOverride(runtimeChildEnv),
             onMessage: opts.onMessage
               ? (message) => {
                   if (controlCommandEchoSuppressor?.shouldSuppressTranscriptMessage(message)) return;

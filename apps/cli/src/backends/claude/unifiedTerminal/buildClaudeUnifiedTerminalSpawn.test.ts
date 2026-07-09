@@ -1,7 +1,7 @@
 import { readFile, rm, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR } from '@/daemon/spawn/spawnExplicitEnvKeysMarker';
 import {
@@ -85,6 +85,43 @@ describe('buildClaudeUnifiedTerminalSpawn', () => {
     } else {
       process.env.IS_SANDBOX = originalIsSandbox;
     }
+  });
+
+  it('resolves the Claude CLI after applying the session child env overlay', async () => {
+    const resolveClaudeCliPath = vi.fn((env?: NodeJS.ProcessEnv) => {
+      expect(env).toMatchObject({
+        CLAUDE_CONFIG_DIR: '/tmp/profile-claude-config',
+        HAPPIER_CLAUDE_PATH: '/profile/claude',
+      });
+      return '/profile/claude';
+    });
+
+    const spawn = await buildClaudeUnifiedTerminalSpawn({
+      path: '/workspace/project',
+      first: {
+        message: 'hello',
+        mode: {
+          permissionMode: 'default',
+        },
+      },
+      envOverlay: {
+        CLAUDE_CONFIG_DIR: '/tmp/profile-claude-config',
+        HAPPIER_CLAUDE_PATH: '/profile/claude',
+      },
+      deps: {
+        resolveClaudeCliPath,
+        isClaudeCliJavaScriptFile: () => false,
+        ensureClaudeJsRuntimeExecutable: async () => '/managed/node',
+        claudeLocalLauncherPath: '/happier/scripts/claude_local_launcher.cjs',
+        terminalLaunchSpecRunnerPath: '/happier/scripts/terminal_launch_spec_runner.cjs',
+        resolveCommandInvocation: ({ command, args }) => ({ command, args: [...args] }),
+      },
+    });
+
+    const launchSpec = await readLaunchSpecFromSpawn(spawn);
+    expect(resolveClaudeCliPath).toHaveBeenCalledTimes(1);
+    expect(launchSpec.command).toBe('/profile/claude');
+    expect(launchSpec.env?.CLAUDE_CONFIG_DIR).toBe('/tmp/profile-claude-config');
   });
 
   it('always allows later dangerous permission bypass without starting default sessions in bypass mode', async () => {
