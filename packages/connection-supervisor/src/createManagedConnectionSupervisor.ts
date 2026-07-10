@@ -81,7 +81,7 @@ export function createManagedConnectionSupervisor(
     if (currentTransport) {
       await cleanupTransport();
     }
-    if (isStopped) return;
+    if (localGeneration !== generation || isStopped) return;
 
     if (params.initial && config.probeBeforeInitialConnect) {
       const probe = await config.probeReadiness().catch((error): ReadinessProbeResult => ({
