@@ -192,7 +192,7 @@ async function waitForNextInput<Mode, Message>(
           return null;
         }
 
-        await waitForIdleFallback({ abortSignal: opts.abortSignal, idleWakePollIntervalMs });
+        await waitForIdleFallback({ abortSignal: opts.abortSignal, messageQueue: opts.messageQueue, idleWakePollIntervalMs });
 
         if (opts.abortSignal.aborted) {
           return null;
@@ -423,23 +423,29 @@ async function waitForWakeSignal<Mode, Message>(opts: {
   return await Promise.race([queueWait, metaWait, ...(idleWait ? [idleWait] : [])]);
 }
 
-async function waitForIdleFallback(opts: { abortSignal: AbortSignal; idleWakePollIntervalMs: number }): Promise<void> {
+async function waitForIdleFallback<Mode, Message>(opts: {
+  abortSignal: AbortSignal;
+  messageQueue: MessageQueue2<Mode, Message>;
+  idleWakePollIntervalMs: number;
+}): Promise<void> {
   await new Promise<void>((resolve) => {
     let done = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
 
     const finish = () => {
       if (done) return;
       done = true;
       if (timer) clearTimeout(timer);
       opts.abortSignal.removeEventListener('abort', onFallbackAbort);
+      controller.abort('sessionProviderInputConsumer');
       resolve();
     };
 
     const onFallbackAbort = () => finish();
 
+    void opts.messageQueue.waitForMessagesSignal(controller.signal).then(finish, finish);
     timer = setTimeout(finish, opts.idleWakePollIntervalMs);
-    timer.unref?.();
     opts.abortSignal.addEventListener('abort', onFallbackAbort, { once: true });
 
     if (opts.abortSignal.aborted) {

@@ -301,6 +301,51 @@ describe('SessionProviderInputConsumer waitForNextInput', () => {
     expect(policies).toContain('throttled');
   });
 
+  it('delivers queued input immediately while backing off after a metadata disconnect', async () => {
+    const messageQueue = new MessageQueue2<TestMode>(() => 'hash');
+    let resolveMetadataWait!: (value: boolean) => void;
+    const metadataWait = new Promise<boolean>((resolve) => {
+      resolveMetadataWait = resolve;
+    });
+    const waitForMetadataUpdate = vi.fn(() => metadataWait);
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue,
+      session: {
+        popPendingMessage: vi.fn(async () => false),
+        materializeNextPendingMessageSafely: vi.fn(async () => ({ type: 'no_pending' as const })),
+        shouldAttemptPendingMaterialization: () => false,
+        waitForMetadataUpdate,
+      },
+      reconcileWhenEmpty: 'skip',
+      idleWakePollIntervalMs: 5_000,
+    });
+
+    const abortController = new AbortController();
+    const waitPromise = consumer.waitForNextInput({ abortSignal: abortController.signal });
+
+    resolveMetadataWait(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    messageQueue.push('after reconnect churn', { id: 'default' });
+    const resultBeforeBackoffElapsed = await Promise.race([
+      waitPromise.then((value) => ({ type: 'result' as const, value })),
+      new Promise<{ type: 'timeout' }>((resolve) => {
+        setTimeout(() => resolve({ type: 'timeout' }), 50);
+      }),
+    ]);
+
+    abortController.abort();
+    await waitPromise;
+
+    expect(resultBeforeBackoffElapsed).toEqual({
+      type: 'result',
+      value: expect.objectContaining({
+        message: 'after reconnect churn',
+        mode: { id: 'default' },
+      }),
+    });
+  });
+
   it('calls metadata refresh when only the idle timer wakes', async () => {
     const abortController = new AbortController();
     const onMetadataUpdate = vi.fn();
