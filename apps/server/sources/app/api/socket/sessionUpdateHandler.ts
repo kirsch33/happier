@@ -64,6 +64,42 @@ type PendingMaterializeNoopCacheEntry = Readonly<{
 
 const pendingMaterializeNoopByUserSession = new Map<string, PendingMaterializeNoopCacheEntry>();
 
+interface SessionWriteLockState {
+    lock: AsyncLock;
+    refs: number;
+}
+
+const sessionWriteLocks = new Map<string, SessionWriteLockState>();
+
+function createSessionWriteLockKey(sessionId: string): string {
+    return `session:${sessionId}`;
+}
+
+function resolveSessionWriteLockKey(socketId: string, data: unknown): string {
+    const sessionId = data && typeof data === "object" && typeof (data as { sid?: unknown }).sid === "string"
+        ? (data as { sid: string }).sid
+        : "";
+    return sessionId ? createSessionWriteLockKey(sessionId) : `socket:${socketId}`;
+}
+
+async function inSessionWriteLock<T>(lockKey: string, write: () => Promise<T>): Promise<T> {
+    let state = sessionWriteLocks.get(lockKey);
+    if (!state) {
+        state = { lock: new AsyncLock(), refs: 0 };
+        sessionWriteLocks.set(lockKey, state);
+    }
+    state.refs += 1;
+
+    try {
+        return await state.lock.inLock(write);
+    } finally {
+        state.refs -= 1;
+        if (state.refs === 0 && sessionWriteLocks.get(lockKey) === state) {
+            sessionWriteLocks.delete(lockKey);
+        }
+    }
+}
+
 function createPendingMaterializeNoopCacheKey(userId: string, sessionId: string): string {
     return `${userId}\u0000${sessionId}`;
 }
@@ -293,35 +329,37 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 return;
             }
 
-            const result = await applySessionTurnMutation({
-                actorUserId: userId,
-                mutation: parsed.data,
-            });
+            await inSessionWriteLock(createSessionWriteLockKey(parsed.data.sessionId), async () => {
+                const result = await applySessionTurnMutation({
+                    actorUserId: userId,
+                    mutation: parsed.data,
+                });
 
-            if (!result.ok) {
-                if (result.error === "forbidden") {
-                    callback?.({ result: "forbidden" });
+                if (!result.ok) {
+                    if (result.error === "forbidden") {
+                        callback?.({ result: "forbidden" });
+                        return;
+                    }
+                    if (result.error === "session-not-found") {
+                        callback?.({ result: "not-found" });
+                        return;
+                    }
+                    callback?.({ result: "error" });
                     return;
                 }
-                if (result.error === "session-not-found") {
-                    callback?.({ result: "not-found" });
-                    return;
-                }
-                callback?.({ result: "error" });
-                return;
-            }
 
-            await publishSessionTurnUpdate({
-                sessionId: parsed.data.sessionId,
-                actorUserId: userId,
-                connection,
-                result,
-            });
-            callback?.({
-                result: "success",
-                applied: result.didApply,
-                ...(result.reason ? { reason: result.reason } : {}),
-                receipt: result.receipt,
+                await publishSessionTurnUpdate({
+                    sessionId: parsed.data.sessionId,
+                    actorUserId: userId,
+                    connection,
+                    result,
+                });
+                callback?.({
+                    result: "success",
+                    applied: result.didApply,
+                    ...(result.reason ? { reason: result.reason } : {}),
+                    receipt: result.receipt,
+                });
             });
         } catch (error) {
             log({ module: "websocket", level: "error" }, `Error in session-turn-mutation: ${error}`);
@@ -555,7 +593,6 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
         }
     });
 
-    const receiveMessageLock = new AsyncLock();
     const pendingMaterializeNoopThrottleMs = parseIntEnv(
         process.env.HAPPIER_SOCKET_PENDING_MATERIALIZE_NOOP_THROTTLE_MS,
         DEFAULT_SOCKET_PENDING_MATERIALIZE_NOOP_THROTTLE_MS,
@@ -563,7 +600,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
     );
 
     socket.on('message', async (data: any, callback?: (response: any) => void) => {
-        await receiveMessageLock.inLock(async () => {
+        await inSessionWriteLock(resolveSessionWriteLockKey(socket.id, data), async () => {
             const respond = (response: any) => {
                 if (typeof callback === 'function') {
                     callback(response);
@@ -675,7 +712,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
     });
 
     socket.on('pending-materialize-next', async (data: any, callback?: (response: any) => void) => {
-        await receiveMessageLock.inLock(async () => {
+        await inSessionWriteLock(resolveSessionWriteLockKey(socket.id, data), async () => {
             const respond = (response: any) => {
                 if (typeof callback === 'function') {
                     callback(response);

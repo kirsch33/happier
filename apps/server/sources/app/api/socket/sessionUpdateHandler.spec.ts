@@ -183,6 +183,82 @@ describe("sessionUpdateHandler", () => {
         expect(callback).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error: "invalid-params" }));
     });
 
+    it("serializes message writes for the same session across socket connections", async () => {
+        let resolveFirstWrite!: (value: unknown) => void;
+        const firstWrite = new Promise<unknown>((resolve) => {
+            resolveFirstWrite = resolve;
+        });
+        createSessionMessage
+            .mockImplementationOnce(async () => await firstWrite)
+            .mockResolvedValueOnce({ ok: false, error: "invalid-params" });
+
+        const firstSocket = createFakeSocket();
+        const secondSocket = createFakeSocket();
+        registerSessionUpdateHandler(
+            "user-1",
+            firstSocket as any,
+            { connectionType: "session-scoped", socket: firstSocket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+        registerSessionUpdateHandler(
+            "user-1",
+            secondSocket as any,
+            { connectionType: "session-scoped", socket: secondSocket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+
+        const payload = { sid: "s-1", message: { t: "plain", v: { type: "assistant", text: "hi" } } };
+        const firstResult = getSocketHandler(firstSocket, "message")(payload, vi.fn());
+        const secondResult = getSocketHandler(secondSocket, "message")(payload, vi.fn());
+
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(createSessionMessage).toHaveBeenCalledTimes(1);
+
+        resolveFirstWrite({ ok: false, error: "invalid-params" });
+        await Promise.all([firstResult, secondResult]);
+        expect(createSessionMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it("serializes turn mutations behind an in-flight message write for the same session", async () => {
+        let resolveMessageWrite!: (value: unknown) => void;
+        const messageWrite = new Promise<unknown>((resolve) => {
+            resolveMessageWrite = resolve;
+        });
+        createSessionMessage.mockImplementationOnce(async () => await messageWrite);
+
+        const socket = createFakeSocket();
+        registerSessionUpdateHandler(
+            "user-1",
+            socket as any,
+            { connectionType: "session-scoped", socket: socket as any, userId: "user-1", sessionId: "s-1" } as any,
+        );
+
+        const messageResult = getSocketHandler(socket, "message")(
+            { sid: "s-1", message: { t: "plain", v: { type: "assistant", text: "hi" } } },
+            vi.fn(),
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(createSessionMessage).toHaveBeenCalledTimes(1);
+
+        const turnResult = getSocketHandler(socket, "session-turn-mutation")({
+            v: 1,
+            sessionId: "s-1",
+            mutationId: "mutation-1",
+            action: "complete",
+            turnId: "turn-1",
+            provider: "codex",
+            providerTurnId: "provider-turn-1",
+            observedAt: 123,
+        }, vi.fn());
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(applySessionTurnMutation).not.toHaveBeenCalled();
+
+        resolveMessageWrite({ ok: false, error: "invalid-params" });
+        await Promise.all([messageResult, turnResult]);
+        expect(applySessionTurnMutation).toHaveBeenCalledTimes(1);
+    });
+
     it("does not emit per-message socket diagnostics by default", async () => {
         createSessionMessage.mockResolvedValueOnce({ ok: false, error: "invalid-params" });
         const socket = createFakeSocket();

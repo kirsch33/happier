@@ -296,6 +296,7 @@ export class ApiSessionClient extends EventEmitter {
     private owedUserMessageCatchUpInFlight = false;
     private lastOwedUserMessageCatchUpAt = 0;
     private readonly pendingCommitRetryAttemptsByLocalId = new Map<string, number>();
+    private readonly pendingCommitRetryTimersByLocalId = new Map<string, ReturnType<typeof setTimeout>>();
     private userSocketDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private closed = false;
     private snapshotSyncInFlight: Promise<boolean> | null = null;
@@ -1456,6 +1457,7 @@ export class ApiSessionClient extends EventEmitter {
         this.pendingMaterializedLocalIds.delete(localId);
         this.committedLocalIdsAwaitingEcho.delete(localId);
         this.pendingQueueMaterializedLocalIds.delete(localId);
+        this.clearCommitRetry(localId);
         const cleanupTimer = this.committedLocalIdCleanupTimers.get(localId) ?? null;
         if (cleanupTimer) {
             clearTimeout(cleanupTimer);
@@ -2257,7 +2259,7 @@ export class ApiSessionClient extends EventEmitter {
             })();
 
             if (ack && ack.ok === true) {
-                this.pendingCommitRetryAttemptsByLocalId.delete(localId);
+                this.clearCommitRetry(localId);
                 if (params.markAsUserMessage === true) {
                     this.markCommittedUserMessageLocalIdForAgentQueue(ack.localId ?? localId);
                 }
@@ -2270,7 +2272,7 @@ export class ApiSessionClient extends EventEmitter {
                 return ack.seq;
             }
             if (ack && ack.ok === false) {
-                this.pendingCommitRetryAttemptsByLocalId.delete(localId);
+                this.clearCommitRetry(localId);
                 if (!params.requireCommit) {
                     this.deleteMaterializedLocalId(localId);
                 }
@@ -2339,7 +2341,7 @@ export class ApiSessionClient extends EventEmitter {
         })();
 
         if (ack && ack.ok === true) {
-            this.pendingCommitRetryAttemptsByLocalId.delete(localId);
+            this.clearCommitRetry(localId);
             if (params.markAsUserMessage === true) {
                 this.markCommittedUserMessageLocalIdForAgentQueue(ack.localId ?? localId);
             }
@@ -2354,7 +2356,7 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         if (ack && ack.ok === false) {
-            this.pendingCommitRetryAttemptsByLocalId.delete(localId);
+            this.clearCommitRetry(localId);
             this.deleteMaterializedLocalId(localId);
             logger.debug('[SOCKET] Persisted transcript commit rejected', {
                 localId,
@@ -2397,7 +2399,6 @@ export class ApiSessionClient extends EventEmitter {
             return null;
         }
 
-        this.scheduleMaterializationRecovery(localId);
         this.scheduleCommitRetry({ message: params.message, localId, sidechainId: params.sidechainId, messageRole: params.messageRole, sessionEventType: params.sessionEventType });
         return null;
     }
@@ -2415,34 +2416,70 @@ export class ApiSessionClient extends EventEmitter {
         const localId = params.localId;
         if (!localId) return;
         if (!this.pendingMaterializedLocalIds.has(localId)) return;
+        if (this.pendingCommitRetryTimersByLocalId.has(localId)) return;
 
         const current = this.pendingCommitRetryAttemptsByLocalId.get(localId) ?? 0;
         const next = current + 1;
         if (next > 3) {
+            if (this.transcriptStorage === 'persisted') {
+                this.scheduleMaterializationRecovery(localId);
+            }
             return;
         }
         this.pendingCommitRetryAttemptsByLocalId.set(localId, next);
 
         const delayMs = 1_000 * next;
         const timer = setTimeout(() => {
-            if (!this.pendingMaterializedLocalIds.has(localId)) {
-                this.pendingCommitRetryAttemptsByLocalId.delete(localId);
-                return;
-            }
-            void this.enqueueMessageCommit(() =>
-                this.commitSessionMessage({
-                    message: params.message,
-                    localId,
-                    sidechainId: params.sidechainId,
-                    messageRole: params.messageRole,
-                    sessionEventType: params.sessionEventType,
-                    requireCommit: false,
-                }),
-            ).catch(() => {
+            void (async () => {
+                if (!this.pendingMaterializedLocalIds.has(localId)) {
+                    this.clearCommitRetry(localId);
+                    return;
+                }
+
+                if (this.transcriptStorage === 'persisted') {
+                    try {
+                        const recovered = await this.recoverMaterializedLocalId(localId, {
+                            maxWaitMs: configuration.transcriptRecoveryMaxWaitMs,
+                        });
+                        if (recovered.status === 'recovered') {
+                            return;
+                        }
+                    } catch {
+                        // A failed recovery read still permits the bounded idempotent write retry below.
+                    }
+                }
+
+                if (!this.pendingMaterializedLocalIds.has(localId)) {
+                    this.clearCommitRetry(localId);
+                    return;
+                }
+
+                this.pendingCommitRetryTimersByLocalId.delete(localId);
+                await this.enqueueMessageCommit(() =>
+                    this.commitSessionMessage({
+                        message: params.message,
+                        localId,
+                        sidechainId: params.sidechainId,
+                        messageRole: params.messageRole,
+                        sessionEventType: params.sessionEventType,
+                        requireCommit: false,
+                    }),
+                );
+            })().catch(() => {
                 // Best-effort retry only.
             });
         }, delayMs);
         timer.unref?.();
+        this.pendingCommitRetryTimersByLocalId.set(localId, timer);
+    }
+
+    private clearCommitRetry(localId: string): void {
+        const timer = this.pendingCommitRetryTimersByLocalId.get(localId) ?? null;
+        if (timer) {
+            clearTimeout(timer);
+            this.pendingCommitRetryTimersByLocalId.delete(localId);
+        }
+        this.pendingCommitRetryAttemptsByLocalId.delete(localId);
     }
 
     private encryptSessionContent(content: unknown): string {
@@ -3748,6 +3785,10 @@ export class ApiSessionClient extends EventEmitter {
             clearTimeout(timer);
         }
         this.passiveCommittedUserMessageLocalIdCleanupTimers.clear();
+        for (const timer of this.pendingCommitRetryTimersByLocalId.values()) {
+            clearTimeout(timer);
+        }
+        this.pendingCommitRetryTimersByLocalId.clear();
         this.pendingCommitRetryAttemptsByLocalId.clear();
         await this.sessionMutationOutbox.close();
         try {

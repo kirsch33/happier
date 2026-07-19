@@ -492,6 +492,84 @@ describe('ApiSessionClient message commit queue', () => {
     }
   });
 
+  it('does not retry a persisted best-effort commit while transcript recovery is in flight', async () => {
+    vi.resetModules();
+    supervisorStartCount = 0;
+    vi.stubEnv('HAPPIER_SERVER_URL', 'http://adapter.test');
+    vi.stubEnv('HAPPIER_TRANSCRIPT_RECOVERY_DELAY_MS', '0');
+
+    const lookupStarted = createDeferred<void>();
+    const releaseLookup = createDeferred<void>();
+    const app = fastify({ logger: false });
+    app.get('/v2/sessions/:sid/messages/by-local-id/:localId', async (req: any) => {
+      lookupStarted.resolve();
+      await releaseLookup.promise;
+      return {
+        message: {
+          id: 'persisted-message-1',
+          seq: 7,
+          localId: req.params.localId,
+          sidechainId: null,
+          createdAt: 111,
+          updatedAt: 111,
+          content: { t: 'plain', v: { role: 'agent', content: { type: 'text', text: 'persisted' } } },
+        },
+      };
+    });
+    await app.ready();
+    const restoreAdapter = installAxiosFastifyAdapter({ app, origin: 'http://adapter.test' });
+
+    let messageAttempts = 0;
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emitWithAck: async (event: string, payload: unknown) => {
+        if (event !== 'message') return { ok: true };
+        messageAttempts += 1;
+        if (messageAttempts === 1) {
+          throw Object.assign(new Error('message ack timed out'), {
+            code: 'socket_ack_timeout',
+            event,
+            retryable: true,
+          });
+        }
+        return {
+          ok: true,
+          id: `m-${messageAttempts}`,
+          seq: messageAttempts,
+          localId: (payload as { localId?: string }).localId ?? 'l1',
+        };
+      },
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+
+    try {
+      const { ApiSessionClient } = await import('./sessionClient');
+      const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+
+      client.sendAgentMessage(
+        'opencode' as any,
+        { type: 'message', message: 'persist once' } as any,
+        { localId: 'recover-before-retry-1' },
+      );
+      await flushMicrotasks(20);
+      expect(messageAttempts).toBe(1);
+
+      await lookupStarted.promise;
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      expect(messageAttempts).toBe(1);
+
+      releaseLookup.resolve();
+      await flushMicrotasks(20);
+      expect(messageAttempts).toBe(1);
+      await client.close();
+    } finally {
+      releaseLookup.resolve();
+      restoreAdapter();
+      await app.close().catch(() => {});
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('records committed user message seqs from user transcript echoes', async () => {
     vi.resetModules();
     supervisorStartCount = 0;
