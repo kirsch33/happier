@@ -656,6 +656,86 @@ describe('sendSessionMessage', () => {
         }));
     });
 
+    it('does not wake an inactive legacy session on the caller machine when ownership is unknown', async () => {
+        const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
+        const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({
+            didMaterialize: true,
+            localId: 'local-remote-wake',
+            didWrite: true,
+            message: {
+                id: 'msg-remote-wake',
+                seq: 42,
+                localId: 'local-remote-wake',
+                messageRole: 'user' as const,
+                content: null,
+                createdAt: 100,
+                updatedAt: 100,
+            },
+        }));
+        const spawnDaemonSession = vi.fn(async () => ({ success: true, sessionId: 'sess-legacy' }));
+        const metadata = JSON.stringify({
+            host: 'debian-dev',
+            homeDir: '/home/akirsch',
+            path: '/home/akirsch/dbtools',
+            flavor: 'codex',
+        });
+
+        vi.doMock('@/persistence', () => ({
+            readSettings: vi.fn(async () => ({ machineId: 'rpi-machine' })),
+        }));
+        vi.doMock('@/daemon/controlClient', () => ({
+            spawnDaemonSession,
+        }));
+        vi.doMock('@/session/transport/rpc/sessionRpc', () => ({
+            callSessionRpc: vi.fn(async () => ({ ok: true })),
+        }));
+        vi.doMock('@/session/transport/socket/sessionSocketSendMessage', () => ({
+            sendSessionMessageViaSocketCommitted,
+        }));
+        vi.doMock('@/api/session/pendingQueueV2Transport', () => ({
+            materializeNextPendingQueueV2MessageViaHttp,
+        }));
+        vi.doMock('./resolveSessionTransportContext', () => ({
+            resolveSessionTransportContext: vi.fn(async () => ({
+                ok: true,
+                sessionId: 'sess-legacy',
+                mode: 'plain',
+                ctx: { encryptionKey: new Uint8Array(32).fill(1), encryptionVariant: 'dataKey' },
+                rawSession: {
+                    id: 'sess-legacy',
+                    active: false,
+                    metadata,
+                    encryptionMode: 'plain',
+                    path: '/home/akirsch/dbtools',
+                    agentState: null,
+                    latestTurnStatus: 'completed',
+                    pendingPermissionRequestCount: 0,
+                    pendingUserActionRequestCount: 0,
+                },
+            })),
+        }));
+
+        const { sendSessionMessage } = await import('./sendSessionMessage');
+        const machineKey = new Uint8Array(32).fill(1);
+
+        await expect(sendSessionMessage({
+            credentials: { token: 'token', encryption: { type: 'dataKey', publicKey: machineKey, machineKey } },
+            idOrPrefix: 'sess-legacy',
+            message: 'resume on the owner',
+            localId: 'local-remote-wake',
+            wait: false,
+            timeoutMs: 1,
+        })).resolves.toEqual({
+            ok: true,
+            sessionId: 'sess-legacy',
+            localId: 'local-remote-wake',
+            waited: false,
+        });
+
+        expect(sendSessionMessageViaSocketCommitted).toHaveBeenCalledTimes(1);
+        expect(spawnDaemonSession).not.toHaveBeenCalled();
+    });
+
     it('invokes onCommittedViaSocket when runtime RPC falls back to socket-committed delivery', async () => {
         const sendSessionMessageViaSocketCommitted = vi.fn(async () => undefined);
         const materializeNextPendingQueueV2MessageViaHttp = vi.fn(async () => ({ didMaterialize: true }));

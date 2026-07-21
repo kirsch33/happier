@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 
 import {
   parsePermissionIntentAlias,
@@ -18,6 +19,7 @@ import {
 } from '@/api/session/pendingQueueV2Transport';
 import { waitForTranscriptEncryptedMessageByLocalId } from '@/api/session/transcriptMessageLookup';
 import { readSettings, type Credentials } from '@/persistence';
+import { getPreferredHostName } from '@/daemon/machine/metadata';
 import {
   detectSessionTurnActivity,
   isMemoryArtifactDecryptedRow,
@@ -37,6 +39,7 @@ import {
   tryDecryptSessionMetadata,
 } from '@/session/transport/encryption/sessionEncryptionContext';
 import { detectSessionTurnLifecycleEvent, isBareSessionReadyEvent } from '@/session/shared/sessionTurnLifecycle';
+import { resolveMachineControlLocalityProof } from '@/session/machineControlLocality';
 
 import { resolveSessionTransportContext } from './resolveSessionTransportContext';
 
@@ -123,11 +126,29 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
-async function resolveLocalMachineIdFallback(): Promise<string> {
+async function resolveLocalWakeMachineId(params: Readonly<{
+  rawSession: RawSessionRecord;
+  metadata: Record<string, unknown>;
+}>): Promise<string | null> {
   try {
-    return readNonEmptyString((await readSettings()).machineId) ?? '';
+    const currentMachineId = readNonEmptyString((await readSettings()).machineId);
+    if (!currentMachineId) return null;
+
+    const rawSession = params.rawSession as RawSessionRecord & Readonly<{
+      host?: unknown;
+      homeDir?: unknown;
+    }>;
+    const proof = resolveMachineControlLocalityProof({
+      sessionMachineId: readNonEmptyString(params.rawSession.machineId) ?? readNonEmptyString(params.metadata.machineId),
+      currentMachineId,
+      sessionHost: readNonEmptyString(rawSession.host) ?? readNonEmptyString(params.metadata.host),
+      sessionHomeDir: readNonEmptyString(rawSession.homeDir) ?? readNonEmptyString(params.metadata.homeDir),
+      currentMachineHost: await getPreferredHostName(),
+      currentMachineHomeDir: homedir(),
+    });
+    return proof ? currentMachineId : null;
   } catch {
-    return '';
+    return null;
   }
 }
 
@@ -188,8 +209,14 @@ async function wakeSocketCommittedSessionBestEffort(params: Readonly<{
   if (!resolveAgentIdFromSessionMetadata(metadata)) return;
 
   try {
+    const localMachineId = await resolveLocalWakeMachineId({
+      rawSession: params.rawSession,
+      metadata,
+    });
+    if (!localMachineId) return;
+
     const spawnOptions = buildInactiveUsageLimitResumeSpawnOptions({
-      fallbackMachineId: await resolveLocalMachineIdFallback(),
+      fallbackMachineId: localMachineId,
       sessionId: params.sessionId,
       rawSession: params.rawSession,
       metadata,
@@ -206,6 +233,10 @@ async function wakeSocketCommittedSessionBestEffort(params: Readonly<{
 
     const spawnRequest: SpawnDaemonSessionRequest = {
       ...(spawnOptions as SpawnDaemonSessionRequest),
+      // A local daemon wake must always use the daemon's current machine identity.
+      // This also safely adopts legacy sessions whose persisted machine id was replaced
+      // while host + home still prove that the session belongs to this installation.
+      machineId: localMachineId,
       ...(initialTranscriptAfterSeq !== undefined ? { initialTranscriptAfterSeq } : {}),
       ...(params.permissionModeOverride !== undefined
         ? { permissionMode: params.permissionIntent, permissionModeUpdatedAt: now }
