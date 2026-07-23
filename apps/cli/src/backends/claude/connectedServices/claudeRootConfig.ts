@@ -44,9 +44,11 @@ export function sanitizeClaudeRootConfig(
 }
 
 export async function sanitizeClaudeRootConfigFile(path: string): Promise<void> {
-  const rootConfig = await readClaudeRootConfigFile(path);
-  if (!rootConfig) return;
-  await writeJsonAtomic(path, sanitizeClaudeRootConfig(rootConfig));
+  const rootConfig = await readClaudeRootConfigFile(path) ?? {};
+  await writeJsonAtomic(path, {
+    ...sanitizeClaudeRootConfig(rootConfig),
+    hasCompletedOnboarding: true,
+  });
 }
 
 function readNonBlankString(value: unknown): string | null {

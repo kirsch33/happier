@@ -128,6 +128,11 @@ describe('materializeClaudeCodeNativeAuth', () => {
     await expect(readFile(join(profileClaudeConfigDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"source"}\n');
     await expect(readFile(join(groupClaudeConfigDir, 'settings.json'), 'utf8')).resolves.toBe('{"theme":"source"}\n');
 
+    const profileRootConfig = JSON.parse(await readFile(join(profileClaudeConfigDir, '.claude.json'), 'utf8'));
+    const groupRootConfig = JSON.parse(await readFile(join(groupClaudeConfigDir, '.claude.json'), 'utf8'));
+    expect(profileRootConfig).toMatchObject({ hasCompletedOnboarding: true });
+    expect(groupRootConfig).toMatchObject({ hasCompletedOnboarding: true });
+
     expect(profile.identityDiagnostic).toMatchObject({
       serviceId: 'claude-subscription',
       selectionKind: 'profile',
