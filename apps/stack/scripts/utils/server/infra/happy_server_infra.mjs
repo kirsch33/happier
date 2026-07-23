@@ -116,9 +116,17 @@ function buildComposeYaml({
       - minio
     entrypoint: ["/bin/sh", "-lc"]
     command: >
-      mc alias set local http://minio:9000 ${s3AccessKey} ${s3SecretKey} &&
-      mc mb -p local/${s3Bucket} || true &&
-      mc anonymous set download local/${s3Bucket} || true
+      attempts=0;
+      until mc alias set local http://minio:9000 ${s3AccessKey} ${s3SecretKey}; do
+        attempts=$$((attempts + 1));
+        if [ "$$attempts" -ge 60 ]; then
+          echo "MinIO did not become ready within 60 seconds" >&2;
+          exit 1;
+        fi;
+        sleep 1;
+      done &&
+      (mc mb -p local/${s3Bucket} || true) &&
+      (mc anonymous set download local/${s3Bucket} || true)
     restart: "no"
 `;
 }
