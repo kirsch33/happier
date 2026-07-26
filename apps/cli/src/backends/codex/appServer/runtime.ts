@@ -3242,6 +3242,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
             ...buildThreadServiceTierParams(currentServiceTier, hasServiceTierOverride),
             ...buildThreadConfigOverrideParams(currentReasoningEffort),
             ...buildCurrentPermissionParams('thread'),
+            experimentalRawEvents: true,
             persistExtendedHistory: true,
         };
         let response: unknown;
@@ -3269,6 +3270,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         ...buildThreadServiceTierParams(currentServiceTier, hasServiceTierOverride),
                         ...buildThreadConfigOverrideParams(currentReasoningEffort),
                         ...buildCurrentLegacyPermissionParams('thread'),
+                        experimentalRawEvents: true,
                         persistExtendedHistory: true,
                     }, requestOptions);
                 } catch (legacyError) {

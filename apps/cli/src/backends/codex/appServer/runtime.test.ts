@@ -172,7 +172,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32600, message: "Invalid request: invalid type: map, expected a string" } }) + "\\n");',
         '            continue;',
         '        }',
-        '        if (msg.params?.persistExtendedHistory !== true) {',
+        '        if (msg.params?.persistExtendedHistory !== true || msg.params?.experimentalRawEvents !== true) {',
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "missing thread/resume flags" } }) + "\\n");',
         '            continue;',
         '        }',
@@ -1620,12 +1620,14 @@ describe('createCodexAppServerRuntime', () => {
                 expect.objectContaining({
                     params: expect.objectContaining({
                         threadId: 'resume-123',
+                        experimentalRawEvents: true,
                         persistExtendedHistory: true,
                     }),
                 }),
                 expect.objectContaining({
                     params: expect.objectContaining({
                         threadId: 'existing-456',
+                        experimentalRawEvents: true,
                         persistExtendedHistory: true,
                     }),
                 }),
