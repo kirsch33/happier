@@ -80,6 +80,28 @@ describe("inTx", () => {
         );
     });
 
+    it("uses configured Postgres transaction timeout options", async () => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: "postgres",
+            HAPPIER_DB_TX_TIMEOUT_MS: "12000",
+            HAPPIER_DB_TX_MAX_WAIT_MS: "7000",
+        });
+
+        const { inTx } = await import("./inTx");
+        const result = await inTx(async () => 655);
+
+        expect(result).toBe(655);
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(transaction.mock.calls[0]![1]).toEqual(
+            expect.objectContaining({
+                isolationLevel: "Serializable",
+                maxWait: 7000,
+                timeout: 12000,
+            }),
+        );
+    });
+
     it("retries P2034 and eventually succeeds", async () => {
         restoreEnv(envSnapshot);
         applyEnvValues({
@@ -96,6 +118,33 @@ describe("inTx", () => {
         expect(result).toBe(789);
         expect(transaction).toHaveBeenCalledTimes(2);
         expect(delayMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses configured Postgres P2034 retry backoff", async () => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: "postgres",
+            HAPPIER_DB_TX_MAX_RETRIES: "5",
+            HAPPIER_DB_TX_RETRY_BASE_DELAY_MS: "7",
+            HAPPIER_DB_TX_RETRY_MAX_DELAY_MS: "13",
+            HAPPIER_DB_TX_TOTAL_RETRY_BUDGET_MS: "60000",
+        });
+        transaction
+            .mockRejectedValueOnce(Object.assign(new Error("retry 1"), { code: "P2034" }))
+            .mockRejectedValueOnce(Object.assign(new Error("retry 2"), { code: "P2034" }))
+            .mockRejectedValueOnce(Object.assign(new Error("retry 3"), { code: "P2034" }))
+            .mockRejectedValueOnce(Object.assign(new Error("retry 4"), { code: "P2034" }))
+            .mockImplementationOnce(async (fn: any, _opts?: any) => fn({} as any));
+
+        const { inTx } = await import("./inTx");
+        const result = await inTx(async () => 790);
+
+        expect(result).toBe(790);
+        expect(transaction).toHaveBeenCalledTimes(5);
+        expect(delayMock).toHaveBeenNthCalledWith(1, 7);
+        expect(delayMock).toHaveBeenNthCalledWith(2, 13);
+        expect(delayMock).toHaveBeenNthCalledWith(3, 13);
+        expect(delayMock).toHaveBeenNthCalledWith(4, 13);
     });
 
     it.each(["postgres", "mysql"])("retries an acquisition-shaped P2028 before the transaction callback starts on %s", async (provider) => {
@@ -212,6 +261,26 @@ describe("inTx", () => {
 
         const { inTx } = await import("./inTx");
         await expect(inTx(async () => 9003)).rejects.toBe(timeoutError);
+
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(delayMock).not.toHaveBeenCalled();
+    });
+
+    it("does not schedule a Postgres retry that would exceed the configured transaction budget", async () => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: "postgres",
+            HAPPIER_DB_TX_MAX_RETRIES: "8",
+            HAPPIER_DB_TX_TIMEOUT_MS: "10000",
+            HAPPIER_DB_TX_MAX_WAIT_MS: "5000",
+            HAPPIER_DB_TX_TOTAL_RETRY_BUDGET_MS: "15000",
+        });
+        const retryError = Object.assign(new Error("could not serialize access due to concurrent update"), { code: "P2034" });
+        transaction.mockRejectedValue(retryError);
+        vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(20_000);
+
+        const { inTx } = await import("./inTx");
+        await expect(inTx(async () => 9004)).rejects.toBe(retryError);
 
         expect(transaction).toHaveBeenCalledTimes(1);
         expect(delayMock).not.toHaveBeenCalled();
