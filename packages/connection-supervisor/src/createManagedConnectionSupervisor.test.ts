@@ -108,6 +108,52 @@ describe('createManagedConnectionSupervisor', () => {
     expect(harness.transport.connect).toHaveBeenCalledTimes(1);
   });
 
+  it('does not create an orphan transport when a stale reconnect cleanup finishes late', async () => {
+    vi.useFakeTimers();
+
+    const firstTransport = createTransportHarness();
+    const secondTransport = createTransportHarness();
+    const orphanTransport = createTransportHarness();
+    const transports = [firstTransport, secondTransport, orphanTransport];
+    const disconnectDeferred = createDeferred<void>();
+    (firstTransport.transport.disconnect as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await disconnectDeferred.promise;
+    });
+
+    const createTransport = vi.fn(() => {
+      const next = transports.shift();
+      if (!next) throw new Error('missing transport');
+      return next.transport;
+    });
+    const supervisor = createManagedConnectionSupervisor({
+      ...DEFAULT_MANAGED_CONNECTION_POLICY,
+      createTransport,
+      probeReadiness: vi.fn<() => Promise<ReadinessProbeResult>>().mockResolvedValue({ status: 'ready' }),
+      initialFastRetryDelayMs: 1,
+      backoffMinMs: 10,
+      backoffMaxMs: 10,
+      jitterRatio: 0,
+    });
+
+    await supervisor.start();
+    firstTransport.emitDisconnect({ reason: 'transport closed' });
+    await vi.advanceTimersByTimeAsync(1);
+
+    const restart = supervisor.start();
+    await flushAsyncCleanup();
+
+    expect(secondTransport.transport.connect).toHaveBeenCalledTimes(1);
+
+    disconnectDeferred.resolve();
+    await restart;
+    await flushAsyncCleanup();
+
+    expect(createTransport).toHaveBeenCalledTimes(2);
+    expect(orphanTransport.transport.connect).toHaveBeenCalledTimes(0);
+
+    vi.useRealTimers();
+  });
+
   it('can probe before the initial transport connect', async () => {
     vi.useFakeTimers();
     const harness = createTransportHarness();
