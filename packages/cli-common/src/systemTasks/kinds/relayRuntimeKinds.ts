@@ -17,6 +17,7 @@ export interface RelayRuntimeTaskParams {
   target: Readonly<{ kind: 'local' }> | Readonly<{ kind: 'ssh'; ssh: SystemTaskSshConnectionConfig }>;
   channel?: 'stable' | 'preview' | 'dev';
   mode?: 'user' | 'system';
+  profile?: 'light' | 'full';
   env?: Record<string, string>;
   selfHostRelayBinaryOverride?: string;
 }
@@ -179,6 +180,11 @@ export function parseRelayRuntimeTaskParams(params: unknown): RelayRuntimeTaskPa
   const kind = targetRecord.kind === 'ssh' ? 'ssh' : 'local';
   const channel = value.channel === 'preview' || value.channel === 'dev' ? value.channel : 'stable';
   const mode = value.mode === 'system' ? 'system' : 'user';
+  const profile = value.profile === undefined || value.profile === 'light'
+    ? 'light'
+    : value.profile === 'full'
+      ? 'full'
+      : (() => { throw new SystemTaskExecutionError('invalid_params', 'Invalid relay runtime profile.'); })();
   const env = typeof value.env === 'object' && value.env && !Array.isArray(value.env)
     ? Object.fromEntries(Object.entries(value.env as Record<string, unknown>).map(([key, innerValue]) => [key, String(innerValue ?? '')]))
     : undefined;
@@ -195,6 +201,7 @@ export function parseRelayRuntimeTaskParams(params: unknown): RelayRuntimeTaskPa
         },
     channel,
     mode,
+    profile,
     ...(env ? { env } : {}),
     ...(selfHostRelayBinaryOverride ? { selfHostRelayBinaryOverride } : {}),
   };

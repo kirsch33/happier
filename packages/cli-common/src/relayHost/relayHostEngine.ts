@@ -25,6 +25,7 @@ import { checkRelayRuntimeHealth, resolveRelayRuntimeDefaults, type RelayRuntime
 import {
   assertRelayRuntimePayloadReadyForInstall,
   installOrUpdateRelayRuntimeLocal,
+  preflightFullRelayRuntimeInstall,
   shouldMigrateLegacyUnsuffixedRelayRuntimeInstallRoot,
   type LegacyRelayRuntimePriorServiceState,
 } from '../firstPartyRuntime/relayRuntimeInstall.js';
@@ -163,6 +164,10 @@ function buildRelayRuntimeServiceSpec(params: Readonly<{
   };
 }
 
+function normalizeRelayProfile(profile: RelayRuntimeTaskParams['profile']): 'light' | 'full' {
+  return profile === 'full' ? 'full' : 'light';
+}
+
 async function resolveRemoteUserHomeDir(
   deps: Pick<RemoteDeps, 'runRemoteText'>,
   params: Readonly<{ ssh: SystemTaskSshConnectionConfig; knownHostsMode?: 'app' | 'system' }>,
@@ -192,6 +197,34 @@ function resolveRelayDefaultsForRemote(params: Readonly<{
     mode: params.mode,
     homeDir,
   });
+}
+
+function buildRemoteFullRelayPreflightCommand(params: Readonly<{
+  configEnvPath: string;
+  serviceName: string;
+}>): string {
+  const configEnvPath = quoteRemoteShellArg(params.configEnvPath);
+  const unitName = quoteRemoteShellArg(`${params.serviceName}.service`);
+  return [
+    'set -eu',
+    `config_env=${configEnvPath}`,
+    '[ -f "$config_env" ]',
+    '[ "$(stat -c %a "$config_env")" = 600 ]',
+    "grep -Eq '^[[:space:]]*(HAPPIER_DB_PROVIDER|HAPPY_DB_PROVIDER)[[:space:]]*=[[:space:]]*(postgres|postgresql|mysql)[[:space:]]*$' \"$config_env\"",
+    "grep -Eq '^[[:space:]]*DATABASE_URL[[:space:]]*=' \"$config_env\"",
+    `if dropins="$(systemctl show ${unitName} --property=DropInPaths --value 2>/dev/null)"; then`,
+    '  :',
+    'else',
+    '  show_status=$?',
+    `  load_state="$(systemctl show ${unitName} --property=LoadState --value 2>/dev/null)" || exit "$show_status"`,
+    '  [ "$load_state" = not-found ] || exit "$show_status"',
+    "  dropins=''",
+    'fi',
+    'for dropin in $dropins; do',
+    '  case "$dropin" in *.conf) ;; *) continue ;; esac',
+    "  awk 'BEGIN { in_service = 0; conflict = 0 } /^[[:space:]]*\\[[^]]+\\][[:space:]]*$/ { in_service = ($0 ~ /^[[:space:]]*\\[Service\\][[:space:]]*$/); next } in_service && /^[[:space:]]*(ExecStart|ExecStartPre|WorkingDirectory|EnvironmentFile)[[:space:]]*=/ { conflict = 1 } END { exit conflict }' \"$dropin\"",
+    'done',
+  ].join('; ');
 }
 
 async function probeLocalPortOpen(params: Readonly<{ host: string; port: number; timeoutMs: number }>): Promise<boolean> {
@@ -257,6 +290,7 @@ async function resolveLocalRelayHealth(params: Readonly<{
 async function resolveLocalDesiredRelayUrl(params: Readonly<{
   mode: 'user' | 'system';
   channel: PublicReleaseRingId;
+  profile?: 'light' | 'full';
   envOverrides?: Record<string, string>;
 }>): Promise<string> {
   const defaults = resolveRelayRuntimeDefaults({
@@ -267,6 +301,12 @@ async function resolveLocalDesiredRelayUrl(params: Readonly<{
   });
   const envPath = join(defaults.configDir, 'server.env');
   const existingEnvText = existsSync(envPath) ? await readFile(envPath, 'utf8').catch(() => '') : '';
+  if (params.profile === 'full') {
+    return resolveConfiguredSelfHostBaseUrl({
+      fallbackBaseUrl: `http://${defaults.serverHost}:${defaults.serverPort}`,
+      envText: existingEnvText,
+    });
+  }
 
   // Resolve the port we'll advertise for this channel. When there's no
   // existing server.env for this channel AND the user didn't explicitly pass
@@ -805,6 +845,16 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
     return Boolean(loadState && loadState !== 'not-found');
   };
 
+  const showEffectiveLocalSystemdDropIns = (params: Readonly<{
+    unitName: string;
+    mode: 'system';
+  }>) => runLocalText('systemctl', [
+    'show',
+    `${params.unitName}.service`,
+    '--property=DropInPaths',
+    '--value',
+  ]);
+
   const resolveLocalSystemdUnitOwnedByInstallRoot = async (params: Readonly<{
     backend: 'systemd-user' | 'systemd-system';
     unitName: string;
@@ -1322,6 +1372,7 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
   async function installLocal(parsed: RelayRuntimeTaskParams): Promise<Readonly<{ relayUrl: string; mode: 'user' | 'system' }>> {
     const mode = normalizeMode(parsed.mode);
     const channel = normalizeChannel(parsed.channel);
+    const profile = normalizeRelayProfile(parsed.profile);
     const defaults = resolveRelayRuntimeDefaults({
       platform: process.platform,
       mode,
@@ -1329,9 +1380,20 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
       homeDir: homedir(),
     });
     const backend = resolveServiceBackend({ platform: process.platform, mode }) as ServiceBackend;
+    if (profile === 'full') {
+      await preflightFullRelayRuntimeInstall({
+        platform: process.platform,
+        backend,
+        configEnvPath: join(defaults.configDir, 'server.env'),
+        serviceName: defaults.serviceName,
+        env: parsed.env,
+        showEffectiveDropIns: showEffectiveLocalSystemdDropIns,
+      });
+    }
     const desiredRelayUrl = await resolveLocalDesiredRelayUrl({
       mode,
       channel,
+      profile,
       envOverrides: parsed.env,
     });
 
@@ -1563,6 +1625,7 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
     await assertRelayRuntimePayloadReadyForInstall({
       serverBinaryPath,
       platform: process.platform,
+      profile,
     });
     const version = deps.resolveLocalInstallVersion
       ? await deps.resolveLocalInstallVersion({ channel, mode, serverBinaryPath })
@@ -1633,21 +1696,25 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         return null;
       }
     })();
-    const envForInstaller: Record<string, string> = {
-      ...(parsed.env ?? {}),
-      ...(resolvedPortFromDesiredUrl && !(parsed.env ?? {}).PORT ? { PORT: resolvedPortFromDesiredUrl } : {}),
-    };
+    const envForInstaller: Record<string, string> = profile === 'full'
+      ? {}
+      : {
+        ...(parsed.env ?? {}),
+        ...(resolvedPortFromDesiredUrl && !(parsed.env ?? {}).PORT ? { PORT: resolvedPortFromDesiredUrl } : {}),
+      };
 
     const local = await installOrUpdateRelayRuntimeLocal({
       serverBinaryPath,
       channel,
       mode,
+      profile,
       env: envForInstaller,
       legacyInstallRoot: legacyInstallRootToMigrate,
       legacyServicePriorState,
       version,
       runServiceCommands: policy.runServiceCommands !== false,
       skipHealthCheck: policy.skipHealthCheck === true,
+      showEffectiveDropIns: showEffectiveLocalSystemdDropIns,
     });
 
     return {
@@ -1817,6 +1884,29 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
     const knownHostsMode: 'app' | 'system' = params.ssh.knownHostsPath ? 'app' : 'system';
     const channel = normalizeChannel(params.parsed.channel);
     const mode = normalizeMode(params.parsed.mode);
+    const profile = normalizeRelayProfile(params.parsed.profile);
+
+    if (profile === 'full') {
+      if (Object.keys(params.parsed.env ?? {}).length > 0) {
+        throw new Error('The full relay profile does not accept environment overrides.');
+      }
+      const target = await deps.resolveRemoteReleaseTarget({ ssh: params.ssh, knownHostsMode });
+      if (target.os !== 'linux' || mode !== 'system') {
+        throw new Error('The full relay profile requires a Linux systemd system install.');
+      }
+      const defaults = resolveRelayDefaultsForRemote({ platform: 'linux', channel, mode });
+      const preflight = await deps.runRemoteText({
+        ssh: params.ssh,
+        knownHostsMode,
+        remoteCommand: buildRemoteFullRelayPreflightCommand({
+          configEnvPath: `${defaults.configDir}/server.env`,
+          serviceName: defaults.serviceName,
+        }),
+      });
+      if (preflight.status !== 0) {
+        throw new Error('Remote full relay preflight failed; verify the existing mode-0600 full server config and effective systemd drop-ins.');
+      }
+    }
 
     const remoteCli = await deps.installRemoteComponent({
       componentId: 'happier-cli',
@@ -1847,6 +1937,7 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         cliBinaryPath: remoteCli.binaryPath,
         channel: formatRelayChannelLabel(channel),
         mode,
+        profile,
         env: params.parsed.env ?? {},
         ...(uploadedServer ? { serverBinaryPath: uploadedServer.binaryPath } : {}),
       }),

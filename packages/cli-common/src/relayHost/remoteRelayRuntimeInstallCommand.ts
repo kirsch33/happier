@@ -15,6 +15,7 @@ export function buildRemoteRelayRuntimeInstallCommand(params: Readonly<{
   cliBinaryPath: string;
   channel: 'stable' | 'preview' | 'dev';
   mode: 'user' | 'system';
+  profile?: 'light' | 'full';
   env?: Readonly<Record<string, unknown>>;
   serverBinaryPath?: string;
 }>): string {
@@ -28,6 +29,7 @@ export function buildRemoteRelayRuntimeInstallCommand(params: Readonly<{
     `${params.cliBinaryPath} relay host install`,
     `--channel ${quoteShellArg(params.channel)}`,
     `--mode ${params.mode}`,
+    `--profile ${params.profile === 'full' ? 'full' : 'light'}`,
     ...envArgs,
     ...(serverBinaryPath ? [`--server-binary ${quoteRemotePathWithHomeExpansion(serverBinaryPath)}`] : []),
     '--preserve-active-server',

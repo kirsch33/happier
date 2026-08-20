@@ -201,6 +201,13 @@ function normalizeMode(raw: unknown): 'user' | 'system' {
   return String(raw ?? '').trim().toLowerCase() === 'system' ? 'system' : 'user';
 }
 
+function normalizeProfile(raw: unknown): 'light' | 'full' {
+  const profile = String(raw ?? '').trim().toLowerCase();
+  if (!profile || profile === 'light') return 'light';
+  if (profile === 'full') return 'full';
+  throw createInvalidArgumentsError(`Invalid relay profile: ${profile}`);
+}
+
 function normalizeChannel(raw: unknown): 'stable' | 'preview' | 'dev' {
   const explicit = String(raw ?? '').trim();
   if (explicit) {
@@ -482,12 +489,14 @@ function createLocalRelayHostEngine(params: Readonly<{
 function resolveRelayRuntimeTaskParams(params: Readonly<{
   channel: 'stable' | 'preview' | 'dev';
   mode: 'user' | 'system';
+  profile: 'light' | 'full';
   ssh: SystemTaskSshConnectionConfig | null;
 }>): RelayRuntimeTaskParams {
   return {
     target: params.ssh ? { kind: 'ssh', ssh: params.ssh } : { kind: 'local' },
     channel: params.channel,
     mode: params.mode,
+    profile: params.profile,
   };
 }
 
@@ -495,7 +504,7 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
   const json = wantsJson(args);
   const op = String(args[0] ?? '').trim();
   if (!op) {
-    throw new Error('Usage: happier relay host <install|status|start|stop|restart|uninstall> [--ssh <user@host>] [--mode user|system] [--channel stable|preview|dev] [--env KEY=VALUE]... [--server-binary <path>] [--lan | --expose | --host <ip>] [--preserve-active-server] [--yes] [--json]');
+    throw new Error('Usage: happier relay host <install|status|start|stop|restart|uninstall> [--ssh <user@host>] [--mode user|system] [--profile light|full] [--channel stable|preview|dev] [--env KEY=VALUE]... [--server-binary <path>] [--lan | --expose | --host <ip>] [--preserve-active-server] [--yes] [--json]');
   }
 
   let rest = args.slice(1);
@@ -503,6 +512,8 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
   rest = channelFlag.rest;
   const modeFlag = takeFlagValue(rest, '--mode');
   rest = modeFlag.rest;
+  const profileFlag = takeFlagValue(rest, '--profile');
+  rest = profileFlag.rest;
   const sshFlag = takeFlagValue(rest, '--ssh');
   rest = sshFlag.rest;
   const envFlag = takeRepeatedFlagValues(rest, '--env');
@@ -551,6 +562,7 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
 
   const channel = normalizeChannel(channelFlag.value);
   const mode = normalizeMode(modeFlag.value);
+  const profile = normalizeProfile(profileFlag.value);
   const preserveActiveServer = preserveActiveServerFlag.present;
 
   const ssh: SystemTaskSshConnectionConfig | null = sshFlag.value
@@ -575,9 +587,13 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
     throw createInvalidArgumentsError('Use --server-binary instead of --self-host-server-binary for relay host install over SSH.');
   }
 
-  const taskParams = resolveRelayRuntimeTaskParams({ channel, mode, ssh });
+  const taskParams = resolveRelayRuntimeTaskParams({ channel, mode, profile, ssh });
   const env = envFlag.values.length > 0 ? parseEnvOverrides(envFlag.values) : null;
   const selfHostRelayBinaryOverride = String(serverBinaryFlag.value ?? selfHostServerBinaryFlag.value ?? '').trim() || null;
+
+  if (profile === 'full' && (env !== null || bindFlagCount > 0)) {
+    throw createInvalidArgumentsError('The full relay profile does not accept --env, --lan, --expose, or --host overrides.');
+  }
   const localEngine = createLocalRelayHostEngine({});
 
   if (op === 'status') {

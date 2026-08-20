@@ -6,7 +6,11 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { resolveRelayRuntimeDefaults } from './relayRuntime.js';
-import { installOrUpdateRelayRuntimeLocal } from './relayRuntimeInstall.js';
+import {
+  assertRelayRuntimePayloadReadyForInstall,
+  installOrUpdateRelayRuntimeLocal,
+  preflightFullRelayRuntimeInstall,
+} from './relayRuntimeInstall.js';
 
 async function makeRunnableRelayPayload(params: Readonly<{
   payloadRoot: string;
@@ -31,7 +35,148 @@ async function makeRunnableRelayPayload(params: Readonly<{
   await writeFile(join(params.payloadRoot, 'ui-web', 'current', 'index.html'), '<html></html>\n', { encoding: 'utf8', flag: 'a' });
 }
 
+async function makeRunnableFullRelayPayload(params: Readonly<{
+  payloadRoot: string;
+  serverBinaryPath: string;
+}>): Promise<void> {
+  const engine = process.arch === 'arm64'
+    ? 'libquery_engine-linux-arm64-openssl-3.0.x.so.node'
+    : 'libquery_engine-debian-openssl-3.0.x.so.node';
+  await chmod(params.serverBinaryPath, 0o755);
+  await writeFile(join(params.payloadRoot, 'happier-server-migrate'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  await mkdir(join(params.payloadRoot, 'node_modules', '.prisma', 'client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'node_modules', '@prisma', 'client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'generated', 'mysql-client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'prisma', 'migrations', '20200101000000_init'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'prisma', 'mysql', 'migrations', '20200101000000_init'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'runtime'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'ui-web', 'current'), { recursive: true });
+  await writeFile(join(params.payloadRoot, 'node_modules', '.prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'node_modules', '.prisma', 'client', engine), 'engine\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'node_modules', '@prisma', 'client', 'package.json'), '{"main":"index.js"}\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'node_modules', '@prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'generated', 'mysql-client', 'index.js'), 'export {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'generated', 'mysql-client', engine), 'engine\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'schema.prisma'), 'generator client { provider = "prisma-client-js" }\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'migrations', 'migration_lock.toml'), 'provider = "postgresql"\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'mysql', 'schema.prisma'), 'generator client { provider = "prisma-client-js" }\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'mysql', 'migrations', 'migration_lock.toml'), 'provider = "mysql"\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'mysql', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'runtime', 'prisma-migrate'), 'runner\n', { mode: 0o755 });
+  await writeFile(join(params.payloadRoot, 'runtime', 'schema-engine'), 'engine\n', { mode: 0o755 });
+  await writeFile(join(params.payloadRoot, 'runtime', 'prisma_schema_build_bg.wasm'), 'wasm\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'ui-web', 'current', 'index.html'), '<html></html>\n', 'utf8');
+}
+
 describe('installOrUpdateRelayRuntimeLocal', () => {
+  it('uses only systemd-reported effective drop-ins for full-profile preflight', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-preflight-'));
+    try {
+      const configEnvPath = join(homeDir, 'server.env');
+      const overriddenDropInPath = join(homeDir, 'lib', 'systemd', 'system', 'happier-server.service.d', '10-override.conf');
+      const effectiveDropInPath = join(homeDir, 'etc', 'systemd', 'system', 'happier-server.service.d', '10-override.conf');
+      await mkdir(dirname(overriddenDropInPath), { recursive: true });
+      await mkdir(dirname(effectiveDropInPath), { recursive: true });
+      await writeFile(configEnvPath, 'HAPPIER_DB_PROVIDER=postgres\nDATABASE_URL=postgres://example\n', { mode: 0o600 });
+      await writeFile(overriddenDropInPath, '[Service]\nExecStart=/unexpected\n', 'utf8');
+      await writeFile(effectiveDropInPath, '[Service]\nEnvironment=RETRY=1\n', 'utf8');
+
+      await expect(preflightFullRelayRuntimeInstall({
+        platform: 'linux',
+        backend: 'systemd-system',
+        configEnvPath,
+        serviceName: 'happier-server',
+        showEffectiveDropIns: () => ({ status: 0, stdout: `${effectiveDropInPath}\n`, stderr: '' }),
+      })).resolves.toBeUndefined();
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks full-profile preflight when systemd reports a vendor or dash-prefix conflict', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-preflight-'));
+    try {
+      const configEnvPath = join(homeDir, 'server.env');
+      const vendorDropInPath = join(homeDir, 'lib', 'systemd', 'system', 'happier-server-.service.d', '50-vendor.conf');
+      await mkdir(dirname(vendorDropInPath), { recursive: true });
+      await writeFile(configEnvPath, 'HAPPIER_DB_PROVIDER=mysql\nDATABASE_URL=mysql://example\n', { mode: 0o600 });
+      await writeFile(vendorDropInPath, '[Service]\nWorkingDirectory=/vendor\n', 'utf8');
+
+      await expect(preflightFullRelayRuntimeInstall({
+        platform: 'linux',
+        backend: 'systemd-system',
+        configEnvPath,
+        serviceName: 'happier-server',
+        showEffectiveDropIns: () => ({ status: 0, stdout: `${vendorDropInPath}\n`, stderr: '' }),
+      })).rejects.toThrow(/conflicting systemd drop-in/i);
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails full-profile preflight before systemd inspection when config is missing', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-preflight-'));
+    try {
+      let showCalls = 0;
+      await expect(preflightFullRelayRuntimeInstall({
+        platform: 'linux',
+        backend: 'systemd-system',
+        configEnvPath: join(homeDir, 'missing-server.env'),
+        serviceName: 'happier-server',
+        showEffectiveDropIns: () => {
+          showCalls += 1;
+          return { status: 0, stdout: '', stderr: '' };
+        },
+      })).rejects.toThrow(/mode 0600 config\/server\.env/i);
+      expect(showCalls).toBe(0);
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the full artifact closure without requiring light SQLite assets', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-payload-'));
+    try {
+      const payloadRoot = join(homeDir, 'payload');
+      await mkdir(payloadRoot, { recursive: true });
+      const serverBinaryPath = join(payloadRoot, 'happier-server');
+      await writeFile(serverBinaryPath, '#!/bin/sh\nexit 0\n', 'utf8');
+      await makeRunnableFullRelayPayload({ payloadRoot, serverBinaryPath });
+
+      await expect(assertRelayRuntimePayloadReadyForInstall({
+        serverBinaryPath,
+        platform: 'linux',
+        profile: 'full',
+      })).resolves.toBeUndefined();
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a malformed full artifact closure before installation', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-malformed-'));
+    try {
+      const payloadRoot = join(homeDir, 'payload');
+      await mkdir(payloadRoot, { recursive: true });
+      const serverBinaryPath = join(payloadRoot, 'happier-server');
+      await writeFile(serverBinaryPath, '#!/bin/sh\nexit 0\n', 'utf8');
+      await makeRunnableFullRelayPayload({ payloadRoot, serverBinaryPath });
+      const engine = process.arch === 'arm64'
+        ? 'libquery_engine-linux-arm64-openssl-3.0.x.so.node'
+        : 'libquery_engine-debian-openssl-3.0.x.so.node';
+      await rm(join(payloadRoot, 'generated', 'mysql-client', engine));
+
+      await expect(assertRelayRuntimePayloadReadyForInstall({
+        serverBinaryPath,
+        platform: 'linux',
+        profile: 'full',
+      })).rejects.toThrow(/generated\/mysql-client/i);
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('returns the env-overridden baseUrl instead of the default relay port', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-'));
     try {

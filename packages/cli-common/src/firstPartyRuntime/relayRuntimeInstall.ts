@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join, win32 as win32Path } from 'node:path';
+import { basename, dirname, isAbsolute, join, win32 as win32Path } from 'node:path';
 
 import {
     applyServicePlan,
@@ -549,6 +549,7 @@ function resolveRelayRuntimePayloadRootFromServerBinaryPath(serverBinaryPath: st
 async function prepareRelayRuntimePayloadForInstall(params: Readonly<{
     serverBinaryPath: string;
     serverBinaryName: string;
+    profile?: 'light' | 'full';
 }>): Promise<Readonly<{
     payloadRoot: string;
     cleanupPath: string | null;
@@ -556,6 +557,13 @@ async function prepareRelayRuntimePayloadForInstall(params: Readonly<{
     const payloadRoot = resolveRelayRuntimePayloadRootFromServerBinaryPath(params.serverBinaryPath);
     const serverBinaryIsNestedUnderBin = basename(dirname(params.serverBinaryPath)) === 'bin';
     if (serverBinaryIsNestedUnderBin) {
+        return {
+            payloadRoot,
+            cleanupPath: null,
+        };
+    }
+
+    if (params.profile === 'full') {
         return {
             payloadRoot,
             cleanupPath: null,
@@ -598,17 +606,82 @@ async function isRegularFile(path: string): Promise<boolean> {
     return await stat(path).then((info) => info.isFile()).catch(() => false);
 }
 
+function resolveFullRuntimeQueryEngineFileName(params: Readonly<{
+    platform: NodeJS.Platform;
+    arch: string;
+}>): string {
+    switch (`${params.platform}-${params.arch}`) {
+        case 'linux-x64': return 'libquery_engine-debian-openssl-3.0.x.so.node';
+        case 'linux-arm64': return 'libquery_engine-linux-arm64-openssl-3.0.x.so.node';
+        case 'darwin-x64': return 'libquery_engine-darwin.dylib.node';
+        case 'darwin-arm64': return 'libquery_engine-darwin-arm64.dylib.node';
+        case 'win32-x64': return 'query_engine-windows.dll.node';
+        default: throw new Error(`[relay-runtime] unsupported full runtime target: ${params.platform}-${params.arch}`);
+    }
+}
+
 async function validatePreparedRelayRuntimePayload(params: Readonly<{
     payloadRoot: string;
     platform: NodeJS.Platform;
     serverBinaryName: string;
+    arch?: string;
+    profile?: 'light' | 'full';
 }>): Promise<void> {
+    const profile = params.profile === 'full' ? 'full' : 'light';
     const binDir = join(params.payloadRoot, 'bin');
-    const serverBinaryPath = join(binDir, params.serverBinaryName);
+    const serverBinaryPath = profile === 'full'
+        ? join(params.payloadRoot, params.serverBinaryName)
+        : join(binDir, params.serverBinaryName);
     const missing: string[] = [];
     const serverBinary = await stat(serverBinaryPath).catch(() => null);
     if (!serverBinary?.isFile() || (params.platform !== 'win32' && (serverBinary.mode & 0o111) === 0)) {
-        missing.push(`executable bin/${params.serverBinaryName}`);
+        missing.push(`executable ${profile === 'full' ? '' : 'bin/'}${params.serverBinaryName}`);
+    }
+
+    if (profile === 'full') {
+        const executableSuffix = params.platform === 'win32' ? '.exe' : '';
+        const engineFileName = resolveFullRuntimeQueryEngineFileName({
+            platform: params.platform,
+            arch: String(params.arch ?? '').trim() || process.arch,
+        });
+        const requiredFiles = [
+            `happier-server-migrate${executableSuffix}`,
+            'prisma/schema.prisma',
+            'prisma/migrations/migration_lock.toml',
+            'prisma/mysql/schema.prisma',
+            'prisma/mysql/migrations/migration_lock.toml',
+            `runtime/prisma-migrate${executableSuffix}`,
+            `runtime/schema-engine${executableSuffix}`,
+            'runtime/prisma_schema_build_bg.wasm',
+            'node_modules/.prisma/client/index.js',
+            `node_modules/.prisma/client/${engineFileName}`,
+            'generated/mysql-client/index.js',
+            `generated/mysql-client/${engineFileName}`,
+            'ui-web/current/index.html',
+        ];
+        for (const relativePath of requiredFiles) {
+            if (!await isRegularFile(join(params.payloadRoot, relativePath))) missing.push(relativePath);
+        }
+        for (const migrationsDir of ['prisma/migrations', 'prisma/mysql/migrations']) {
+            const entries = await readdir(join(params.payloadRoot, migrationsDir), { withFileTypes: true }).catch(() => []);
+            if (!entries.some((entry) => entry.isDirectory())) missing.push(migrationsDir);
+        }
+        const migrationExecutable = await stat(join(params.payloadRoot, `happier-server-migrate${executableSuffix}`)).catch(() => null);
+        if (!migrationExecutable?.isFile() || (params.platform !== 'win32' && (migrationExecutable.mode & 0o111) === 0)) {
+            missing.push(`executable happier-server-migrate${executableSuffix}`);
+        }
+        const prismaPackagePath = join(params.payloadRoot, 'node_modules', '@prisma', 'client');
+        const prismaPackage = tryParseJsonObject(await readFile(join(prismaPackagePath, 'package.json'), 'utf8').catch(() => ''));
+        const prismaEntrypoint = typeof prismaPackage?.main === 'string' && prismaPackage.main.trim()
+            ? prismaPackage.main.trim()
+            : 'index.js';
+        if (prismaEntrypoint.includes('/') || prismaEntrypoint.includes('\\') || !await isRegularFile(join(prismaPackagePath, prismaEntrypoint))) {
+            missing.push('node_modules/@prisma/client usable entrypoint');
+        }
+        if (missing.length > 0) {
+            throw new Error(`[relay-runtime] incomplete full relay runtime payload: missing ${missing.join(', ')}`);
+        }
+        return;
     }
 
     const requiredFiles = [
@@ -655,18 +728,23 @@ async function validatePreparedRelayRuntimePayload(params: Readonly<{
 export async function assertRelayRuntimePayloadReadyForInstall(params: Readonly<{
     serverBinaryPath: string;
     platform?: NodeJS.Platform;
+    arch?: string;
+    profile?: 'light' | 'full';
 }>): Promise<void> {
     const platform = (String(params.platform ?? '').trim() || process.platform) as NodeJS.Platform;
     const serverBinaryName = platform === 'win32' ? 'happier-server.exe' : 'happier-server';
     const preparedPayload = await prepareRelayRuntimePayloadForInstall({
         serverBinaryPath: params.serverBinaryPath,
         serverBinaryName,
+        profile: params.profile,
     });
     try {
         await validatePreparedRelayRuntimePayload({
             payloadRoot: preparedPayload.payloadRoot,
             platform,
             serverBinaryName,
+            arch: params.arch,
+            profile: params.profile,
         });
     } finally {
         if (preparedPayload.cleanupPath) {
@@ -734,6 +812,7 @@ async function restoreRelayRuntimeInstallState(params: Readonly<{
     migrationsBackupDir: string | null;
     previousEnvText: string | null;
     previousStateText: string | null;
+    restoreEnv?: boolean;
 }>): Promise<void> {
     await clearNamedRootEntries({
         rootDir: params.payloadDir,
@@ -766,11 +845,13 @@ async function restoreRelayRuntimeInstallState(params: Readonly<{
             destDir: params.migrationsDir,
         });
     }
-    if (typeof params.previousEnvText === 'string') {
-        await mkdir(dirname(params.envPath), { recursive: true });
-        await writeFile(params.envPath, params.previousEnvText, 'utf8');
-    } else {
-        await rm(params.envPath, { force: true });
+    if (params.restoreEnv !== false) {
+        if (typeof params.previousEnvText === 'string') {
+            await mkdir(dirname(params.envPath), { recursive: true });
+            await writeFile(params.envPath, params.previousEnvText, 'utf8');
+        } else {
+            await rm(params.envPath, { force: true });
+        }
     }
     if (typeof params.previousStateText === 'string') {
         await mkdir(dirname(params.statePath), { recursive: true });
@@ -785,6 +866,8 @@ function buildRelayRuntimeServiceSpec(params: Readonly<{
     installRoot: string;
     serverBinaryPath: string;
     env: Record<string, string>;
+    environmentFiles?: readonly string[];
+    execStartPre?: readonly string[];
     stdoutPath: string;
     stderrPath: string;
 }>): ServiceSpec {
@@ -794,15 +877,104 @@ function buildRelayRuntimeServiceSpec(params: Readonly<{
         programArgs: [params.serverBinaryPath],
         workingDirectory: params.installRoot,
         env: params.env,
+        environmentFiles: params.environmentFiles,
+        execStartPre: params.execStartPre,
         stdoutPath: params.stdoutPath,
         stderrPath: params.stderrPath,
     };
+}
+
+function normalizeRelayRuntimeProfile(profile: 'light' | 'full' | undefined): 'light' | 'full' {
+    return profile === 'full' ? 'full' : 'light';
+}
+
+function isFullRelayServerEnv(text: string): boolean {
+    return /^\s*(HAPPIER_DB_PROVIDER|HAPPY_DB_PROVIDER)\s*=\s*(?:postgres|postgresql|mysql)\s*$/mu.test(text)
+        && /^\s*DATABASE_URL\s*=/mu.test(text);
+}
+
+async function readRequiredFullRelayServerEnv(path: string): Promise<string> {
+    const info = await stat(path).catch(() => null);
+    if (!info?.isFile() || (info.mode & 0o777) !== 0o600) {
+        throw new Error('[relay-runtime] full relay profile requires an existing owner-readable mode 0600 config/server.env; no files were changed');
+    }
+    return await readFile(path, 'utf8');
+}
+
+async function writeMode0600Atomically(path: string, text: string): Promise<void> {
+    await mkdir(dirname(path), { recursive: true });
+    const temporaryPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+    try {
+        await writeFile(temporaryPath, text, { encoding: 'utf8', mode: 0o600 });
+        await chmod(temporaryPath, 0o600);
+        await rename(temporaryPath, path);
+        await chmod(path, 0o600);
+    } catch (error) {
+        await rm(temporaryPath, { force: true }).catch(() => undefined);
+        throw error;
+    }
+}
+
+export type RelayRuntimeSystemdShowResult = Readonly<{ status: number; stdout: string; stderr: string }>;
+
+export type RelayRuntimeEffectiveDropInReader = (params: Readonly<{
+    unitName: string;
+    mode: 'system';
+}>) => RelayRuntimeSystemdShowResult;
+
+function parseEffectiveSystemdDropInPaths(stdout: string): readonly string[] {
+    return String(stdout ?? '')
+        .split(/\s+/u)
+        .map((value) => value.trim())
+        .filter((value) => isAbsolute(value) && value.endsWith('.conf'));
+}
+
+export async function preflightFullRelayRuntimeInstall(params: Readonly<{
+    platform: NodeJS.Platform;
+    backend: ServiceBackend;
+    configEnvPath: string;
+    serviceName: string;
+    env?: Readonly<Record<string, string>>;
+    showEffectiveDropIns: RelayRuntimeEffectiveDropInReader;
+}>): Promise<void> {
+    if (params.platform !== 'linux' || params.backend !== 'systemd-system') {
+        throw new Error('[relay-runtime] full relay profile requires Linux systemd system mode; no files were changed');
+    }
+    if (Object.keys(params.env ?? {}).length > 0) {
+        throw new Error('[relay-runtime] full relay profile does not accept environment overrides; no files were changed');
+    }
+    const fullServerEnv = await readRequiredFullRelayServerEnv(params.configEnvPath);
+    if (!isFullRelayServerEnv(fullServerEnv)) {
+        throw new Error('[relay-runtime] full relay profile requires a configured Postgres or MySQL server.env; no files were changed');
+    }
+    const showResult = params.showEffectiveDropIns({ unitName: params.serviceName, mode: 'system' });
+    if (showResult.status !== 0) {
+        throw new Error('[relay-runtime] unable to inspect effective systemd drop-ins for full relay profile; no files were changed');
+    }
+    for (const path of parseEffectiveSystemdDropInPaths(showResult.stdout)) {
+        const text = await readFile(path, 'utf8').catch(() => null);
+        if (text === null) {
+            throw new Error('[relay-runtime] unable to inspect effective systemd drop-ins for full relay profile; no files were changed');
+        }
+        let inService = false;
+        for (const line of text.split(/\r?\n/u)) {
+            const section = line.match(/^\s*\[([A-Za-z]+)\]\s*$/u);
+            if (section) {
+                inService = section[1]?.trim() === 'Service';
+                continue;
+            }
+            if (inService && /^\s*(ExecStart|ExecStartPre|WorkingDirectory|EnvironmentFile)\s*=/u.test(line)) {
+                throw new Error(`[relay-runtime] full relay profile refuses conflicting systemd drop-in ${basename(path)}; no files were changed`);
+            }
+        }
+    }
 }
 
 export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     serverBinaryPath: string;
     channel: 'stable' | 'preview' | 'publicdev';
     mode: 'user' | 'system';
+    profile?: 'light' | 'full';
     env?: Record<string, string>;
     platform?: NodeJS.Platform;
     homeDir?: string;
@@ -813,11 +985,13 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     legacyServicePriorState?: LegacyRelayRuntimePriorServiceState;
     runServiceCommands?: boolean;
     skipHealthCheck?: boolean;
+    showEffectiveDropIns?: RelayRuntimeEffectiveDropInReader;
 }>): Promise<Readonly<{ baseUrl: string; version: string | null }>> {
     const platform = (String(params.platform ?? '').trim() || process.platform) as NodeJS.Platform;
     const homeDir = String(params.homeDir ?? '').trim() || homedir();
     const arch = String(params.arch ?? '').trim() || process.arch;
     const mode = params.mode === 'system' ? 'system' : 'user';
+    const profile = normalizeRelayRuntimeProfile(params.profile);
 
     assertRootIfRequired({ platform, mode });
 
@@ -829,9 +1003,13 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     });
     const serviceName = String(params.serviceNameOverride ?? '').trim() || defaults.serviceName;
     const serverBinaryName = platform === 'win32' ? 'happier-server.exe' : 'happier-server';
-    const installServerBinaryPath = join(defaults.installRoot, 'bin', serverBinaryName);
+    const installServerBinaryPath = join(
+        defaults.installRoot,
+        ...(profile === 'full' ? [serverBinaryName] : ['bin', serverBinaryName]),
+    );
     const statePath = join(defaults.installRoot, 'self-host-state.json');
     const configEnvPath = join(defaults.configDir, 'server.env');
+    const runtimeEnvPath = join(defaults.configDir, 'runtime.env');
     const filesDir = join(defaults.dataDir, 'files');
     const dbDir = join(defaults.dataDir, 'pglite');
     const migrationsDir = join(defaults.dataDir, 'migrations', 'sqlite');
@@ -843,6 +1021,24 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
         platform,
         mode,
     });
+    if (profile === 'full') {
+        if (!params.showEffectiveDropIns) {
+            throw new Error('[relay-runtime] unable to inspect effective systemd drop-ins for full relay profile; no files were changed');
+        }
+        await preflightFullRelayRuntimeInstall({
+            platform,
+            backend,
+            configEnvPath,
+            serviceName,
+            env: params.env,
+            showEffectiveDropIns: params.showEffectiveDropIns,
+        });
+    } else if (existsSync(configEnvPath)) {
+        const existingConfig = await readFile(configEnvPath, 'utf8').catch(() => '');
+        if (isFullRelayServerEnv(existingConfig)) {
+            throw new Error('[relay-runtime] existing full relay configuration detected; rerun with --profile full. No files were changed.');
+        }
+    }
     const previousServiceSpec = buildRelayRuntimeServiceSpec({
         serviceName,
         installRoot: defaults.installRoot,
@@ -865,6 +1061,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     const preparedPayload = await prepareRelayRuntimePayloadForInstall({
         serverBinaryPath: params.serverBinaryPath,
         serverBinaryName,
+        profile,
     });
     const previousServiceDefinitionContents = previousServiceDefinitionExisted
         ? await readFile(previousServiceDefinition.path, 'utf8')
@@ -874,6 +1071,8 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
             payloadRoot: preparedPayload.payloadRoot,
             platform,
             serverBinaryName,
+            arch,
+            profile,
         });
     } catch (error) {
         if (preparedPayload.cleanupPath) {
@@ -887,6 +1086,9 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     let previousInstallState: Awaited<ReturnType<typeof backupRelayRuntimeInstallState>> | null = null;
     let candidateServiceActivationAttempted = false;
     let candidateServiceDefinitionPath: string | null = null;
+    let previousRuntimeEnvText: string | null = null;
+    let previousRuntimeEnvMode: number | null = null;
+    let runtimeEnvWritten = false;
 
     try {
         legacyRootMigration = await migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded({
@@ -902,8 +1104,10 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
         await mkdir(defaults.installRoot, { recursive: true });
         await mkdir(defaults.configDir, { recursive: true });
         await mkdir(defaults.dataDir, { recursive: true });
-        await mkdir(filesDir, { recursive: true });
-        await mkdir(dbDir, { recursive: true });
+        if (profile === 'light') {
+            await mkdir(filesDir, { recursive: true });
+            await mkdir(dbDir, { recursive: true });
+        }
         await mkdir(defaults.logDir, { recursive: true });
 
         const existingPayloadEntryNames = await listRelayRuntimeManagedRootEntries(defaults.installRoot);
@@ -946,8 +1150,8 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
 
         const payloadRoot = preparedPayload.payloadRoot;
         const migrationsSourceDir = join(payloadRoot, 'prisma', 'sqlite', 'migrations');
-        await mkdir(migrationsDir, { recursive: true });
-        if (existsSync(migrationsSourceDir)) {
+        if (profile === 'light' && existsSync(migrationsSourceDir)) {
+            await mkdir(migrationsDir, { recursive: true });
             await copyDirectoryContents({
                 sourceDir: migrationsSourceDir,
                 destDir: migrationsDir,
@@ -984,51 +1188,77 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
         // directly (tests, SSH installers, tooling) — the helper is cheap and
         // idempotent when params.env.PORT is already set.
         const existingEnvText = existsSync(configEnvPath) ? await readFile(configEnvPath, 'utf8').catch(() => '') : '';
-        const existingPortRaw = existingEnvText ? String((parseEnvText(existingEnvText).PORT ?? '')).trim() : '';
-        const overridePortRaw = String((params.env ?? {}).PORT ?? '').trim();
-        const configuredPortRaw = overridePortRaw || existingPortRaw;
-        const configuredPort = configuredPortRaw
-          ? (Number.isInteger(Number.parseInt(configuredPortRaw, 10)) ? Number.parseInt(configuredPortRaw, 10) : null)
-          : null;
-        const resolvedPort = await resolveNonCollidingRelayPort({
-          platform,
-          mode,
-          channel: params.channel,
-          homeDir,
-          defaultPort: defaults.serverPort,
-          configuredPort,
-        });
-
-        const baseEnvText = renderSelfHostServerEnvText({
-            port: resolvedPort,
-            host: defaults.serverHost,
-            dataDir: defaults.dataDir,
-            filesDir,
-            dbDir,
-            uiDir,
-            uiDeploymentId: uiDeployment?.deploymentId,
-            serverBinDir: dirname(installServerBinaryPath),
-            arch,
-            platform,
-        });
-        const envText = mergeSelfHostServerEnvText({
-            baseEnvText,
-            existingEnvText,
-            overrides: params.env,
-        });
-        await writeFile(configEnvPath, envText, 'utf8');
+        const envText = await (async () => {
+            if (profile === 'full') return existingEnvText;
+            const existingPortRaw = existingEnvText ? String((parseEnvText(existingEnvText).PORT ?? '')).trim() : '';
+            const overridePortRaw = String((params.env ?? {}).PORT ?? '').trim();
+            const configuredPortRaw = overridePortRaw || existingPortRaw;
+            const configuredPort = configuredPortRaw
+              ? (Number.isInteger(Number.parseInt(configuredPortRaw, 10)) ? Number.parseInt(configuredPortRaw, 10) : null)
+              : null;
+            const resolvedPort = await resolveNonCollidingRelayPort({
+              platform,
+              mode,
+              channel: params.channel,
+              homeDir,
+              defaultPort: defaults.serverPort,
+              configuredPort,
+            });
+            const baseEnvText = renderSelfHostServerEnvText({
+                port: resolvedPort,
+                host: defaults.serverHost,
+                dataDir: defaults.dataDir,
+                filesDir,
+                dbDir,
+                uiDir,
+                uiDeploymentId: uiDeployment?.deploymentId,
+                serverBinDir: dirname(installServerBinaryPath),
+                arch,
+                platform,
+            });
+            const nextEnvText = mergeSelfHostServerEnvText({
+                baseEnvText,
+                existingEnvText,
+                overrides: params.env,
+            });
+            await writeFile(configEnvPath, nextEnvText, 'utf8');
+            return nextEnvText;
+        })();
         const env = parseEnvText(envText);
 
         await rm(startupReceiptPath, { force: true });
+        if (profile === 'full') {
+            const priorRuntimeInfo = await stat(runtimeEnvPath).catch(() => null);
+            previousRuntimeEnvText = priorRuntimeInfo?.isFile()
+                ? await readFile(runtimeEnvPath, 'utf8').catch(() => null)
+                : null;
+            previousRuntimeEnvMode = priorRuntimeInfo?.isFile() ? priorRuntimeInfo.mode & 0o777 : null;
+            const runtimeVersion = typeof params.version === 'string' && params.version.trim()
+                ? params.version.trim().replace(/[\r\n]/gu, '')
+                : 'unknown';
+            const runtimeEnvText = [
+                `HAPPIER_RELAY_RUNTIME_VERSION=${runtimeVersion}`,
+                `HAPPIER_RELAY_RUNTIME_PATH=${defaults.installRoot}`,
+                `${SERVER_STARTUP_RECEIPT_PATH_ENV}=${startupReceiptPath}`,
+                `${SERVER_STARTUP_RECEIPT_NONCE_ENV}=${startupReceiptNonce}`,
+                '',
+            ].join('\n');
+            await writeMode0600Atomically(runtimeEnvPath, runtimeEnvText);
+            runtimeEnvWritten = true;
+        }
         const serviceSpec = buildRelayRuntimeServiceSpec({
             serviceName,
             installRoot: defaults.installRoot,
             serverBinaryPath: installServerBinaryPath,
-            env: {
+            env: profile === 'full' ? {} : {
                 ...env,
                 [SERVER_STARTUP_RECEIPT_PATH_ENV]: startupReceiptPath,
                 [SERVER_STARTUP_RECEIPT_NONCE_ENV]: startupReceiptNonce,
             },
+            ...(profile === 'full' ? {
+                environmentFiles: [configEnvPath, runtimeEnvPath],
+                execStartPre: [join(defaults.installRoot, platform === 'win32' ? 'happier-server-migrate.exe' : 'happier-server-migrate')],
+            } : {}),
             stdoutPath,
             stderrPath,
         });
@@ -1091,6 +1321,16 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
         };
     } catch (error) {
         await rm(startupReceiptPath, { force: true }).catch(() => undefined);
+        if (runtimeEnvWritten) {
+            if (typeof previousRuntimeEnvText === 'string') {
+                await writeMode0600Atomically(runtimeEnvPath, previousRuntimeEnvText);
+                if (previousRuntimeEnvMode !== null) {
+                    await chmod(runtimeEnvPath, previousRuntimeEnvMode);
+                }
+            } else {
+                await rm(runtimeEnvPath, { force: true }).catch(() => undefined);
+            }
+        }
         if (candidateServiceActivationAttempted) {
             const candidateStopSpec = buildRelayRuntimeServiceSpec({
                 serviceName,
@@ -1127,6 +1367,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
                 migrationsBackupDir: previousInstallState.migrationsBackupDir,
                 previousEnvText: previousInstallState.previousEnvText,
                 previousStateText: previousInstallState.previousStateText,
+                restoreEnv: profile !== 'full',
             });
 
             const hasPreviousServerPayload = previousInstallState.payloadBackupDir !== null

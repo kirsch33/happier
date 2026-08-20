@@ -77,6 +77,7 @@ describe('RelayHostEngine remote installation ownership', () => {
       target: { kind: 'ssh', ssh: { target: 'dev@example.test', auth: 'agent' } },
       channel: 'preview',
       mode: 'system',
+      profile: 'full',
       selfHostRelayBinaryOverride: '/tmp/local/happier-server',
     });
 
@@ -86,6 +87,96 @@ describe('RelayHostEngine remote installation ownership', () => {
     ]);
     expect(installCommand).toContain(`--server-binary "$HOME"/'.happier/happier-server/preview/current/bin/happier-server'`);
     expect(installCommand).toContain('--mode system');
+    expect(installCommand).toContain('--profile full');
+  });
+
+  it('fails closed for the full profile before remote installation on a non-Linux systemd target', async () => {
+    const installedComponents: string[] = [];
+    const engine = createRelayHostEngine({
+      resolveRemoteReleaseTarget: async () => ({ os: 'darwin', arch: 'arm64' }),
+      copyLocalDirectoryToRemote: async () => {},
+      installRemoteComponent: async ({ componentId }) => {
+        installedComponents.push(componentId);
+        return { binaryPath: '$HOME/.happier/cli/current/happier', versionId: 'stable-1' };
+      },
+      runRemoteText: async () => ({ status: 0, stdout: '', stderr: '' }),
+    });
+
+    await expect(engine.installOrUpdate({
+      target: { kind: 'ssh', ssh: { target: 'dev@example.test', auth: 'agent' } },
+      channel: 'stable',
+      mode: 'system',
+      profile: 'full',
+    })).rejects.toThrow(/full relay profile requires a Linux systemd system install/i);
+    expect(installedComponents).toEqual([]);
+  });
+
+  it('runs the remote full-profile configuration preflight before installing or uploading components', async () => {
+    const installedComponents: string[] = [];
+    const commands: string[] = [];
+    const engine = createRelayHostEngine({
+      resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+      copyLocalDirectoryToRemote: async () => {},
+      installRemoteComponent: async ({ componentId }) => {
+        installedComponents.push(componentId);
+        return { binaryPath: '$HOME/.happier/cli/current/happier', versionId: 'stable-1' };
+      },
+      runRemoteText: async ({ remoteCommand }) => {
+        commands.push(remoteCommand);
+        return { status: 1, stdout: '', stderr: 'preflight failed' };
+      },
+    });
+
+    await expect(engine.installOrUpdate({
+      target: { kind: 'ssh', ssh: { target: 'dev@example.test', auth: 'agent' } },
+      channel: 'stable',
+      mode: 'system',
+      profile: 'full',
+    })).rejects.toThrow(/remote full relay preflight failed/i);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain('server.env');
+    expect(commands[0]).toContain('DropInPaths');
+    expect(installedComponents).toEqual([]);
+  });
+
+  it('accepts an empty effective DropInPaths result for a valid full-profile preflight', async () => {
+    const installedComponents: string[] = [];
+    const commands: string[] = [];
+    const engine = createRelayHostEngine({
+      resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+      copyLocalDirectoryToRemote: async () => {},
+      installRemoteComponent: async ({ componentId }) => {
+        installedComponents.push(componentId);
+        return { binaryPath: '$HOME/.happier/cli/current/happier', versionId: 'stable-1' };
+      },
+      runRemoteText: async ({ remoteCommand }) => {
+        commands.push(remoteCommand);
+        if (remoteCommand.includes('DropInPaths')) {
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        return {
+          status: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            kind: 'relay_host_install',
+            data: { relayUrl: 'http://127.0.0.1:3005', mode: 'system' },
+          })}\n`,
+          stderr: '',
+        };
+      },
+    });
+
+    await expect(engine.installOrUpdate({
+      target: { kind: 'ssh', ssh: { target: 'dev@example.test', auth: 'agent' } },
+      channel: 'stable',
+      mode: 'system',
+      profile: 'full',
+    })).resolves.toEqual({ relayUrl: 'http://127.0.0.1:3005', mode: 'system' });
+
+    expect(installedComponents).toEqual(['happier-cli']);
+    expect(commands[0]).toContain('LoadState');
+    expect(commands[0]).not.toContain('|| true');
   });
 
   it('surfaces the canonical remote installer error instead of interpreting partial output', async () => {
