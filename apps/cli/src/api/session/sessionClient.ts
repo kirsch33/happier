@@ -1540,7 +1540,8 @@ export class ApiSessionClient extends EventEmitter {
         if (this.acceptedCanonicalPendingDeliveryResolutionLocalIdsInFlight.has(localId)) return;
         this.acceptedCanonicalPendingDeliveryResolutionLocalIdsInFlight.add(localId);
         try {
-            for (let attempt = 0; attempt < 2; attempt += 1) {
+            let responseLossRetryUsed = false;
+            while (true) {
                 if (
                     !this.isAcceptedCanonicalPendingDeliveryOperationCurrent(authority)
                     || !this.canonicalPendingDeliveryByLocalId.has(localId)
@@ -1597,7 +1598,8 @@ export class ApiSessionClient extends EventEmitter {
                         && 'retryable' in error
                         && (error as { retryable?: unknown }).retryable === true,
                     );
-                    if ((!retryDirective && !isResponseLoss) || attempt > 0) return;
+                    if (!retryDirective && (!isResponseLoss || responseLossRetryUsed)) return;
+                    if (isResponseLoss) responseLossRetryUsed = true;
                     const retryAfterMs = retryDirective
                         ? Math.min(60_000, Math.max(250, retryDirective.retryAfterMs))
                         : 1_000;

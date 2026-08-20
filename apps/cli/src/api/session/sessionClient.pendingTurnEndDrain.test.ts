@@ -2089,7 +2089,7 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     expect(hasProviderInputAcceptance(client, 'new-server-local')).toBe(true);
   });
 
-  it('retries only the exact accepted settlement at typed 503 delay without changing socket health', async () => {
+  it('keeps retrying only the exact accepted settlement at typed 503 delays without changing socket health', async () => {
     const deliveryState = { mode: 'provider' as const, unresolved: true };
     const client = await createClient({
       latestTurnStatus: 'completed',
@@ -2103,6 +2103,11 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
         'transaction-unavailable',
         1_250,
         'req-accepted-busy',
+      ))
+      .mockRejectedValueOnce(new PendingQueueAcceptedSettlementError(
+        'transaction-unavailable',
+        2_000,
+        'req-accepted-still-busy',
       ))
       .mockResolvedValueOnce({
         didResolve: true,
@@ -2191,6 +2196,24 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     expect(sessionSocketStub?.connect).not.toHaveBeenCalled();
     expect(sessionSocketStub?.disconnect).not.toHaveBeenCalled();
     expect(sessionSocketStub?.close).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(resolveAcceptedPendingDeliveryMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(resolveAcceptedPendingDeliveryMock).toHaveBeenCalledTimes(3);
+    expect(resolveAcceptedPendingDeliveryMock).toHaveBeenLastCalledWith({
+      socket: sessionSocketStub,
+      sessionId: 's1',
+      localId: 'watermark-held-local',
+    });
+    expect(materializeNextMock).toHaveBeenCalledTimes(1);
+    expect(catchUpMock).not.toHaveBeenCalled();
+    expect(fetchSnapshotMock).not.toHaveBeenCalled();
+    expect(listProviderDeliveryLocalIdsMock).not.toHaveBeenCalled();
+    expect(listDeliveryStatusesMock).not.toHaveBeenCalled();
+    expect(enqueueSessionTurnMock).not.toHaveBeenCalled();
+    expect(supervisorReportProbeResultMock).not.toHaveBeenCalled();
 
   });
 

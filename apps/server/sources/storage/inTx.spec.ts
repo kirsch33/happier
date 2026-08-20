@@ -147,6 +147,26 @@ describe("inTx", () => {
         expect(delayMock).toHaveBeenNthCalledWith(4, 13);
     });
 
+    it("exhausts configured P2034 retries and rethrows the original Prisma error", async () => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: "postgres",
+            HAPPIER_DB_TX_MAX_RETRIES: "2",
+            HAPPIER_DB_TX_RETRY_BASE_DELAY_MS: "7",
+            HAPPIER_DB_TX_RETRY_MAX_DELAY_MS: "13",
+            HAPPIER_DB_TX_TOTAL_RETRY_BUDGET_MS: "60000",
+        });
+        const retryError = Object.assign(new Error("persistent serialization conflict"), { code: "P2034" });
+        transaction.mockRejectedValue(retryError);
+
+        const { inTx } = await import("./inTx");
+        await expect(inTx(async () => 791)).rejects.toBe(retryError);
+
+        expect(transaction).toHaveBeenCalledTimes(3);
+        expect(delayMock).toHaveBeenNthCalledWith(1, 7);
+        expect(delayMock).toHaveBeenNthCalledWith(2, 13);
+    });
+
     it.each(["postgres", "mysql"])("retries an acquisition-shaped P2028 before the transaction callback starts on %s", async (provider) => {
         restoreEnv(envSnapshot);
         applyEnvValues({

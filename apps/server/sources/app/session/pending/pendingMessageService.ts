@@ -107,6 +107,7 @@ function reportPendingOperationError(
     params: PendingOperationErrorContext,
     message:
         | "pending delivery transaction acquisition failed"
+        | "pending delivery transaction retry budget exhausted"
         | "pending delivery operation failed",
 ): void {
     warn(
@@ -122,6 +123,27 @@ function reportPendingOperationError(
         message,
         params.error,
     );
+}
+
+function readPendingTransactionUnavailable(error: unknown): Readonly<{
+    cause: unknown;
+    logMessage:
+        | "pending delivery transaction acquisition failed"
+        | "pending delivery transaction retry budget exhausted";
+}> | null {
+    if (isTransactionAcquisitionUnavailableError(error)) {
+        return {
+            cause: error.cause,
+            logMessage: "pending delivery transaction acquisition failed",
+        };
+    }
+    if (isPrismaErrorCode(error, "P2034")) {
+        return {
+            cause: error,
+            logMessage: "pending delivery transaction retry budget exhausted",
+        };
+    }
+    return null;
 }
 
 async function retryPendingDeliveryResolutionRace<T>(operation: () => Promise<T>): Promise<T> {
@@ -873,15 +895,15 @@ export async function deletePendingMessage(params: {
             return { ok: true, pendingVersion, pendingCount, pendingBlockedCount, participantCursors, badgeAttentionChanged };
         });
     } catch (error) {
-        if (isTransactionAcquisitionUnavailableError(error)) {
-            const underlyingError = error.cause;
+        const unavailable = readPendingTransactionUnavailable(error);
+        if (unavailable) {
             reportPendingOperationError({
                 operation: "delete",
                 sessionId,
                 localId,
                 diagnosticCorrelationId: params.diagnosticCorrelationId,
-                error: underlyingError,
-            }, "pending delivery transaction acquisition failed");
+                error: unavailable.cause,
+            }, unavailable.logMessage);
             return {
                 ok: false,
                 error: "transaction-unavailable",
@@ -1253,15 +1275,15 @@ export async function resolveAcceptedPendingDelivery(params: {
             };
         }));
     } catch (error) {
-        if (isTransactionAcquisitionUnavailableError(error)) {
-            const underlyingError = error.cause;
+        const unavailable = readPendingTransactionUnavailable(error);
+        if (unavailable) {
             reportPendingOperationError({
                 operation: "provider-acceptance",
                 sessionId,
                 localId,
                 diagnosticCorrelationId: params.diagnosticCorrelationId,
-                error: underlyingError,
-            }, "pending delivery transaction acquisition failed");
+                error: unavailable.cause,
+            }, unavailable.logMessage);
             return {
                 ok: false,
                 error: "transaction-unavailable",

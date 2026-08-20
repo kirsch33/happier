@@ -596,6 +596,56 @@ describe("pendingMessageService", () => {
         );
     });
 
+    it.each([
+        {
+            operation: "delete" as const,
+            invoke: () => deletePendingMessage({
+                actorUserId: "u1",
+                sessionId: "s1",
+                localId: "l1",
+                diagnosticCorrelationId: "req-delete-conflict",
+            }),
+            correlationId: "req-delete-conflict",
+        },
+        {
+            operation: "provider-acceptance" as const,
+            invoke: () => resolveAcceptedPendingDelivery({
+                actorUserId: "u1",
+                sessionId: "s1",
+                localId: "l1",
+                diagnosticCorrelationId: "req-accept-conflict",
+            }),
+            correlationId: "req-accept-conflict",
+        },
+    ])("returns a retryable response when $operation exhausts a serializable transaction conflict", async ({ operation, invoke, correlationId }) => {
+        const error = Object.assign(
+            new Error("Transaction failed due to a write conflict or a deadlock"),
+            { code: "P2034" },
+        );
+        inTxMock.mockRejectedValue(error);
+
+        await expect(invoke()).resolves.toEqual({
+            ok: false,
+            error: "transaction-unavailable",
+            retryAfterMs: 1_000,
+            correlationId,
+        });
+        expect(inTxMock).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                module: "session-pending-service",
+                operation,
+                sessionId: "s1",
+                localId: "l1",
+                correlationId,
+                prismaCode: "P2034",
+                err: error,
+            }),
+            "pending delivery transaction retry budget exhausted",
+            error,
+        );
+    });
+
     it("does not reset the canonical SQLite retry budget after acquisition P2028", async () => {
         transactionProviderEnv.set("HAPPIER_DB_PROVIDER", "sqlite");
         const error = Object.assign(
