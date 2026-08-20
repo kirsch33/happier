@@ -476,7 +476,7 @@ describe('installProviderCli vendor_recipe execution gating', () => {
           ...process.env,
           HAPPIER_HOME_DIR: homeDir,
           HOME: homeDir,
-          PATH: `${binDir}:/bin`,
+          PATH: binDir,
         },
         skipIfInstalled: false,
         allowVendorRecipeExecution: true,

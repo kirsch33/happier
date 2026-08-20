@@ -1,4 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
+
+function addMockLaunchctlToPath(): () => void {
+  const root = mkdtempSync(join(tmpdir(), 'happier-cli-common-launchctl-'));
+  const commandPath = join(root, 'launchctl');
+  const previousPath = process.env.PATH;
+  writeFileSync(commandPath, '#!/bin/sh\nexit 0\n', 'utf8');
+  chmodSync(commandPath, 0o755);
+  process.env.PATH = [root, previousPath].filter((value): value is string => typeof value === 'string').join(delimiter);
+
+  return () => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(root, { recursive: true, force: true });
+  };
+}
 
 describe('RelayHostEngine (local uninstall cleanup)', () => {
   it('retries removing the install root when the first removal fails', async () => {
@@ -7,6 +25,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
 
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     (process as unknown as { getuid?: (() => number) | undefined }).getuid = () => 501;
+    const removeMockLaunchctl = addMockLaunchctlToPath();
 
     const rmCalls: Array<{ path: string; recursive?: boolean; force?: boolean }> = [];
     const installRoot = '/tmp/happy-home/.happier/self-host-dev';
@@ -78,6 +97,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
       expect(installRootDeletes.length).toBeGreaterThanOrEqual(2);
       expect(installRootDeletes.every((call) => call.force === true && call.recursive === true)).toBe(true);
     } finally {
+      removeMockLaunchctl();
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       if (originalGetuid) (process as unknown as { getuid?: (() => number) | undefined }).getuid = originalGetuid;
       else delete (process as unknown as { getuid?: (() => number) | undefined }).getuid;
@@ -92,6 +112,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
 
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     (process as unknown as { getuid?: (() => number) | undefined }).getuid = () => 501;
+    const removeMockLaunchctl = addMockLaunchctlToPath();
 
     const rmCalls: Array<{ path: string; recursive?: boolean; force?: boolean }> = [];
     const installRoot = '/tmp/happy-home/.happier/self-host-dev';
@@ -150,6 +171,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
 
       expect(rmCalls.some((call) => call.path === statePath && call.force === true)).toBe(true);
     } finally {
+      removeMockLaunchctl();
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       if (originalGetuid) (process as unknown as { getuid?: (() => number) | undefined }).getuid = originalGetuid;
       else delete (process as unknown as { getuid?: (() => number) | undefined }).getuid;
@@ -164,6 +186,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
 
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     (process as unknown as { getuid?: (() => number) | undefined }).getuid = () => 501;
+    const removeMockLaunchctl = addMockLaunchctlToPath();
 
     const invoked: string[] = [];
     const installRoot = '/tmp/happy-home/.happier/self-host-preview';
@@ -248,6 +271,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
       expect(invoked).toContain('launchctl disable gui/501/happier-server');
       expect(invoked).not.toContain('launchctl bootout gui/501/happier-server-preview');
     } finally {
+      removeMockLaunchctl();
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       if (originalGetuid) (process as unknown as { getuid?: (() => number) | undefined }).getuid = originalGetuid;
       else delete (process as unknown as { getuid?: (() => number) | undefined }).getuid;

@@ -1,5 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
+
+function addMockLaunchctlToPath(): () => void {
+  const root = mkdtempSync(join(tmpdir(), 'happier-cli-common-launchctl-'));
+  const commandPath = join(root, 'launchctl');
+  const previousPath = process.env.PATH;
+  writeFileSync(commandPath, '#!/bin/sh\nexit 0\n', 'utf8');
+  chmodSync(commandPath, 0o755);
+  process.env.PATH = [root, previousPath].filter((value): value is string => typeof value === 'string').join(delimiter);
+
+  return () => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(root, { recursive: true, force: true });
+  };
+}
 
 describe('RelayHostEngine (local legacy service name compatibility)', () => {
   it('falls back to the legacy unsuffixed systemd unit when the channel-suffixed unit is missing', async () => {
@@ -246,6 +264,7 @@ describe('RelayHostEngine (local legacy service name compatibility)', () => {
   it('falls back to the legacy unsuffixed launchd label when the channel-suffixed label is missing', async () => {
     const originalPlatform = process.platform;
     const originalFetch = globalThis.fetch;
+    const removeMockLaunchctl = addMockLaunchctlToPath();
 
     Object.defineProperty(process, 'platform', { value: 'darwin' });
 
@@ -358,6 +377,7 @@ describe('RelayHostEngine (local legacy service name compatibility)', () => {
       expect(status.service).toEqual({ enabled: true, active: true });
       expect(status.healthy).toBe(true);
     } finally {
+      removeMockLaunchctl();
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       globalThis.fetch = originalFetch;
       vi.resetModules();
@@ -368,8 +388,11 @@ describe('RelayHostEngine (local legacy service name compatibility)', () => {
   it('controls the legacy unsuffixed launchd label when the channel-suffixed label is missing', async () => {
     const originalPlatform = process.platform;
     const originalFetch = globalThis.fetch;
+    const originalGetuid = (process as unknown as { getuid?: (() => number) | undefined }).getuid;
+    const removeMockLaunchctl = addMockLaunchctlToPath();
 
     Object.defineProperty(process, 'platform', { value: 'darwin' });
+    (process as unknown as { getuid?: (() => number) | undefined }).getuid = () => 501;
 
     try {
       globalThis.fetch = vi.fn(async () => ({
@@ -485,7 +508,10 @@ describe('RelayHostEngine (local legacy service name compatibility)', () => {
         ),
       ).toBe(false);
     } finally {
+      removeMockLaunchctl();
       Object.defineProperty(process, 'platform', { value: originalPlatform });
+      if (originalGetuid) (process as unknown as { getuid?: (() => number) | undefined }).getuid = originalGetuid;
+      else delete (process as unknown as { getuid?: (() => number) | undefined }).getuid;
       globalThis.fetch = originalFetch;
       vi.resetModules();
       vi.clearAllMocks();
