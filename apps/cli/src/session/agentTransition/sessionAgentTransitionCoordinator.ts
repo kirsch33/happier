@@ -495,7 +495,12 @@ export async function runSessionAgentTransition(params: Readonly<{
   if (!hasCanonicalHostedTranscript(metadata)) return effects.rejected('unsupported_operation');
   // Same owner the inspection asks, so a Session can never be reported
   // switchable here and then stopped by a daemon that does not host it.
-  if (!sessionIsHostedHere({ currentMachineId: params.currentMachineId, rawSession, metadata })) {
+  if (!await sessionIsHostedHere({
+    currentMachineId: params.currentMachineId,
+    rawSession,
+    metadata,
+    credentials: params.credentials,
+  })) {
     return effects.rejected('unsupported_operation');
   }
 

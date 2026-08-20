@@ -372,6 +372,7 @@ describe('runSessionAgentTransition', () => {
       });
 
       expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(mocks.fetchAccountMachineReplacements).toHaveBeenCalledWith({ credentials });
     });
 
     // Widening to successors must not turn the guard into a no-op.
