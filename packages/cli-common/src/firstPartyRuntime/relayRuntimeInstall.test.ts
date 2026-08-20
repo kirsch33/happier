@@ -1,4 +1,4 @@
-import { access, lstat, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -123,6 +123,49 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
       await expect(readFileText(join(defaults.dataDir, 'session-marker.txt'))).resolves.toBe('session-before-update\n');
       await expect(readFileText(join(defaults.logDir, 'server.out.log'))).resolves.toBe('existing-log\n');
     } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not enumerate persistent full-server data when updating the relay runtime', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-'));
+    const defaults = resolveRelayRuntimeDefaults({
+      platform: 'linux',
+      mode: 'user',
+      channel: 'preview',
+      homeDir,
+    });
+    const unreadablePgDataDir = join(defaults.installRoot, 'full-server', 'infra', 'pgdata');
+    const markerPath = join(unreadablePgDataDir, 'postgres.marker');
+    try {
+      const payloadRoot = join(homeDir, 'payload');
+      const migrationsSourceDir = join(payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init');
+      await mkdir(migrationsSourceDir, { recursive: true });
+      await writeFile(join(migrationsSourceDir, 'migration.sql'), '-- init\n', 'utf8');
+
+      const serverBinaryPath = join(payloadRoot, 'happier-server');
+      await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+      await mkdir(unreadablePgDataDir, { recursive: true });
+      await writeFile(markerPath, 'postgres-before-update\n', 'utf8');
+      await chmod(unreadablePgDataDir, 0o000);
+
+      await expect(installOrUpdateRelayRuntimeLocal({
+        serverBinaryPath,
+        channel: 'preview',
+        mode: 'user',
+        platform: 'linux',
+        arch: 'arm64',
+        homeDir,
+        runServiceCommands: false,
+        skipHealthCheck: true,
+      })).resolves.toMatchObject({
+        baseUrl: 'http://127.0.0.1:3005',
+      });
+
+      await chmod(unreadablePgDataDir, 0o700);
+      await expect(readFileText(markerPath)).resolves.toBe('postgres-before-update\n');
+    } finally {
+      await chmod(unreadablePgDataDir, 0o700).catch(() => undefined);
       await rm(homeDir, { recursive: true, force: true });
     }
   });
