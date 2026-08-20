@@ -1,9 +1,32 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
+
+async function makeRunnableRelayPayload(params: Readonly<{
+    payloadRoot: string;
+    serverBinaryPath: string;
+}>): Promise<void> {
+    const runtimeRoot = dirname(params.serverBinaryPath) === params.payloadRoot
+        ? params.payloadRoot
+        : dirname(params.serverBinaryPath);
+    await chmod(params.serverBinaryPath, 0o755);
+    await mkdir(join(runtimeRoot, 'node_modules', '.prisma', 'client'), { recursive: true });
+    await mkdir(join(runtimeRoot, 'node_modules', '@prisma', 'client'), { recursive: true });
+    await mkdir(join(runtimeRoot, 'generated', 'sqlite-client'), { recursive: true });
+    await mkdir(join(runtimeRoot, 'generated', 'mysql-client'), { recursive: true });
+    await mkdir(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init'), { recursive: true });
+    await mkdir(join(params.payloadRoot, 'ui-web', 'current'), { recursive: true });
+    await writeFile(join(runtimeRoot, 'node_modules', '.prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'node_modules', '@prisma', 'client', 'package.json'), '{"main":"index.js"}\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'node_modules', '@prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'generated', 'sqlite-client', 'index.js'), 'export {};\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'generated', 'mysql-client', 'index.js'), 'export {};\n', 'utf8');
+    await writeFile(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
+    await writeFile(join(params.payloadRoot, 'ui-web', 'current', 'index.html'), '<html></html>\n', { encoding: 'utf8', flag: 'a' });
+}
 
 const events = vi.hoisted(() => [] as string[]);
 
@@ -122,6 +145,7 @@ describe('installOrUpdateRelayRuntimeLocal legacy root migration', () => {
             await writeFile(join(migrationsSourceDir, 'migration.sql'), '-- init\n', 'utf8');
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { installOrUpdateRelayRuntimeLocal } = await import('./relayRuntimeInstall.js');
             await installOrUpdateRelayRuntimeLocal({
@@ -177,6 +201,7 @@ describe('installOrUpdateRelayRuntimeLocal legacy root migration', () => {
             await writeFile(join(migrationsSourceDir, 'migration.sql'), '-- init\n', 'utf8');
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { installOrUpdateRelayRuntimeLocal } = await import('./relayRuntimeInstall.js');
             await installOrUpdateRelayRuntimeLocal({

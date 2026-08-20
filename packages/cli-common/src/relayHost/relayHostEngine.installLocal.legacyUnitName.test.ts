@@ -1,10 +1,96 @@
 import { existsSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+async function makeRunnableRelayPayload(params: Readonly<{
+  payloadRoot: string;
+  serverBinaryPath: string;
+}>): Promise<void> {
+  await chmod(params.serverBinaryPath, 0o755);
+  await mkdir(join(params.payloadRoot, 'node_modules', '.prisma', 'client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'node_modules', '@prisma', 'client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'generated', 'sqlite-client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'generated', 'mysql-client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'ui-web', 'current'), { recursive: true });
+  await writeFile(join(params.payloadRoot, 'node_modules', '.prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'node_modules', '@prisma', 'client', 'package.json'), '{"main":"index.js"}\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'node_modules', '@prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'generated', 'sqlite-client', 'index.js'), 'export {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'generated', 'mysql-client', 'index.js'), 'export {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'ui-web', 'current', 'index.html'), '<html></html>\n', 'utf8');
+}
+
 describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
+  it('rejects an incomplete candidate before mutating an owned legacy unit or installed state', async () => {
+    const originalPlatform = process.platform;
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-relay-host-incomplete-legacy-unit-'));
+    try {
+      const payloadRoot = join(homeDir, 'payload');
+      const candidateBinDir = join(payloadRoot, 'bin');
+      const serverBinaryPath = join(candidateBinDir, 'happier-server');
+      const installRoot = join(homeDir, '.happier', 'self-host-preview');
+      const configDir = join(homeDir, '.happier', 'config-preview');
+      const unitPath = join(homeDir, '.config', 'systemd', 'user', 'happier-server.service');
+      const legacyDefinition = '[Service]\nWorkingDirectory=' + installRoot + '\nExecStart=' + installRoot + '/bin/happier-server\nEnvironment=LEGACY_ONLY=prior\n';
+      const serviceCommands: string[] = [];
+
+      await mkdir(candidateBinDir, { recursive: true });
+      await mkdir(join(installRoot, 'data'), { recursive: true });
+      await mkdir(configDir, { recursive: true });
+      await mkdir(join(unitPath, '..'), { recursive: true });
+      await writeFile(serverBinaryPath, '#!/bin/sh\necho incomplete\n', 'utf8');
+      await writeFile(join(installRoot, 'payload-marker.txt'), 'prior-payload\n', 'utf8');
+      await writeFile(join(installRoot, 'self-host-state.json'), '{"version":"prior"}\n', 'utf8');
+      await writeFile(join(configDir, 'server.env'), 'PORT=4010\nLEGACY_ONLY=prior\n', 'utf8');
+      await writeFile(unitPath, legacyDefinition, 'utf8');
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      vi.doMock('node:os', async () => {
+        const actual = await vi.importActual<typeof import('node:os')>('node:os');
+        return { ...actual, homedir: () => homeDir };
+      });
+      vi.doMock('node:child_process', async () => {
+        const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+        return {
+          ...actual,
+          spawnSync: (command: string, args?: readonly string[]) => {
+            serviceCommands.push(command + ' ' + (args ?? []).join(' '));
+            return { status: 0, stdout: '', stderr: '' };
+          },
+        };
+      });
+
+      const { createRelayHostEngine } = await import('./relayHostEngine.js');
+      const engine = createRelayHostEngine({
+        resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+        runRemoteText: async () => ({ status: 0, stdout: '', stderr: '' }),
+        copyLocalDirectoryToRemote: async () => {},
+        installRemoteComponent: async () => ({ binaryPath: '$HOME/.happier/happier-server/current/happier-server', versionId: 'preview-1' }),
+      });
+
+      await expect(engine.installOrUpdate({
+        target: { kind: 'local' },
+        mode: 'user',
+        channel: 'preview',
+        selfHostRelayBinaryOverride: serverBinaryPath,
+      })).rejects.toThrow(/incomplete relay runtime payload/i);
+
+      expect(serviceCommands.filter((command) => /disable|daemon-reload|unload|remove|\/End|\/Delete/.test(command))).toEqual([]);
+      await expect(readFile(unitPath, 'utf8')).resolves.toBe(legacyDefinition);
+      await expect(readFile(join(installRoot, 'payload-marker.txt'), 'utf8')).resolves.toBe('prior-payload\n');
+      await expect(readFile(join(installRoot, 'self-host-state.json'), 'utf8')).resolves.toBe('{"version":"prior"}\n');
+      await expect(readFile(join(configDir, 'server.env'), 'utf8')).resolves.toBe('PORT=4010\nLEGACY_ONLY=prior\n');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      vi.resetModules();
+      vi.clearAllMocks();
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it('migrates the legacy unsuffixed unit to the suffixed unit when the suffixed unit is missing', async () => {
     const originalPlatform = process.platform;
 
@@ -16,6 +102,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
 
     const serverBinaryPath = join(payloadRoot, 'happier-server');
     await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+    await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
     Object.defineProperty(process, 'platform', { value: 'linux' });
 
@@ -108,6 +195,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
 
     const serverBinaryPath = join(payloadRoot, 'happier-server');
     await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+    await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
     Object.defineProperty(process, 'platform', { value: 'linux' });
 
@@ -205,6 +293,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
 
     const serverBinaryPath = join(payloadRoot, 'happier-server');
     await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+    await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
     Object.defineProperty(process, 'platform', { value: 'darwin' });
 
@@ -296,6 +385,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
 
     const serverBinaryPath = join(payloadRoot, 'happier-server.exe');
     await writeFile(serverBinaryPath, 'stub exe\n', 'utf8');
+    await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
     Object.defineProperty(process, 'platform', { value: 'win32' });
 
@@ -393,6 +483,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
 
     const serverBinaryPath = join(payloadRoot, 'happier-server');
     await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+    await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
     Object.defineProperty(process, 'platform', { value: 'linux' });
 
@@ -491,6 +582,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
 
     const serverBinaryPath = join(payloadRoot, 'happier-server');
     await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+    await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
     Object.defineProperty(process, 'platform', { value: 'linux' });
 

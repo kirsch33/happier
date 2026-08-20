@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { createServer as createPortReservationServer } from 'node:net';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +12,26 @@ import { resolveRelayRuntimeDefaults } from '../firstPartyRuntime/relayRuntime.j
 async function withTemporaryHome(run: (homeDir: string) => Promise<void>): Promise<void> {
   const homeDir = await mkdtemp(join(tmpdir(), 'relay-host-engine-local-health-'));
   await run(homeDir);
+}
+
+async function makeRunnableRelayPayload(params: Readonly<{
+  payloadRoot: string;
+  serverBinaryPath: string;
+}>): Promise<void> {
+  await chmod(params.serverBinaryPath, 0o755);
+  await mkdir(join(params.payloadRoot, 'node_modules', '.prisma', 'client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'node_modules', '@prisma', 'client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'generated', 'sqlite-client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'generated', 'mysql-client'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init'), { recursive: true });
+  await mkdir(join(params.payloadRoot, 'ui-web', 'current'), { recursive: true });
+  await writeFile(join(params.payloadRoot, 'node_modules', '.prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'node_modules', '@prisma', 'client', 'package.json'), '{"main":"index.js"}\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'node_modules', '@prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'generated', 'sqlite-client', 'index.js'), 'export {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'generated', 'mysql-client', 'index.js'), 'export {};\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
+  await writeFile(join(params.payloadRoot, 'ui-web', 'current', 'index.html'), '<html></html>\n', 'utf8');
 }
 
 async function startRelayHealthServer(params: Readonly<{ port: number; healthPath: string }>): Promise<Server> {
@@ -428,6 +448,7 @@ describe('RelayHostEngine (local health)', () => {
       await writeFile(join(payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
       const previewBinaryPath = join(payloadRoot, 'happier-server');
       await writeFile(previewBinaryPath, '#!/usr/bin/env bash\n', 'utf8');
+      await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath: previewBinaryPath });
       Object.defineProperty(process, 'platform', { value: 'linux' });
       vi.doMock('node:os', async () => {
         const actual = await vi.importActual<typeof import('node:os')>('node:os');
@@ -481,6 +502,7 @@ describe('RelayHostEngine (local health)', () => {
       await writeFile(join(payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
       const previewBinaryPath = join(payloadRoot, 'happier-server');
       await writeFile(previewBinaryPath, '#!/usr/bin/env bash\n', 'utf8');
+      await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath: previewBinaryPath });
       await mkdir(unitDir, { recursive: true });
       await writeFile(
         join(unitDir, 'happier-server.service'),
@@ -595,6 +617,7 @@ describe('RelayHostEngine (local health)', () => {
       await mkdir(payloadDir, { recursive: true });
       const previewBinaryPath = join(payloadDir, 'happier-server');
       await writeFile(previewBinaryPath, '#!/usr/bin/env bash\n', 'utf8');
+      await makeRunnableRelayPayload({ payloadRoot: payloadDir, serverBinaryPath: previewBinaryPath });
 
       Object.defineProperty(process, 'platform', { value: 'linux' });
       vi.doMock('node:os', async () => {
@@ -691,6 +714,7 @@ describe('RelayHostEngine (local health)', () => {
       await mkdir(payloadDir, { recursive: true });
       const previewBinaryPath = join(payloadDir, 'happier-server');
       await writeFile(previewBinaryPath, '#!/usr/bin/env bash\n', 'utf8');
+      await makeRunnableRelayPayload({ payloadRoot: payloadDir, serverBinaryPath: previewBinaryPath });
 
       Object.defineProperty(process, 'platform', { value: 'linux' });
       vi.doMock('node:os', async () => {

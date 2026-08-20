@@ -23,6 +23,7 @@ import { buildLaunchdPlistXml } from '../service/launchd.js';
 import { renderSystemdServiceUnit } from '../service/systemd.js';
 import { checkRelayRuntimeHealth, resolveRelayRuntimeDefaults, type RelayRuntimeDefaults } from '../firstPartyRuntime/relayRuntime.js';
 import {
+  assertRelayRuntimePayloadReadyForInstall,
   installOrUpdateRelayRuntimeLocal,
   shouldMigrateLegacyUnsuffixedRelayRuntimeInstallRoot,
 } from '../firstPartyRuntime/relayRuntimeInstall.js';
@@ -1528,6 +1529,10 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
     if (!serverBinaryPath) {
       throw new Error('Local relay runtime install requires selfHostRelayBinaryOverride.');
     }
+    await assertRelayRuntimePayloadReadyForInstall({
+      serverBinaryPath,
+      platform: process.platform,
+    });
     const version = deps.resolveLocalInstallVersion
       ? await deps.resolveLocalInstallVersion({ channel, mode, serverBinaryPath })
       : null;

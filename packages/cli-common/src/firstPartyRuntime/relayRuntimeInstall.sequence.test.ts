@@ -7,6 +7,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveRelayRuntimeDefaults } from './relayRuntime.js';
 import { installOrUpdateRelayRuntimeLocal } from './relayRuntimeInstall.js';
 
+async function makeRunnableRelayPayload(params: Readonly<{
+    payloadRoot: string;
+    serverBinaryPath: string;
+}>): Promise<void> {
+    const runtimeRoot = dirname(params.serverBinaryPath) === params.payloadRoot
+        ? params.payloadRoot
+        : dirname(params.serverBinaryPath);
+    await chmod(params.serverBinaryPath, 0o755);
+    await mkdir(join(runtimeRoot, 'node_modules', '.prisma', 'client'), { recursive: true });
+    await mkdir(join(runtimeRoot, 'node_modules', '@prisma', 'client'), { recursive: true });
+    await mkdir(join(runtimeRoot, 'generated', 'sqlite-client'), { recursive: true });
+    await mkdir(join(runtimeRoot, 'generated', 'mysql-client'), { recursive: true });
+    await mkdir(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init'), { recursive: true });
+    await mkdir(join(params.payloadRoot, 'ui-web', 'current'), { recursive: true });
+    await writeFile(join(runtimeRoot, 'node_modules', '.prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'node_modules', '@prisma', 'client', 'package.json'), '{"main":"index.js"}\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'node_modules', '@prisma', 'client', 'index.js'), 'module.exports = {};\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'generated', 'sqlite-client', 'index.js'), 'export {};\n', 'utf8');
+    await writeFile(join(runtimeRoot, 'generated', 'mysql-client', 'index.js'), 'export {};\n', 'utf8');
+    await writeFile(join(params.payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init', 'migration.sql'), '-- init\n', 'utf8');
+    await writeFile(join(params.payloadRoot, 'ui-web', 'current', 'index.html'), '<html></html>\n', { encoding: 'utf8', flag: 'a' });
+}
+
 const serviceActions = vi.hoisted(() => [] as string[]);
 const serviceSnapshots = vi.hoisted(() => [] as Array<{
     binary: string;
@@ -89,6 +112,46 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
         });
     });
 
+    it('rejects a binary-only candidate before it mutates the installed runtime or service', async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-incomplete-payload-'));
+        try {
+            const payloadRoot = join(homeDir, 'payload');
+            const binDir = join(payloadRoot, 'bin');
+            await mkdir(binDir, { recursive: true });
+            const serverBinaryPath = join(binDir, 'happier-server');
+            await writeFile(serverBinaryPath, '#!/bin/sh\necho incomplete-runtime\n', 'utf8');
+
+            const defaults = resolveRelayRuntimeDefaults({
+                platform: 'linux',
+                mode: 'user',
+                channel: 'preview',
+                homeDir,
+            });
+            const installedBinaryPath = join(defaults.installRoot, 'bin', 'happier-server');
+            const statePath = join(defaults.installRoot, 'self-host-state.json');
+            await mkdir(dirname(installedBinaryPath), { recursive: true });
+            await writeFile(installedBinaryPath, '#!/bin/sh\necho prior-runtime\n', 'utf8');
+            await writeFile(statePath, '{"version":"prior"}\n', 'utf8');
+
+            await expect(installOrUpdateRelayRuntimeLocal({
+                serverBinaryPath,
+                channel: 'preview',
+                mode: 'user',
+                platform: 'linux',
+                arch: 'arm64',
+                homeDir,
+                runServiceCommands: true,
+                skipHealthCheck: true,
+            })).rejects.toThrow(/incomplete relay runtime payload/i);
+
+            expect(serviceActions).toEqual([]);
+            await expect(readFile(installedBinaryPath, 'utf8')).resolves.toBe('#!/bin/sh\necho prior-runtime\n');
+            await expect(readFile(statePath, 'utf8')).resolves.toBe('{"version":"prior"}\n');
+        } finally {
+            await rm(homeDir, { recursive: true, force: true });
+        }
+    });
+
     it('commits install state only after candidate health and private startup attestation', async () => {
         const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-commit-order-'));
         try {
@@ -98,6 +161,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
             await writeFile(join(payloadRoot, 'ui-web', 'current', 'index.html'), '<script src="/assets/index-a.js"></script>\n', 'utf8');
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
             const defaults = resolveRelayRuntimeDefaults({
                 platform: 'linux',
                 mode: 'user',
@@ -159,6 +223,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { resolveRelayRuntimeDefaults } = await import('./relayRuntime.js');
             const defaults = resolveRelayRuntimeDefaults({
@@ -222,6 +287,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             checkRelayRuntimeHealthMock.mockResolvedValue({
                 reachable: false,
@@ -255,6 +321,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { installOrUpdateRelayRuntimeLocal } = await import('./relayRuntimeInstall.js');
             await installOrUpdateRelayRuntimeLocal({
@@ -285,6 +352,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const serviceDefinitionPath = '/tmp/happier-relay-runtime.service';
             await writeFile(serviceDefinitionPath, '[Service]\n', 'utf8');
@@ -336,6 +404,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             checkRelayRuntimeHealthMock.mockResolvedValue({
                 reachable: false,
@@ -370,6 +439,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { resolveRelayRuntimeDefaults } = await import('./relayRuntime.js');
             const defaults = resolveRelayRuntimeDefaults({
@@ -440,6 +510,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { resolveRelayRuntimeDefaults } = await import('./relayRuntime.js');
             const defaults = resolveRelayRuntimeDefaults({
@@ -501,6 +572,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
             const { resolveRelayRuntimeDefaults } = await import('./relayRuntime.js');
             const defaults = resolveRelayRuntimeDefaults({
                 platform: 'linux',
@@ -551,6 +623,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { resolveRelayRuntimeDefaults } = await import('./relayRuntime.js');
             const defaults = resolveRelayRuntimeDefaults({
@@ -628,6 +701,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const serviceModule = await import('../service/index.js');
             vi.mocked(serviceModule.applyServicePlan).mockImplementation(async (plan) => {
@@ -695,6 +769,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             checkRelayRuntimeHealthMock.mockResolvedValue({
                 reachable: false,
@@ -731,6 +806,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { resolveRelayRuntimeDefaults } = await import('./relayRuntime.js');
             const defaults = resolveRelayRuntimeDefaults({
@@ -785,6 +861,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
 
             const { resolveRelayRuntimeDefaults } = await import('./relayRuntime.js');
             const stableDefaults = resolveRelayRuntimeDefaults({
@@ -837,6 +914,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
             await chmod(readOnlyParent, 0o555);
 
             await expect(installOrUpdateRelayRuntimeLocal({

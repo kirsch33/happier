@@ -571,6 +571,87 @@ async function prepareRelayRuntimePayloadForInstall(params: Readonly<{
     };
 }
 
+async function isRegularFile(path: string): Promise<boolean> {
+    return await stat(path).then((info) => info.isFile()).catch(() => false);
+}
+
+async function validatePreparedRelayRuntimePayload(params: Readonly<{
+    payloadRoot: string;
+    platform: NodeJS.Platform;
+    serverBinaryName: string;
+}>): Promise<void> {
+    const binDir = join(params.payloadRoot, 'bin');
+    const serverBinaryPath = join(binDir, params.serverBinaryName);
+    const missing: string[] = [];
+    const serverBinary = await stat(serverBinaryPath).catch(() => null);
+    if (!serverBinary?.isFile() || (params.platform !== 'win32' && (serverBinary.mode & 0o111) === 0)) {
+        missing.push(`executable bin/${params.serverBinaryName}`);
+    }
+
+    const requiredFiles = [
+        'node_modules/.prisma/client/index.js',
+        'generated/sqlite-client/index.js',
+        'generated/mysql-client/index.js',
+        'ui-web/current/index.html',
+    ];
+    for (const relativePath of requiredFiles) {
+        if (!await isRegularFile(join(binDir, relativePath)) && relativePath !== 'ui-web/current/index.html') {
+            missing.push(`bin/${relativePath}`);
+        }
+        if (relativePath === 'ui-web/current/index.html' && !await isRegularFile(join(params.payloadRoot, relativePath))) {
+            missing.push(relativePath);
+        }
+    }
+
+    const prismaPackagePath = join(binDir, 'node_modules', '@prisma', 'client');
+    const prismaPackageText = await readFile(join(prismaPackagePath, 'package.json'), 'utf8').catch(() => '');
+    const prismaPackage = tryParseJsonObject(prismaPackageText);
+    const prismaEntrypoint = typeof prismaPackage?.main === 'string' && prismaPackage.main.trim()
+        ? prismaPackage.main.trim()
+        : 'index.js';
+    if (
+        prismaEntrypoint.includes('/')
+        || prismaEntrypoint.includes('\\')
+        || !await isRegularFile(join(prismaPackagePath, prismaEntrypoint))
+    ) {
+        missing.push('bin/node_modules/@prisma/client usable entrypoint');
+    }
+
+    const migrationsDir = join(params.payloadRoot, 'prisma', 'sqlite', 'migrations');
+    const migrationEntries = await readdir(migrationsDir, { withFileTypes: true }).catch(() => []);
+    const hasMigration = migrationEntries.some((entry) => entry.isDirectory());
+    if (!hasMigration) {
+        missing.push('prisma/sqlite/migrations');
+    }
+
+    if (missing.length > 0) {
+        throw new Error(`[relay-runtime] incomplete relay runtime payload: missing ${missing.join(', ')}`);
+    }
+}
+
+export async function assertRelayRuntimePayloadReadyForInstall(params: Readonly<{
+    serverBinaryPath: string;
+    platform?: NodeJS.Platform;
+}>): Promise<void> {
+    const platform = (String(params.platform ?? '').trim() || process.platform) as NodeJS.Platform;
+    const serverBinaryName = platform === 'win32' ? 'happier-server.exe' : 'happier-server';
+    const preparedPayload = await prepareRelayRuntimePayloadForInstall({
+        serverBinaryPath: params.serverBinaryPath,
+        serverBinaryName,
+    });
+    try {
+        await validatePreparedRelayRuntimePayload({
+            payloadRoot: preparedPayload.payloadRoot,
+            platform,
+            serverBinaryName,
+        });
+    } finally {
+        if (preparedPayload.cleanupPath) {
+            await rm(preparedPayload.cleanupPath, { recursive: true, force: true }).catch(() => undefined);
+        }
+    }
+}
+
 async function backupRelayRuntimeInstallState(params: Readonly<{
     installRoot: string;
     payloadDir: string;
@@ -759,6 +840,11 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
 
     const preparedPayload = await prepareRelayRuntimePayloadForInstall({
         serverBinaryPath: params.serverBinaryPath,
+        serverBinaryName,
+    });
+    await validatePreparedRelayRuntimePayload({
+        payloadRoot: preparedPayload.payloadRoot,
+        platform,
         serverBinaryName,
     });
     const desiredPayloadEntryNames = await listRelayRuntimeManagedRootEntries(preparedPayload.payloadRoot);
