@@ -51,6 +51,17 @@ type LegacyRelayRuntimeInstallRootMigration = Readonly<{
     shimPath: string;
     stdoutPath: string;
     stderrPath: string;
+    previousServiceDefinitionPath: string;
+    previousServiceDefinitionContents: string;
+    previousServiceBaseUrl: string;
+}>;
+
+export type LegacyRelayRuntimePriorServiceState = Readonly<{
+    serviceName: string;
+    definitionPath: string;
+    registered: boolean;
+    active: boolean;
+    baseUrl: string;
 }>;
 
 function tryParseJsonObject(text: string): Record<string, unknown> | null {
@@ -125,9 +136,21 @@ async function migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded(params: Re
     homeDir: string;
     runServiceCommands: boolean;
     legacyInstallRoot?: string;
+    legacyServicePriorState?: LegacyRelayRuntimePriorServiceState;
 }>): Promise<LegacyRelayRuntimeInstallRootMigration | null> {
     const shouldMigrate = await shouldMigrateLegacyUnsuffixedRelayRuntimeInstallRoot(params);
     if (!shouldMigrate) return null;
+    const priorServiceState = params.legacyServicePriorState;
+    if (!priorServiceState?.registered || !priorServiceState.active || !priorServiceState.definitionPath.trim()) {
+        throw new Error('[relay-runtime] legacy relay migration requires a registered and active legacy service; no files were changed');
+    }
+    if (!priorServiceState.serviceName.trim() || !params.runServiceCommands) {
+        throw new Error('[relay-runtime] legacy relay migration requires service commands and an active legacy service; no files were changed');
+    }
+    const previousServiceDefinitionContents = await readFile(priorServiceState.definitionPath, 'utf8').catch(() => '');
+    if (!previousServiceDefinitionContents) {
+        throw new Error('[relay-runtime] legacy relay migration could not snapshot its service definition; no files were changed');
+    }
 
     const defaults = resolveRelayRuntimeDefaults({
         platform: params.platform,
@@ -156,7 +179,7 @@ async function migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded(params: Re
         const stdoutPath = join(legacyInstallRoot, 'logs', 'server.out.log');
         const stderrPath = join(legacyInstallRoot, 'logs', 'server.err.log');
 
-        const serviceNamesToStop = new Set([legacyDefaults.serviceName, defaults.serviceName]);
+        const serviceNamesToStop = new Set([priorServiceState.serviceName, defaults.serviceName]);
         for (const serviceName of serviceNamesToStop) {
             const spec = buildRelayRuntimeServiceSpec({
                 serviceName,
@@ -195,7 +218,7 @@ async function migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded(params: Re
             params.platform === 'win32' ? 'happier-server.exe' : 'happier-server',
         );
         const legacyServiceSpec = buildRelayRuntimeServiceSpec({
-            serviceName: legacyDefaults.serviceName,
+            serviceName: priorServiceState.serviceName,
             installRoot: legacyInstallRoot,
             serverBinaryPath,
             env: {},
@@ -215,7 +238,7 @@ async function migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded(params: Re
             persistent: true,
         });
         await applyServicePlan(uninstallLegacyPlan, { runCommands: true }).catch(() => undefined);
-        await rm(legacyServiceDefinition.path, { force: true }).catch(() => undefined);
+        await rm(priorServiceState.definitionPath, { force: true }).catch(() => undefined);
     }
     const serverBinaryName = params.platform === 'win32' ? 'happier-server.exe' : 'happier-server';
     return {
@@ -227,23 +250,26 @@ async function migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded(params: Re
         }),
         homeDir: params.homeDir,
         originalInstallRoot: legacyInstallRoot,
-        runServiceCommands: params.runServiceCommands !== false,
+        runServiceCommands: true,
         serverBinaryName,
-        serviceName: legacyDefaults.serviceName,
+        serviceName: priorServiceState.serviceName,
         shimPath: join(defaults.binDir, serverBinaryName),
         stdoutPath: join(legacyInstallRoot, 'logs', 'server.out.log'),
         stderrPath: join(legacyInstallRoot, 'logs', 'server.err.log'),
+        previousServiceDefinitionPath: priorServiceState.definitionPath,
+        previousServiceDefinitionContents,
+        previousServiceBaseUrl: priorServiceState.baseUrl,
     };
 }
 
 async function rollbackLegacyUnsuffixedRelayRuntimeInstallRootMigration(
     migration: LegacyRelayRuntimeInstallRootMigration,
 ): Promise<void> {
-    if (!existsSync(migration.migratedInstallRoot)) return;
-    if (existsSync(migration.originalInstallRoot)) return;
-
-    await mkdir(dirname(migration.originalInstallRoot), { recursive: true });
-    await rename(migration.migratedInstallRoot, migration.originalInstallRoot);
+    if (existsSync(migration.migratedInstallRoot) && !existsSync(migration.originalInstallRoot)) {
+        await mkdir(dirname(migration.originalInstallRoot), { recursive: true });
+        await rename(migration.migratedInstallRoot, migration.originalInstallRoot);
+    }
+    if (!existsSync(migration.originalInstallRoot)) return;
 
     const restoredServerBinaryPath = join(migration.originalInstallRoot, 'bin', migration.serverBinaryName);
     if (existsSync(restoredServerBinaryPath)) {
@@ -263,17 +289,14 @@ async function rollbackLegacyUnsuffixedRelayRuntimeInstallRootMigration(
             stdoutPath: migration.stdoutPath,
             stderrPath: migration.stderrPath,
         });
-        const restoreServiceDefinition = buildServiceDefinition({
-            backend: migration.backend,
-            homeDir: migration.homeDir,
-            spec: restoreServiceSpec,
-        });
+        await mkdir(dirname(migration.previousServiceDefinitionPath), { recursive: true });
+        await writeFile(migration.previousServiceDefinitionPath, migration.previousServiceDefinitionContents, 'utf8');
         const restoreServicePlan = planServiceAction({
             backend: migration.backend,
             action: 'install',
             label: restoreServiceSpec.label,
-            definitionPath: restoreServiceDefinition.path,
-            definitionContents: restoreServiceDefinition.contents,
+            definitionPath: migration.previousServiceDefinitionPath,
+            definitionContents: migration.previousServiceDefinitionContents,
             persistent: true,
         });
         await applyServicePlan(restoreServicePlan, { runCommands: true }).catch(() => undefined);
@@ -787,6 +810,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     version?: string | null;
     serviceNameOverride?: string;
     legacyInstallRoot?: string;
+    legacyServicePriorState?: LegacyRelayRuntimePriorServiceState;
     runServiceCommands?: boolean;
     skipHealthCheck?: boolean;
 }>): Promise<Readonly<{ baseUrl: string; version: string | null }>> {
@@ -842,16 +866,27 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
         serverBinaryPath: params.serverBinaryPath,
         serverBinaryName,
     });
-    await validatePreparedRelayRuntimePayload({
-        payloadRoot: preparedPayload.payloadRoot,
-        platform,
-        serverBinaryName,
-    });
+    const previousServiceDefinitionContents = previousServiceDefinitionExisted
+        ? await readFile(previousServiceDefinition.path, 'utf8')
+        : null;
+    try {
+        await validatePreparedRelayRuntimePayload({
+            payloadRoot: preparedPayload.payloadRoot,
+            platform,
+            serverBinaryName,
+        });
+    } catch (error) {
+        if (preparedPayload.cleanupPath) {
+            await rm(preparedPayload.cleanupPath, { recursive: true, force: true }).catch(() => undefined);
+        }
+        throw error;
+    }
     const desiredPayloadEntryNames = await listRelayRuntimeManagedRootEntries(preparedPayload.payloadRoot);
     let payloadEntryNames = desiredPayloadEntryNames;
     let legacyRootMigration: LegacyRelayRuntimeInstallRootMigration | null = null;
     let previousInstallState: Awaited<ReturnType<typeof backupRelayRuntimeInstallState>> | null = null;
     let candidateServiceActivationAttempted = false;
+    let candidateServiceDefinitionPath: string | null = null;
 
     try {
         legacyRootMigration = await migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded({
@@ -861,6 +896,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
             homeDir,
             runServiceCommands: params.runServiceCommands !== false,
             legacyInstallRoot: params.legacyInstallRoot,
+            legacyServicePriorState: params.legacyServicePriorState,
         });
 
         await mkdir(defaults.installRoot, { recursive: true });
@@ -1010,6 +1046,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
             persistent: true,
         });
         candidateServiceActivationAttempted = params.runServiceCommands !== false;
+        candidateServiceDefinitionPath = definition.path;
         await applyServicePlan(plan, {
             runCommands: params.runServiceCommands !== false,
         });
@@ -1092,30 +1129,19 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
                 previousStateText: previousInstallState.previousStateText,
             });
 
-            const canRestoreServiceDefinition = previousServiceDefinitionExisted
-                && previousInstallState.payloadBackupDir
-                && existsSync(join(previousInstallState.payloadBackupDir, 'bin', serverBinaryName));
-            if (canRestoreServiceDefinition) {
-                const restoreEnv = parseEnvText(previousInstallState.previousEnvText ?? '');
-                const restoreSpec = buildRelayRuntimeServiceSpec({
-                    serviceName,
-                    installRoot: defaults.installRoot,
-                    serverBinaryPath: installServerBinaryPath,
-                    env: restoreEnv,
-                    stdoutPath,
-                    stderrPath,
-                });
-                const restoreDefinition = buildServiceDefinition({
-                    backend,
-                    homeDir,
-                    spec: restoreSpec,
-                });
+            const hasPreviousServerPayload = previousInstallState.payloadBackupDir !== null
+                && (
+                    existsSync(join(previousInstallState.payloadBackupDir, 'bin', serverBinaryName))
+                    || existsSync(join(previousInstallState.payloadBackupDir, serverBinaryName))
+                );
+            const legacyDefinitionIsNormalTarget = legacyRootMigration?.previousServiceDefinitionPath === previousServiceDefinition.path;
+            if (!legacyDefinitionIsNormalTarget && previousServiceDefinitionContents !== null && hasPreviousServerPayload) {
                 const restorePlan = planServiceAction({
                     backend,
                     action: 'install',
-                    label: restoreSpec.label,
-                    definitionPath: restoreDefinition.path,
-                    definitionContents: restoreDefinition.contents,
+                    label: serviceName,
+                    definitionPath: previousServiceDefinition.path,
+                    definitionContents: previousServiceDefinitionContents,
                     persistent: true,
                 });
                 await applyServicePlan(restorePlan, {
@@ -1140,7 +1166,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
                         });
                     }
                 }
-            } else if (params.runServiceCommands !== false) {
+            } else if (!legacyDefinitionIsNormalTarget && params.runServiceCommands !== false) {
                 const rollbackSpec = buildRelayRuntimeServiceSpec({
                     serviceName,
                     installRoot: defaults.installRoot,
@@ -1169,11 +1195,31 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
                 }
             }
         }
+        // A definition write is independent from command activation: applyServicePlan
+        // still materializes it when callers deliberately suppress service commands.
+        if (!previousServiceDefinitionExisted && candidateServiceDefinitionPath) {
+            await rm(candidateServiceDefinitionPath, { force: true }).catch(() => undefined);
+        }
         if (legacyRootMigration) {
             if (previousInstallState) {
                 await rm(previousInstallState.backupRoot, { recursive: true, force: true }).catch(() => undefined);
             }
             await rollbackLegacyUnsuffixedRelayRuntimeInstallRootMigration(legacyRootMigration);
+            if (legacyRootMigration.runServiceCommands) {
+                const rollbackBaseUrlObject = new URL(legacyRootMigration.previousServiceBaseUrl);
+                const rollbackHealth = await checkRelayRuntimeHealth({
+                    host: rollbackBaseUrlObject.hostname,
+                    port: Number.parseInt(rollbackBaseUrlObject.port, 10),
+                    timeoutMs: resolveRelayRuntimeInstallHealthcheckTimeoutMs(),
+                    probePortOpen: async ({ host, port, timeoutMs }) => await probePortOpen({ host, port, timeoutMs }),
+                    fetchJson: async ({ url, timeoutMs }) => await fetchJson({ url, timeoutMs }),
+                });
+                if (!rollbackHealth.reachable) {
+                    throw new Error(`[relay-runtime] previous legacy relay runtime did not become healthy after rollback (${rollbackHealth.url})`, {
+                        cause: error,
+                    });
+                }
+            }
         }
         throw error;
     } finally {

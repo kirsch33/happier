@@ -39,7 +39,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
             return await actual.rename(...args);
         }),
         rm: vi.fn(async (...args: Parameters<typeof actual.rm>) => {
-            if (String(args[0] ?? '').endsWith('happier-relay-runtime.service')) {
+            if (String(args[0] ?? '').endsWith('.service')) {
                 events.push('rm-service-definition');
             }
             return await actual.rm(...args);
@@ -146,6 +146,8 @@ describe('installOrUpdateRelayRuntimeLocal legacy root migration', () => {
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
             await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
+            const legacyDefinitionPath = join(homeDir, 'legacy.service');
+            await writeFile(legacyDefinitionPath, '[Service]\nExecStart=/legacy\n', 'utf8');
 
             const { installOrUpdateRelayRuntimeLocal } = await import('./relayRuntimeInstall.js');
             await installOrUpdateRelayRuntimeLocal({
@@ -157,6 +159,7 @@ describe('installOrUpdateRelayRuntimeLocal legacy root migration', () => {
                 homeDir,
                 runServiceCommands: true,
                 skipHealthCheck: true,
+                legacyServicePriorState: { serviceName: 'happier-server', definitionPath: legacyDefinitionPath, registered: true, active: true, baseUrl: 'http://127.0.0.1:3005' },
             });
 
             const renameIndex = events.indexOf(`rename:${stableDefaults.installRoot}->${previewDefaults.installRoot}`);
@@ -202,6 +205,8 @@ describe('installOrUpdateRelayRuntimeLocal legacy root migration', () => {
             const serverBinaryPath = join(payloadRoot, 'happier-server');
             await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
             await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
+            const legacyDefinitionPath = join(homeDir, 'legacy.service');
+            await writeFile(legacyDefinitionPath, '[Service]\nExecStart=/legacy\n', 'utf8');
 
             const { installOrUpdateRelayRuntimeLocal } = await import('./relayRuntimeInstall.js');
             await installOrUpdateRelayRuntimeLocal({
@@ -214,6 +219,7 @@ describe('installOrUpdateRelayRuntimeLocal legacy root migration', () => {
                 legacyInstallRoot,
                 runServiceCommands: true,
                 skipHealthCheck: true,
+                legacyServicePriorState: { serviceName: 'happier-server', definitionPath: legacyDefinitionPath, registered: true, active: true, baseUrl: 'http://127.0.0.1:3005' },
             });
 
             const renameIndex = events.indexOf(`rename:${legacyInstallRoot}->${previewDefaults.installRoot}`);

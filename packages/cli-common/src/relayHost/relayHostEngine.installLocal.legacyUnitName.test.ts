@@ -545,7 +545,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
       const { createRelayHostEngine } = await import('./relayHostEngine.js');
       const engine = createRelayHostEngine({
         localInstallPolicy: {
-          runServiceCommands: false,
+          runServiceCommands: true,
           skipHealthCheck: true,
         },
         resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
@@ -571,7 +571,7 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
     }
   }, 60_000);
 
-  it('migrates an owned custom suffixed preview unit root into the canonical preview install root', async () => {
+  it('fails closed before moving a custom suffixed preview root when service commands are disabled', async () => {
     const originalPlatform = process.platform;
 
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-relay-host-custom-suffixed-root-'));
@@ -667,10 +667,10 @@ describe('RelayHostEngine (installOrUpdate local legacy unit name)', () => {
         mode: 'user',
         channel: 'preview',
         selfHostRelayBinaryOverride: serverBinaryPath,
-      })).resolves.toBeDefined();
+      })).rejects.toThrow(/requires service commands/i);
 
-      expect(existsSync(join(previewInstallRoot, 'data', 'session-marker.txt'))).toBe(true);
-      expect(existsSync(join(customInstallRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(previewInstallRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(customInstallRoot, 'data', 'session-marker.txt'))).toBe(true);
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       vi.resetModules();

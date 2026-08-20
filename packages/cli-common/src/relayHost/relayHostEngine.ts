@@ -26,6 +26,7 @@ import {
   assertRelayRuntimePayloadReadyForInstall,
   installOrUpdateRelayRuntimeLocal,
   shouldMigrateLegacyUnsuffixedRelayRuntimeInstallRoot,
+  type LegacyRelayRuntimePriorServiceState,
 } from '../firstPartyRuntime/relayRuntimeInstall.js';
 import { resolveNonCollidingRelayPort } from '../firstPartyRuntime/resolveNonCollidingRelayPort.js';
 import {
@@ -1386,6 +1387,8 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
     })();
 
     let legacyInstallRootToMigrate: string | undefined;
+    let legacyServicePriorState: LegacyRelayRuntimePriorServiceState | undefined;
+    let legacyMigrationPreflightError: Error | undefined;
     await (async () => {
       if (channel === 'stable') return;
       if (backend !== 'systemd-user' && backend !== 'systemd-system') return;
@@ -1416,14 +1419,16 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         : null;
       const legacyLoaded = legacyState?.loadState.trim().toLowerCase() === 'loaded';
       const legacyActive = legacyState?.activeState.trim().toLowerCase() === 'active';
-      if (!legacyLoaded || !legacyActive) return;
-
       const legacyBaseUrl = resolveServiceDefinitionBaseUrl({
         backend,
         definitionText: legacyText,
         fallbackBaseUrl: `http://${defaults.serverHost}:${defaults.serverPort}`,
       });
       if (legacyBaseUrl !== desiredRelayUrl) return;
+      if (!legacyLoaded || !legacyActive) {
+        legacyMigrationPreflightError = new Error('Legacy relay migration requires a registered and active legacy service; no files were changed.');
+        return;
+      }
       if (!legacyWorkingDir) {
         throw new Error(
           `An active legacy happier-server.service is already using ${desiredRelayUrl} from an unknown root. `
@@ -1431,6 +1436,13 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         );
       }
       legacyInstallRootToMigrate = legacyWorkingDir;
+      legacyServicePriorState = {
+        serviceName: legacyUnitName,
+        definitionPath: legacyDefinitionPath,
+        registered: true,
+        active: true,
+        baseUrl: legacyBaseUrl,
+      };
     })();
     await (async () => {
       if (channel === 'stable') return;
@@ -1477,7 +1489,23 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
       });
       if (!shouldMigrateCanonicalCustomRoot) return;
 
+      if (backend !== 'systemd-user' && backend !== 'systemd-system') {
+        throw new Error('Legacy relay migration requires a registered and active legacy service; no files were changed.');
+      }
+      const priorState = resolveLocalSystemdUnitState({ backend, unitName: defaults.serviceName });
+      if (priorState.loadState !== 'loaded' || priorState.activeState !== 'active') {
+        legacyMigrationPreflightError = new Error('Legacy relay migration requires a registered and active legacy service; no files were changed.');
+        return;
+      }
+
       legacyInstallRootToMigrate = canonicalWorkingDir;
+      legacyServicePriorState = {
+        serviceName: defaults.serviceName,
+        definitionPath: canonicalDefinitionPath,
+        registered: true,
+        active: true,
+        baseUrl: canonicalBaseUrl,
+      };
     })();
     const strandedLegacyState = await detectLocalRelayStrandedLegacyState({
       backend,
@@ -1491,6 +1519,9 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         legacyInstallRoot: strandedLegacyState.legacyInstallRoot,
         currentInstallRoot: strandedLegacyState.currentInstallRoot,
       }));
+    }
+    if (legacyMigrationPreflightError) {
+      throw legacyMigrationPreflightError;
     }
 
     for (const otherChannel of listOtherRelayChannels(channel)) {
@@ -1613,6 +1644,7 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
       mode,
       env: envForInstaller,
       legacyInstallRoot: legacyInstallRootToMigrate,
+      legacyServicePriorState,
       version,
       runServiceCommands: policy.runServiceCommands !== false,
       skipHealthCheck: policy.skipHealthCheck === true,

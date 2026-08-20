@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -562,6 +563,147 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
         }
     });
 
+    it('restores exact legacy service-definition bytes and prior state after candidate health fails', async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-definition-rollback-'));
+        try {
+            const payloadRoot = join(homeDir, 'payload');
+            const serverBinaryPath = join(payloadRoot, 'happier-server');
+            await mkdir(payloadRoot, { recursive: true });
+            await writeFile(serverBinaryPath, '#!/bin/sh\necho candidate-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
+
+            const defaults = resolveRelayRuntimeDefaults({
+                platform: 'linux',
+                mode: 'user',
+                channel: 'preview',
+                homeDir,
+            });
+            const legacyBinaryPath = join(defaults.installRoot, 'happier-server');
+            const configEnvPath = join(defaults.configDir, 'server.env');
+            const statePath = join(defaults.installRoot, 'self-host-state.json');
+            const definitionPath = join(homeDir, 'service-definitions', 'happier-server-preview.service');
+            const previousDefinition = [
+                '[Unit]',
+                'Description=legacy relay',
+                '[Service]',
+                'ExecStart=/opt/legacy/happier-server --legacy-flat',
+                'Environment=LEGACY_ONLY=prior',
+                '',
+            ].join('\n');
+            await mkdir(dirname(legacyBinaryPath), { recursive: true });
+            await mkdir(dirname(configEnvPath), { recursive: true });
+            await mkdir(dirname(definitionPath), { recursive: true });
+            await writeFile(legacyBinaryPath, '#!/bin/sh\necho prior-flat-runtime\n', 'utf8');
+            await writeFile(configEnvPath, 'PORT=4010\nCUSTOM_FLAG=prior\n', 'utf8');
+            await writeFile(statePath, '{"version":"prior"}\n', 'utf8');
+            await writeFile(definitionPath, previousDefinition, 'utf8');
+
+            const serviceModule = await import('../service/index.js');
+            vi.mocked(serviceModule.buildServiceDefinition).mockImplementation((params) => ({
+                kind: 'systemd-service',
+                path: definitionPath,
+                contents: '[Service]\nExecStart=' + params.spec.programArgs.join(' ') + '\nEnvironment=CANDIDATE=' + (params.spec.env?.CUSTOM_FLAG ?? 'missing') + '\n',
+                mode: 0o644,
+            }));
+            vi.mocked(serviceModule.planServiceAction).mockImplementation((params) => ({
+                __action: params.action,
+                writes: params.action === 'install' && params.definitionPath
+                    ? [{ path: params.definitionPath, contents: params.definitionContents ?? '' }]
+                    : [],
+                commands: [],
+            }) as never);
+            vi.mocked(serviceModule.applyServicePlan).mockImplementation(async (plan) => {
+                const action = String((plan as { __action?: string }).__action ?? 'unknown');
+                serviceActions.push(action);
+                for (const write of plan.writes) {
+                    await mkdir(dirname(write.path), { recursive: true });
+                    await writeFile(write.path, write.contents, 'utf8');
+                }
+            });
+            checkRelayRuntimeHealthMock
+                .mockResolvedValueOnce({ reachable: false, url: 'http://127.0.0.1:4010' })
+                .mockResolvedValueOnce({ reachable: true, url: 'http://127.0.0.1:4010' });
+
+            await expect(installOrUpdateRelayRuntimeLocal({
+                serverBinaryPath,
+                channel: 'preview',
+                mode: 'user',
+                platform: 'linux',
+                arch: 'arm64',
+                homeDir,
+                runServiceCommands: true,
+            })).rejects.toThrow(/did not become healthy/);
+
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'install']);
+            expect(checkRelayRuntimeHealthMock).toHaveBeenCalledTimes(2);
+            await expect(readFile(definitionPath, 'utf8')).resolves.toBe(previousDefinition);
+            await expect(readFile(legacyBinaryPath, 'utf8')).resolves.toBe('#!/bin/sh\necho prior-flat-runtime\n');
+            await expect(readFile(configEnvPath, 'utf8')).resolves.toBe('PORT=4010\nCUSTOM_FLAG=prior\n');
+            await expect(readFile(statePath, 'utf8')).resolves.toBe('{"version":"prior"}\n');
+        } finally {
+            await rm(homeDir, { recursive: true, force: true });
+        }
+    });
+
+    it('rolls back an active canonical-custom-root preview unit by its exact identity after candidate health fails', async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-canonical-custom-root-rollback-'));
+        try {
+            const payloadRoot = join(homeDir, 'payload');
+            const serverBinaryPath = join(payloadRoot, 'happier-server');
+            await mkdir(payloadRoot, { recursive: true });
+            await writeFile(serverBinaryPath, '#!/bin/sh\necho candidate-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
+            const defaults = resolveRelayRuntimeDefaults({ platform: 'linux', mode: 'user', channel: 'preview', homeDir });
+            const customRoot = join(homeDir, '.happier', 'legacy-preview-root');
+            const definitionPath = join(homeDir, 'service-definitions', 'happier-server-preview.service');
+            const previousDefinition = '[Service]\nWorkingDirectory=' + customRoot + '\nExecStart=' + customRoot + '/bin/happier-server\nEnvironment=PORT=4011\nEnvironment=LEGACY_ONLY=prior\n';
+            const actionRecords: Array<{ action: string; label: string; rootRestored: boolean }> = [];
+            await mkdir(join(customRoot, 'bin'), { recursive: true });
+            await mkdir(dirname(definitionPath), { recursive: true });
+            await writeFile(join(customRoot, 'bin', 'happier-server'), '#!/bin/sh\necho prior-runtime\n', 'utf8');
+            await writeFile(join(customRoot, 'self-host-state.json'), '{"channel":"preview","mode":"user","version":"prior"}\n', 'utf8');
+            await writeFile(definitionPath, previousDefinition, 'utf8');
+            const serviceModule = await import('../service/index.js');
+            vi.mocked(serviceModule.buildServiceDefinition).mockImplementation((params) => ({
+                kind: 'systemd-service', path: definitionPath,
+                contents: '[Service]\nExecStart=' + params.spec.programArgs.join(' ') + '\n', mode: 0o644,
+            }));
+            vi.mocked(serviceModule.planServiceAction).mockImplementation((params) => ({
+                __action: params.action, __label: params.label,
+                writes: params.action === 'install' ? [{ path: params.definitionPath, contents: params.definitionContents ?? '' }] : [], commands: [],
+            }) as never);
+            vi.mocked(serviceModule.applyServicePlan).mockImplementation(async (plan) => {
+                const typed = plan as { __action?: string; __label?: string; writes: Array<{ path: string; contents: string }> };
+                actionRecords.push({ action: String(typed.__action), label: String(typed.__label), rootRestored: existsSync(customRoot) });
+                for (const write of typed.writes) {
+                    await mkdir(dirname(write.path), { recursive: true });
+                    await writeFile(write.path, write.contents, 'utf8');
+                }
+            });
+            checkRelayRuntimeHealthMock
+                .mockResolvedValueOnce({ reachable: false, url: 'http://127.0.0.1:4011' })
+                .mockResolvedValueOnce({ reachable: true, url: 'http://127.0.0.1:4011' });
+
+            await expect(installOrUpdateRelayRuntimeLocal({
+                serverBinaryPath, channel: 'preview', mode: 'user', platform: 'linux', homeDir, runServiceCommands: true,
+                legacyInstallRoot: customRoot,
+                legacyServicePriorState: { serviceName: 'happier-server-preview', definitionPath, registered: true, active: true, baseUrl: 'http://127.0.0.1:4011' },
+            })).rejects.toThrow(/did not become healthy/);
+
+            expect(checkRelayRuntimeHealthMock).toHaveBeenCalledTimes(2);
+            expect(actionRecords.filter((record) => record.action === 'install')).toEqual([
+                expect.objectContaining({ label: 'happier-server-preview' }),
+                expect.objectContaining({ label: 'happier-server-preview', rootRestored: true }),
+            ]);
+            expect(actionRecords.some((record) => record.label === 'happier-server')).toBe(false);
+            await expect(readFile(definitionPath, 'utf8')).resolves.toBe(previousDefinition);
+            expect(existsSync(customRoot)).toBe(true);
+            expect(existsSync(defaults.installRoot)).toBe(false);
+        } finally {
+            await rm(homeDir, { recursive: true, force: true });
+        }
+    });
+
     it('does not recreate a service definition when the first install fails without any prior runtime to restore', async () => {
         const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-first-install-failure-'));
         try {
@@ -879,6 +1021,10 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
 
             await mkdir(stableDefaults.installRoot, { recursive: true });
             await writeFile(join(stableDefaults.installRoot, 'legacy-marker.txt'), 'legacy-root\n', 'utf8');
+            const legacyDefinitionPath = join(homeDir, 'service-definitions', 'happier-server.service');
+            const legacyDefinition = '[Service]\nExecStart=/legacy/runtime\nEnvironment=PORT=3999\n';
+            await mkdir(dirname(legacyDefinitionPath), { recursive: true });
+            await writeFile(legacyDefinitionPath, legacyDefinition, 'utf8');
 
             checkRelayRuntimeHealthMock.mockResolvedValue({
                 reachable: false,
@@ -894,10 +1040,64 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 arch: 'arm64',
                 homeDir,
                 runServiceCommands: true,
+                legacyServicePriorState: {
+                    serviceName: 'happier-server',
+                    definitionPath: legacyDefinitionPath,
+                    registered: true,
+                    active: true,
+                    baseUrl: 'http://127.0.0.1:3999',
+                },
             })).rejects.toThrow(/did not become healthy/);
 
             await expect(readFile(join(stableDefaults.installRoot, 'legacy-marker.txt'), 'utf8')).resolves.toBe('legacy-root\n');
+            await expect(readFile(legacyDefinitionPath, 'utf8')).resolves.toBe(legacyDefinition);
             await expect(lstat(previewDefaults.installRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+        } finally {
+            await rm(homeDir, { recursive: true, force: true });
+        }
+    });
+
+    it('removes a candidate definition after a commands-disabled definition write fails', async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-no-command-definition-rollback-'));
+        try {
+            const payloadRoot = join(homeDir, 'payload');
+            const serverBinaryPath = join(payloadRoot, 'happier-server');
+            await mkdir(payloadRoot, { recursive: true });
+            await writeFile(serverBinaryPath, '#!/bin/sh\necho candidate-runtime\n', 'utf8');
+            await makeRunnableRelayPayload({ payloadRoot, serverBinaryPath });
+            const definitionPath = join(homeDir, 'service-definitions', 'happier-server-preview.service');
+            const serviceModule = await import('../service/index.js');
+            vi.mocked(serviceModule.buildServiceDefinition).mockImplementation(() => ({
+                kind: 'systemd-service',
+                path: definitionPath,
+                contents: '[Service]\nExecStart=/candidate\n',
+                mode: 0o600,
+            }));
+            vi.mocked(serviceModule.planServiceAction).mockImplementation((params) => ({
+                __action: params.action,
+                writes: [],
+                commands: [],
+            }));
+            vi.mocked(serviceModule.applyServicePlan).mockImplementation(async (plan) => {
+                if ((plan as { __action?: string }).__action === 'install') {
+                    await mkdir(dirname(definitionPath), { recursive: true });
+                    await writeFile(definitionPath, '[Service]\nExecStart=/candidate\n', 'utf8');
+                    throw new Error('definition write failed after candidate materialization');
+                }
+            });
+
+            await expect(installOrUpdateRelayRuntimeLocal({
+                serverBinaryPath,
+                channel: 'preview',
+                mode: 'user',
+                platform: 'linux',
+                homeDir,
+                runServiceCommands: false,
+                skipHealthCheck: true,
+            })).rejects.toThrow(/definition write failed/);
+
+            await expect(lstat(definitionPath)).rejects.toMatchObject({ code: 'ENOENT' });
+            expect(serviceActions).toEqual([]);
         } finally {
             await rm(homeDir, { recursive: true, force: true });
         }

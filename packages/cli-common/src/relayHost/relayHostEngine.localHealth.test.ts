@@ -482,7 +482,7 @@ describe('RelayHostEngine (local health)', () => {
     });
   });
 
-  it('migrates an active legacy unsuffixed unit with a custom root into the canonical preview install root', async () => {
+  it('fails closed before moving an active legacy root when service commands are disabled', async () => {
     await withTemporaryHome(async (homeDir) => {
       const port = await reserveUnusedPort();
       const previewDefaults = resolveRelayRuntimeDefaults({
@@ -566,17 +566,14 @@ describe('RelayHostEngine (local health)', () => {
         mode: 'user',
         selfHostRelayBinaryOverride: previewBinaryPath,
         env: { PORT: String(port), HAPPIER_SERVER_HOST: '127.0.0.1' },
-      })).resolves.toEqual({
-        relayUrl: expect.stringContaining('http://'),
-        mode: 'user',
-      });
+      })).rejects.toThrow(/requires service commands/i);
 
-      expect(existsSync(join(previewDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(true);
-      expect(existsSync(join(legacyInstallRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(previewDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(legacyInstallRoot, 'data', 'session-marker.txt'))).toBe(true);
     });
   });
 
-  it('migrates legacy unsuffixed self-host installs when preview lane is requested and stable payload state is missing', async () => {
+  it('fails closed without mutating a legacy root when its live service cannot be proven for the requested preview lane', async () => {
     await withTemporaryHome(async (homeDir) => {
       const stableDefaults = resolveRelayRuntimeDefaults({
         platform: 'linux',
@@ -661,14 +658,14 @@ describe('RelayHostEngine (local health)', () => {
         channel: 'preview',
         mode: 'user',
         selfHostRelayBinaryOverride: previewBinaryPath,
-      })).resolves.toBeDefined();
+      })).rejects.toThrow(/registered and active legacy service/i);
 
-      expect(existsSync(join(previewDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(true);
-      expect(existsSync(join(stableDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(previewDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(stableDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(true);
     });
   });
 
-  it('migrates legacy unsuffixed self-host installs when their state already records the preview lane', async () => {
+  it('fails closed without mutating a legacy root when prior state cannot prove its live service', async () => {
     await withTemporaryHome(async (homeDir) => {
       const stableDefaults = resolveRelayRuntimeDefaults({
         platform: 'linux',
@@ -758,10 +755,10 @@ describe('RelayHostEngine (local health)', () => {
         channel: 'preview',
         mode: 'user',
         selfHostRelayBinaryOverride: previewBinaryPath,
-      })).resolves.toBeDefined();
+      })).rejects.toThrow(/registered and active legacy service/i);
 
-      expect(existsSync(join(previewDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(true);
-      expect(existsSync(join(stableDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(previewDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(false);
+      expect(existsSync(join(stableDefaults.installRoot, 'data', 'session-marker.txt'))).toBe(true);
     });
   });
 });
