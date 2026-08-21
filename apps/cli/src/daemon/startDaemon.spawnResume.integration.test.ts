@@ -2320,6 +2320,55 @@ describe('startDaemon spawn resume wiring (integration)', () => {
     }
   });
 
+  it('delivers fresh-provider context only to the first child and keeps it out of marker respawn custody', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+
+    try {
+      const { startDaemon } = await import('./startDaemon');
+      const run = startDaemon();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      let spawnSession = harness.getSpawnSession();
+      for (let attempt = 0; !spawnSession && attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        spawnSession = harness.getSpawnSession();
+      }
+      if (!spawnSession) throw new Error('Expected spawnSession to be registered');
+
+      await expect(spawnSession({
+        directory: '/tmp',
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        existingSessionId: 'sess_plain',
+        token: 't',
+        codexBackendMode: 'acp',
+        freshProviderContextOnce: true,
+      })).resolves.toMatchObject({ type: 'success', runnerAcceptance: 'newly_accepted', pid: 12345 });
+
+      const launch = spawnHappyCLI.mock.calls[0];
+      if (!launch) throw new Error('Expected fresh child launch');
+      expect(launch[0]).toEqual(expect.arrayContaining(['--existing-session', 'sess_plain']));
+      expect(launch[0]).not.toEqual(expect.arrayContaining(['--resume', 'vendor-plain-1']));
+      expect((launch[1] as { env?: NodeJS.ProcessEnv } | undefined)?.env?.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE).toBe('1');
+
+      const marker = sessionRegistryCapture.writeSessionMarker.mock.calls.at(-1)?.[0] as {
+        respawn?: Record<string, unknown>;
+      } | undefined;
+      expect(marker?.respawn).not.toHaveProperty('freshProviderContextOnce');
+
+      harness.requestShutdown('happier-cli');
+      await run;
+    } finally {
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+    }
+  });
+
   it('resolves persisted runtime state before spawning an existing session with stale incoming controls', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;

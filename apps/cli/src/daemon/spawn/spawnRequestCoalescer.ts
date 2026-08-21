@@ -136,6 +136,7 @@ function buildSpawnSemanticFingerprint(options: SpawnSessionOptions): Json {
     modelId,
     codexBackendMode,
     resume,
+    freshProviderContextOnce: options.freshProviderContextOnce === true,
     pendingFirstInputHash: pendingFirstInput ? sha256Hex(stableJsonStringify(pendingFirstInput)) : null,
     initialTranscriptAfterSeq,
     initialGoal: options.initialGoal === undefined ? null : toStableJson(options.initialGoal, new WeakSet()),

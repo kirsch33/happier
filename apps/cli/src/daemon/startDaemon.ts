@@ -100,6 +100,8 @@ import { forceStopKnownDaemonPid, isDaemonRunningCurrentlyInstalledHappyVersion,
 import { startDaemonControlServer } from './controlServer';
 import { resolveTrackedSessionCatalogAgentId } from './sessions/resolveTrackedSessionCatalogAgentId';
 import { activatePendingInactiveSession } from './sessions/activatePendingInactiveSession';
+import { awaitFreshProviderCompletion, resumeFreshProviderContext } from './sessions/resumeFreshProviderContext';
+import { HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE } from '@/agent/runtime/freshProviderContext';
 import { resolveExistingRunnerAcceptance } from './spawn/resolveRunnerAcceptance';
 import {
   createDirectPeerTransferRegistry,
@@ -205,6 +207,7 @@ import {
   resolveWindowsTerminalWindowName,
 } from './platform/windows/windowsHostedSessionRuntime';
 import { SPAWN_SESSION_ERROR_CODES } from '@/rpc/handlers/registerSessionHandlers';
+import { listPendingQueueV2LocalIdsFromServer } from '@/api/session/pendingQueueV2Transport';
 import {
   clearSessionMarkerConnectedServiceRestartIntent,
   readSessionMarkerForPid,
@@ -212,6 +215,7 @@ import {
   removeSessionMarker,
   writeSessionMarker,
 } from './sessionRegistry';
+import { readSessionRunnerLockStatus } from './sessionRunnerLock';
 import {
   HAPPIER_DAEMON_PENDING_FIRST_INPUT_ENV_KEY,
   serializePendingFirstInputForEnv,
@@ -2820,6 +2824,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           pid: number;
           spawnNonce?: string;
           fallbackSessionId?: string;
+          includePid?: boolean;
         }>): Extract<SpawnSessionResult, { type: 'success' }> => {
           const trackedSessionId = resolveCanonicalTrackedSessionId(params.pid);
           const fallbackSessionId = typeof params.fallbackSessionId === 'string' ? params.fallbackSessionId.trim() : '';
@@ -2830,6 +2835,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             runnerAcceptance: 'newly_accepted',
             ...(sessionId ? { sessionId } : { sessionIdStatus: 'pending' as const }),
             ...(spawnNonce ? { spawnNonce } : {}),
+            ...(params.includePid === true ? { pid: params.pid } : {}),
           };
         };
         const resolveTrackedSpawnByNonce = async (spawnNonce: string): Promise<SpawnSessionResult | null> => {
@@ -3118,6 +3124,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 existingSessionAttachPayload,
                 resume,
                 existingSessionId,
+                freshProviderContextOnce,
                 permissionMode,
                 permissionModeUpdatedAt,
                 agentModeId,
@@ -3167,7 +3174,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
                   sessionAttachPayload = attachContext.attachPayload;
                   existingSessionPersistedMetadata = attachContext.metadata;
-                  if (!effectiveResume) {
+                  if (!effectiveResume && freshProviderContextOnce !== true) {
                     const derivedResume = typeof attachContext.vendorResumeId === 'string' ? attachContext.vendorResumeId.trim() : '';
                     if (derivedResume) {
                       effectiveResume = derivedResume;
@@ -3587,7 +3594,10 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   };
                 }
                 const extraEnv = spawnEnvironment.expandedEnvironmentVariables;
-                const extraEnvForChild = spawnEnvironment.extraEnvForChild;
+                const extraEnvForChild = {
+                  ...spawnEnvironment.extraEnvForChild,
+                  ...(freshProviderContextOnce === true ? { [HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE]: '1' } : {}),
+                };
                 const materializationDiagnostics = spawnEnvironment.materializationDiagnostics;
                 const trackedSessionEnvironmentVariables = buildTrackedSessionRespawnEnvironmentVariables({
                   expandedEnvironmentVariables: extraEnv,
@@ -3598,6 +3608,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   initialTranscriptAfterSeq: _initialTranscriptAfterSeq,
                   executionAuthorization: _executionAuthorization,
                   initialGoal: _initialGoal,
+                  freshProviderContextOnce: _freshProviderContextOnce,
                   ...trackedSpawnOptionsBase
                 } = effectiveSpawnOptionsBase;
                 const trackedSpawnOptions: SpawnSessionOptions = {
@@ -3775,6 +3786,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               throw new Error('Tmux window created but no PID returned');
             }
             const tmuxPid = tmuxResult.pid;
+            const tmuxProcessInstanceFingerprint = readProcessInstanceFingerprintSync(tmuxPid) ?? undefined;
 
             // Resolve the actual tmux session name used (important when sessionName was empty/undefined)
             const tmuxSession = tmuxResult.sessionName ?? (resolvedTmuxSessionName || 'happy');
@@ -3784,6 +3796,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   startedBy: 'daemon',
                   happySessionId: normalizedExistingSessionId || undefined,
                   pid: tmuxPid, // Real PID from tmux -P flag
+                  ...(tmuxProcessInstanceFingerprint ? { processInstanceFingerprint: tmuxProcessInstanceFingerprint } : {}),
                   spawnOptions: trackedSpawnOptions,
                   tmuxSessionId: tmuxResult.sessionId,
                   tmuxTmpDir: typeof tmuxTmpDir === 'string' && tmuxTmpDir.trim().length > 0 ? tmuxTmpDir.trim() : undefined,
@@ -3832,6 +3845,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               pid: tmuxPid,
               spawnNonce: trackedSpawnOptions.spawnNonce,
               fallbackSessionId: normalizedExistingSessionId,
+              includePid: freshProviderContextOnce === true,
             });
             // Preserve fast acknowledgement; the durable Pending row and server event own delivery.
             logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${tmuxPid} (tmux)`);
@@ -3948,6 +3962,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 logLabel: string;
                 terminal: NonNullable<Metadata['terminal']>;
               }): Promise<SpawnSessionResult> => {
+                const hostedProcessInstanceFingerprint = readProcessInstanceFingerprintSync(params.pid) ?? undefined;
                 if (sessionAttachCleanup) {
                   sessionAttachCleanupByPid.set(params.pid, sessionAttachCleanup);
                   sessionAttachCleanup = null;
@@ -3957,6 +3972,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   startedBy: 'daemon',
                   happySessionId: normalizedExistingSessionId || undefined,
                   pid: params.pid,
+                  ...(hostedProcessInstanceFingerprint ? { processInstanceFingerprint: hostedProcessInstanceFingerprint } : {}),
                   spawnOptions: trackedSpawnOptions,
                   vendorResumeId: effectiveResume || undefined,
                   hostedTerminal: params.terminal,
@@ -4005,6 +4021,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   pid: params.pid,
                   spawnNonce: trackedSpawnOptions.spawnNonce,
                   fallbackSessionId: normalizedExistingSessionId,
+                  includePid: freshProviderContextOnce === true,
                 });
                 daemonSpawnAttemptRegistry.rememberAccepted({
                   spawnNonce: trackedSpawnOptions.spawnNonce,
@@ -4252,6 +4269,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
               logger.debug(`[DAEMON RUN] Spawned process with PID ${happyProcess.pid}`);
               happyProcess.unref();
+              const spawnedProcessInstanceFingerprint = readProcessInstanceFingerprintSync(happyProcess.pid) ?? undefined;
               void applySpawnedChildOomScoreAdjustment({
                 pid: happyProcess.pid,
                 startupSource,
@@ -4266,6 +4284,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     startedBy: 'daemon',
                     happySessionId: normalizedExistingSessionId || undefined,
                     pid: happyProcess.pid,
+                    ...(spawnedProcessInstanceFingerprint ? { processInstanceFingerprint: spawnedProcessInstanceFingerprint } : {}),
                     childProcess: happyProcess,
                     spawnOptions: trackedSpawnOptions,
                     vendorResumeId: effectiveResume || undefined,
@@ -4358,6 +4377,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             pid: happyProcess.pid,
             spawnNonce: trackedSpawnOptions.spawnNonce,
             fallbackSessionId: normalizedExistingSessionId,
+              includePid: freshProviderContextOnce === true,
           });
           // The durable Pending row survives process startup and owns provider delivery.
           logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${happyProcess.pid}`);
@@ -6408,6 +6428,73 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       stopSession,
       prepareStopSession: prepareStopSessionForDaemonStop,
       spawnSession,
+      resumeFreshProviderContext: async ({ sessionId }) =>
+        await resumeFreshProviderContext({
+          credentials,
+          machineId,
+          sessionId,
+          probeSessionRunnerServiceability: async () => await probeSessionRunnerServiceability(sessionId),
+          spawnSession,
+          awaitCompletion: async ({ requestId, previousProviderId, pid }) => awaitFreshProviderCompletion({
+            sessionId,
+            requestId,
+            previousProviderId,
+            pid,
+            timeoutMs: 300_000,
+            wait: async () => await new Promise<void>((resolve) => setTimeout(resolve, 50)),
+            observe: async () => {
+              const daemonChildren = getCurrentChildren()
+                .filter((child) => child.happySessionId === sessionId && child.startedBy === 'daemon')
+                .map((child) => ({
+                  happySessionId: child.happySessionId ?? '',
+                  startedBy: child.startedBy,
+                  pid: child.pid,
+                  vendorResumeId: child.vendorResumeId,
+                  processInstanceFingerprint: child.processInstanceFingerprint,
+                  sessionRunnerPid: child.sessionRunnerPid,
+                }));
+              const acceptedChild = daemonChildren.find((child) => child.pid === pid) ?? null;
+              const effectiveRunnerPid = typeof acceptedChild?.sessionRunnerPid === 'number'
+                && Number.isInteger(acceptedChild.sessionRunnerPid)
+                && acceptedChild.sessionRunnerPid > 0
+                ? acceptedChild.sessionRunnerPid
+                : pid;
+              const marker = await readSessionMarkerForPid(effectiveRunnerPid);
+              const lockStatus = await readSessionRunnerLockStatus({ sessionId }).catch(() => null);
+              const raw = await fetchSessionByIdCompat({
+                token: credentials.token,
+                sessionId,
+                reason: 'manual-recovery',
+              }).catch(() => null);
+              const pendingIds = await listPendingQueueV2LocalIdsFromServer({
+                token: credentials.token,
+                sessionId,
+              }).catch(() => [requestId]);
+              const pendingControl = await probePendingQueueServiceability({
+                sessionId,
+                credentials,
+                isShutdownRequested: () => shutdownInitiated,
+              }).catch(() => ({ state: 'unknown' }));
+              return {
+                daemonChildren,
+                sessionLock: lockStatus?.ok ? {
+                  pid: lockStatus.lock.pid,
+                  processInstanceFingerprint: lockStatus.lock.processInstanceFingerprint,
+                } : null,
+                pendingControlState: pendingControl.state,
+                rawActive: raw?.active === true,
+                pendingIds,
+                marker: marker ? {
+                  pid: marker.pid,
+                  happySessionId: marker.happySessionId,
+                  vendorResumeId: marker.respawn?.vendorResumeId,
+                  hasResume: marker.respawn?.resume !== undefined,
+                  hasFreshProviderContextOnce: marker.respawn?.freshProviderContextOnce !== undefined,
+                } : null,
+              };
+            },
+          }),
+        }),
       resolveSpawnSessionByNonce: async (spawnNonce) => daemonSpawnAttemptRegistry.resolve(spawnNonce),
       requestShutdown: () => requestShutdown('happier-cli'),
       beforeShutdown,

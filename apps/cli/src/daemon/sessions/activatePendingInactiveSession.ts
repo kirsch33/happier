@@ -9,6 +9,7 @@ type PendingInactiveSessionActivationResult =
   | Readonly<{
       status: 'activated';
       runnerAcceptance?: Extract<SpawnSessionResult, { type: 'success' }>['runnerAcceptance'];
+      pid?: number;
     }>
   | Readonly<{
       status: 'not-needed';
@@ -25,6 +26,8 @@ export async function activatePendingInactiveSession(params: Readonly<{
   sessionId: string;
   requestId: string;
   pendingVersion: number;
+  /** Resume-fresh uses this to reject a second-fetch Pending snapshot that changed before spawn. */
+  expectedPendingSnapshot?: Readonly<{ pendingVersion: number; requestId: string }>;
   spawnSession: (options: NonNullable<ReturnType<typeof buildInactiveSessionResumeSpawnOptions>>) => Promise<SpawnSessionResult>;
 }>): Promise<PendingInactiveSessionActivationResult> {
   const rawSession = await fetchSessionByIdCompat({
@@ -52,6 +55,16 @@ export async function activatePendingInactiveSession(params: Readonly<{
     token: params.credentials.token,
     sessionId: params.sessionId,
   });
+  const expectedPendingSnapshot = params.expectedPendingSnapshot;
+  if (expectedPendingSnapshot && (
+    rawSession.archivedAt !== null
+    || rawSession.pendingVersion !== expectedPendingSnapshot.pendingVersion
+    || rawSession.pendingCount !== 1
+    || pendingLocalIds.length !== 1
+    || pendingLocalIds[0] !== expectedPendingSnapshot.requestId
+  )) {
+    return { status: 'rejected', reason: 'snapshot-stale' };
+  }
   if (!pendingLocalIds.includes(params.requestId)) {
     return { status: 'not-needed', reason: 'pending-resolved' };
   }
@@ -84,5 +97,6 @@ export async function activatePendingInactiveSession(params: Readonly<{
   return {
     status: 'activated',
     ...(result.runnerAcceptance ? { runnerAcceptance: result.runnerAcceptance } : {}),
+    ...(typeof result.pid === 'number' && Number.isInteger(result.pid) && result.pid > 0 ? { pid: result.pid } : {}),
   };
 }

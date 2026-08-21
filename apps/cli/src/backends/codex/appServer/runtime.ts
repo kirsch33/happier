@@ -54,6 +54,7 @@ import {
     resolveRecoverableTurnFailureSecondFailure,
     type RecoverableTurnFailurePromptMode,
 } from '@/agent/runtime/session/recoverableTurnFailurePolicy';
+import { reportSessionToDaemonIfRunning } from '@/agent/runtime/startupSideEffects';
 import { publishCodexSessionIdMetadata } from '../utils/codexSessionIdMetadata';
 import { resolveApprovalChoiceLabel } from '../runtime/codexRequestUserInputBridge';
 import {
@@ -1953,6 +1954,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
             activeServerDir: params.activeServerDir ?? null,
             processEnv: runtimeEnv,
             lastPublished: lastPublishedThreadId,
+        }).then(async () => {
+            const metadata = params.session.getMetadataSnapshot?.();
+            const sessionId = trimSessionId(params.session.sessionId);
+            if (!metadata || !sessionId) return;
+            await reportSessionToDaemonIfRunning({ sessionId, metadata });
         }).catch(() => undefined);
     };
 

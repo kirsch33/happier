@@ -364,6 +364,7 @@ export function createDaemonControlApp({
   stopSession,
   prepareStopSession,
   spawnSession,
+  resumeFreshProviderContext,
   resolveSpawnSessionByNonce,
   requestShutdown,
   beforeShutdown,
@@ -396,6 +397,7 @@ export function createDaemonControlApp({
   stopSession: (sessionId: string) => Promise<StopSessionResult>;
   prepareStopSession?: (child: TrackedSession) => Promise<void> | void;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
+  resumeFreshProviderContext?: (input: Readonly<{ sessionId: string }>) => Promise<unknown>;
   resolveSpawnSessionByNonce?: (spawnNonce: string) => Promise<SpawnSessionNonceResolution> | SpawnSessionNonceResolution;
   requestShutdown: () => void;
   beforeShutdown?: () => Promise<void>;
@@ -1767,6 +1769,46 @@ export function createDaemonControlApp({
     return await stopSession(sessionId);
   });
 
+  typed.post('/session/resume-fresh', {
+    schema: {
+      body: z.object({ sessionId: z.string().trim().min(1) }).strict(),
+      response: {
+        200: z.object({ ok: z.literal(true), sessionId: z.string(), providerSessionId: z.string() }),
+        400: z.object({ ok: z.literal(false), errorCode: z.string(), errorMessage: z.string() }),
+        401: authSchema401,
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!resumeFreshProviderContext) {
+      reply.code(400);
+      return { ok: false as const, errorCode: 'completion_unproven', errorMessage: 'Fresh provider context is unavailable.' };
+    }
+    const result = await resumeFreshProviderContext({ sessionId: request.body.sessionId });
+    if (
+      result && typeof result === 'object'
+      && (result as { ok?: unknown }).ok === true
+      && typeof (result as { sessionId?: unknown }).sessionId === 'string'
+      && typeof (result as { providerSessionId?: unknown }).providerSessionId === 'string'
+    ) {
+      return {
+        ok: true as const,
+        sessionId: (result as { sessionId: string }).sessionId,
+        providerSessionId: (result as { providerSessionId: string }).providerSessionId,
+      };
+    }
+    reply.code(400);
+    return {
+      ok: false as const,
+      errorCode: typeof (result as { errorCode?: unknown })?.errorCode === 'string'
+        ? (result as { errorCode: string }).errorCode
+        : 'completion_unproven',
+      errorMessage: typeof (result as { errorMessage?: unknown })?.errorMessage === 'string'
+        ? (result as { errorMessage: string }).errorMessage
+        : 'Fresh provider context completion could not be proven.',
+    };
+  });
+
   // Spawn new session
   typed.post('/spawn-session', {
     schema: {
@@ -2229,6 +2271,7 @@ export function startDaemonControlServer({
   stopSession,
   prepareStopSession,
   spawnSession,
+  resumeFreshProviderContext,
   resolveSpawnSessionByNonce,
   requestShutdown,
   beforeShutdown,
@@ -2259,6 +2302,7 @@ export function startDaemonControlServer({
   stopSession: (sessionId: string) => Promise<StopSessionResult>;
   prepareStopSession?: (child: TrackedSession) => Promise<void> | void;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
+  resumeFreshProviderContext?: (input: Readonly<{ sessionId: string }>) => Promise<unknown>;
   resolveSpawnSessionByNonce?: (spawnNonce: string) => Promise<SpawnSessionNonceResolution> | SpawnSessionNonceResolution;
   requestShutdown: () => void;
   beforeShutdown?: () => Promise<void>;
@@ -2352,6 +2396,7 @@ export function startDaemonControlServer({
       stopSession,
       prepareStopSession,
       spawnSession,
+      resumeFreshProviderContext,
       resolveSpawnSessionByNonce,
       requestShutdown,
       beforeShutdown,

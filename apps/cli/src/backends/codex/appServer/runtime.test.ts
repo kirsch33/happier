@@ -35,6 +35,11 @@ import { setActiveAccountSettingsSnapshot } from '@/settings/accountSettings/act
 import { HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR } from '@/daemon/spawn/spawnExplicitEnvKeysMarker';
 import { logger } from '@/ui/logger';
 
+const reportSessionToDaemonIfRunningMock = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('@/agent/runtime/startupSideEffects', () => ({
+    reportSessionToDaemonIfRunning: reportSessionToDaemonIfRunningMock,
+}));
+
 import { createCodexAppServerRuntime, writeUsageLimitRecoveryIntentToMetadata } from './runtime';
 import { createCodexAppServerProcessEnv, createCodexAppServerTestEnvScope } from './testkit/fakeCodexAppServer';
 
@@ -1712,6 +1717,7 @@ describe('createCodexAppServerRuntime', () => {
 
     it('starts a new app-server thread and publishes the thread id to session metadata', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-start-');
+        reportSessionToDaemonIfRunningMock.mockClear();
 
         const updateMetadata = vi.fn((updater: (metadata: Record<string, unknown>) => Record<string, unknown>) =>
             updater({ machineId: 'machine_1' }),
@@ -1776,6 +1782,44 @@ describe('createCodexAppServerRuntime', () => {
                 expect.objectContaining({ method: 'model/list' }),
             ]),
         );
+        expect(reportSessionToDaemonIfRunningMock).not.toHaveBeenCalled();
+    });
+
+    it('reports the acknowledged new app-server thread id to the daemon after metadata publication', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-report-new-thread-');
+        reportSessionToDaemonIfRunningMock.mockClear();
+        let metadata = {
+            ...createRuntimeMetadata(root),
+            machineId: 'machine_1',
+            codexSessionId: 'thread-attached-old',
+            unrelatedMetadata: { preserve: true },
+        } as Metadata;
+        const session = {
+            sessionId: 'sess_app_server_1',
+            updateMetadata: vi.fn(async (updater: (current: Metadata) => Metadata) => {
+                metadata = updater(metadata);
+            }),
+            getMetadataSnapshot: () => metadata,
+        };
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: session as any,
+            permissionMode: 'acceptEdits',
+        });
+
+        await runtime.startOrLoad({});
+
+        await vi.waitFor(() => expect(reportSessionToDaemonIfRunningMock).toHaveBeenCalledWith({
+            sessionId: 'sess_app_server_1',
+            metadata: expect.objectContaining({
+                codexSessionId: 'thread-started',
+                unrelatedMetadata: { preserve: true },
+            }),
+        }));
+        expect(reportSessionToDaemonIfRunningMock).not.toHaveBeenCalledWith(expect.objectContaining({
+            metadata: expect.objectContaining({ codexSessionId: 'thread-attached-old' }),
+        }));
     });
 
     it('starts safe-yolo app-server threads with auto-reviewer approvals instead of disabling approvals', async () => {

@@ -6,6 +6,7 @@ import * as controlClient from '@/daemon/controlClient';
 import {
   DaemonConnectedServiceRefreshError,
   notifyDaemonConnectedServiceTurnLifecycle,
+  resumeFreshDaemonSession,
   requestDaemonSessionConnectedServiceAuthSwitch,
   resolveDaemonSpawnSessionByNonce,
   spawnDaemonSession,
@@ -344,6 +345,46 @@ describe('daemon control client (HTTP error responses)', () => {
         success: false,
         error: 'Failed to spawn session: boom',
         errorCode: 'SPAWN_FAILED',
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('preserves the daemon errorMessage from a rejected resume-fresh completion', async () => {
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/session/resume-fresh') {
+        req.resume();
+        res.statusCode = 409;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({
+          ok: false,
+          errorCode: 'completion_unproven',
+          errorMessage: 'The newly accepted runner did not retain exact PID custody.',
+        }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    try {
+      const { port } = await listen(server);
+      tmpHomeDir = await createTempDir('happier-daemon-client-resume-fresh-error-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: port,
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+        controlToken: 'test-token',
+      });
+
+      await expect(resumeFreshDaemonSession('cm8q7dqx00001k0n1s5v6z2ab')).resolves.toEqual({
+        ok: false,
+        errorCode: 'completion_unproven',
+        errorMessage: 'The newly accepted runner did not retain exact PID custody.',
       });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -569,11 +569,14 @@ describe('runCodex app-server startup plan mode', () => {
       HAPPIER_CODEX_APP_SERVER_BIN: fakeAppServer,
       HAPPIER_CODEX_APP_SERVER_RPC_TIMEOUT_MS: '10000',
     });
+    process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE = '1';
 
-    const { session } = createFakeSession({
+    const { session, getMetadataSnapshot } = createFakeSession({
       path: root,
       host: 'localhost',
       flavor: 'codex',
+      codexSessionId: 'thread-old',
+      unrelatedMetadata: { preserve: true },
       permissionMode: 'default',
       permissionModeUpdatedAt: 1,
       modelOverrideV1: { v: 1, updatedAt: 3, modelId: 'gpt-5.4' },
@@ -614,7 +617,6 @@ describe('runCodex app-server startup plan mode', () => {
     };
 
     const { runCodex } = await import('./runCodex');
-    const { resolveEffectiveCodingPromptText } = await import('@/agent/prompting/coding/resolveEffectiveCodingPrompt');
     const outcome = await runCodex({
       credentials: { token: 'test' } as Credentials,
       startedBy: 'terminal',
@@ -624,18 +626,14 @@ describe('runCodex app-server startup plan mode', () => {
       agentModeId: 'plan',
       agentModeUpdatedAt: 2,
       codexBackendMode: 'appServer',
+      existingSessionId: 'sess_fresh',
       directory: root,
     }).then(() => ({ ok: true as const })).catch((error: unknown) => ({ ok: false as const, error }));
+    delete process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE;
 
     if (!outcome.ok) {
       throw outcome.error;
     }
-
-    expect(resolveEffectiveCodingPromptText).toHaveBeenCalledWith(
-      expect.objectContaining({
-        baseOverride: undefined,
-      }),
-    );
 
     const requestLog = (await readFile(requestLogPath, 'utf8'))
       .trim()
@@ -676,6 +674,15 @@ describe('runCodex app-server startup plan mode', () => {
           },
         },
       }),
+    });
+
+    const { initializeBackendRunSession } = await import('@/agent/runtime/initializeBackendRunSession');
+    expect(vi.mocked(initializeBackendRunSession)).toHaveBeenCalledWith(expect.objectContaining({
+      metadataKeysToUnsetOnAttach: ['codexSessionId'],
+    }));
+    expect(getMetadataSnapshot()).toMatchObject({
+      codexSessionId: 'thread-started',
+      unrelatedMetadata: { preserve: true },
     });
   });
 });

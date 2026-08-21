@@ -37,6 +37,25 @@ function computeRuntimeDescriptorKeys(
 }
 
 describe('computeDaemonSpawnRequestKey', () => {
+  it('does not coalesce a one-shot fresh-provider launch with an ordinary resume of the same session', () => {
+    const ordinary = computeDaemonSpawnRequestKey({
+      directory: '/tmp',
+      existingSessionId: 'sess_1',
+      resume: 'provider-old',
+      executionAuthorization: { provenance: 'user_request', requestId: 'pending_1' },
+    } satisfies SpawnSessionOptions);
+    const fresh = computeDaemonSpawnRequestKey({
+      directory: '/tmp',
+      existingSessionId: 'sess_1',
+      freshProviderContextOnce: true,
+      executionAuthorization: { provenance: 'user_request', requestId: 'pending_1' },
+    } satisfies SpawnSessionOptions);
+
+    expect(ordinary.key).not.toBe(fresh.key);
+    if (ordinary.kind !== 'existing' || fresh.kind !== 'existing') throw new Error('Expected existing-session keys');
+    expect(ordinary.serializationKey).toBe(fresh.serializationKey);
+  });
+
   it('is stable for equivalent inputs with different object key order', () => {
     const a = computeDaemonSpawnRequestKey({
       directory: '/tmp/repo',
