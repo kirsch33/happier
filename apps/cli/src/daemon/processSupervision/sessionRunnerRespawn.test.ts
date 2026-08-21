@@ -15,6 +15,7 @@ import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers
 
 import { createSessionRunnerRespawnManager, type SessionRunnerRespawnOptionsResolver } from './sessionRunnerRespawn';
 import { createFreshProviderRecoveryReservationStore } from '../sessions/freshProviderRecoveryReservation';
+import { resumeFreshProviderContext } from '../sessions/resumeFreshProviderContext';
 
 describe('createSessionRunnerRespawnManager', () => {
   it('holds a real durable lifecycle admission through respawn resolution and acceptance before a competing arm can settle', async () => {
@@ -59,7 +60,6 @@ describe('createSessionRunnerRespawnManager', () => {
       releaseSpawn!();
       await arm;
       expect(order).toEqual(['spawn_accepted', 'arm_settled']);
-      const { resumeFreshProviderContext } = await import('../sessions/resumeFreshProviderContext');
       await expect(resumeFreshProviderContext({
         credentials: { token } as any,
         machineId: 'machine-a', sessionId: 'sess-race', reservation: reservations,
