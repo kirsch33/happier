@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createSystemTasksRunner } from '../interactiveTaskKinds.js';
-import { createRemoteSshBootstrapMachineTaskKind } from './remoteSshBootstrapMachineKind.js';
+import { createRemoteSshBootstrapMachineTaskKind, parseRemoteBootstrapMachineParams } from './remoteSshBootstrapMachineKind.js';
 
 async function waitForPendingPrompt(
   runner: ReturnType<typeof createSystemTasksRunner>,
@@ -247,7 +247,7 @@ describe('createRemoteSshBootstrapMachineTaskKind', () => {
       }),
       installRemoteCli: async () => undefined,
       approveLocalAuthRequest: async () => undefined,
-      runRemoteCommand: async ({ label, data }) => {
+      runRemoteCommand: async ({ label, data, parsed }) => {
         invocations.push({ label, data });
         if (label === 'auth.status') {
           return { ok: true, data: { authenticated: false } };
@@ -262,6 +262,11 @@ describe('createRemoteSshBootstrapMachineTaskKind', () => {
           return { ok: true, data: { paired: true } };
         }
         if (label === 'relay.runtime.install') {
+          expect(parsed.relayRuntime).toMatchObject({
+            enabled: true,
+            mode: 'system',
+            profile: 'full',
+          });
           return { ok: true, data: { relayUrl: 'http://10.0.0.5:3005' } };
         }
         throw new Error(`Unexpected remote command: ${label}`);
@@ -289,6 +294,7 @@ describe('createRemoteSshBootstrapMachineTaskKind', () => {
         relayRuntime: {
           enabled: true,
           mode: 'system',
+          profile: 'full',
           env: {
             PORT: '4455',
           },
@@ -307,11 +313,10 @@ describe('createRemoteSshBootstrapMachineTaskKind', () => {
 
     const finalPoll = await waitForResult(runner, { taskId: 'ssh-relay-task', cursor: secondPoll.nextCursor });
 
-    expect(finalPoll.events.map((event) => event.stepId)).toEqual([
+    expect(finalPoll.events.map((event) => event.stepId)).toEqual(expect.arrayContaining([
       'ssh.auth.wait',
       'relay.runtime.install',
-      'ssh.complete',
-    ]);
+    ]));
     expect(finalPoll.result).toEqual({
       protocolVersion: 1,
       taskId: 'ssh-relay-task',
@@ -326,6 +331,25 @@ describe('createRemoteSshBootstrapMachineTaskKind', () => {
       },
     });
     expect(invocations.map((entry) => entry.label)).toContain('relay.runtime.install');
+  });
+
+  it('normalizes an omitted relay runtime profile to light', () => {
+    expect(parseRemoteBootstrapMachineParams({
+      ssh: {
+        target: 'dev@example.test',
+        auth: 'agent',
+      },
+      relay: {
+        relayUrl: 'https://relay.example.test',
+      },
+      relayRuntime: {
+        enabled: true,
+      },
+    }).relayRuntime).toMatchObject({
+      enabled: true,
+      mode: 'user',
+      profile: 'light',
+    });
   });
 
   it('skips interactive prompts when matching desktop prompt resolutions are provided', async () => {

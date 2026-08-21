@@ -8,6 +8,7 @@ const {
   approveTerminalAuthRequest,
   installRemoteFirstPartyComponentMock,
   createRelayHostEngineMock,
+  installOrUpdateMock,
 } = vi.hoisted(() => ({
   spawnSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -16,9 +17,11 @@ const {
   approveTerminalAuthRequest: vi.fn(async () => undefined),
   installRemoteFirstPartyComponentMock: vi.fn(),
   createRelayHostEngineMock: vi.fn(),
+  installOrUpdateMock: vi.fn(),
 }));
 
-vi.mock('node:child_process', () => ({
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:child_process')>(),
   spawnSync,
 }));
 
@@ -51,10 +54,7 @@ vi.mock('@happier-dev/cli-common/relayHost', async (importOriginal) => {
     createRelayHostEngine: (...args: Parameters<typeof actual.createRelayHostEngine>) => {
       createRelayHostEngineMock(...args);
       return {
-        installOrUpdate: vi.fn(async () => ({
-          relayUrl: 'http://127.0.0.1:3000',
-          mode: 'user' as const,
-        })),
+        installOrUpdate: installOrUpdateMock,
       };
     },
   };
@@ -86,6 +86,10 @@ describe('createLiveRemoteSshBootstrapTaskKind', () => {
       binaryPath: '$HOME/.happier/cli-preview/current/happier',
       versionId: 'mock-version',
       source: 'https://example.test/happier.tgz',
+    });
+    installOrUpdateMock.mockResolvedValue({
+      relayUrl: 'http://127.0.0.1:3000',
+      mode: 'user',
     });
     readFileSync.mockImplementation(() => {
       throw new Error('missing known_hosts');
@@ -333,9 +337,7 @@ describe('createLiveRemoteSshBootstrapTaskKind', () => {
         relayRuntime: {
           enabled: true,
           mode: 'user',
-          env: {
-            PORT: '4001',
-          },
+          profile: 'full',
         },
       },
       emit: () => undefined,
@@ -347,7 +349,11 @@ describe('createLiveRemoteSshBootstrapTaskKind', () => {
       },
     });
 
-    expect(result.relayRuntime?.relayUrl).toBe('http://127.0.0.1:4001');
+    expect(result.relayRuntime?.relayUrl).toBe('http://127.0.0.1:3000');
+    expect(installOrUpdateMock).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'user',
+      profile: 'full',
+    }));
 
     const sshRemoteCommands = spawnSync.mock.calls
       .filter(([command]) => command === 'ssh')

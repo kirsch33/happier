@@ -202,21 +202,29 @@ function resolveRelayDefaultsForRemote(params: Readonly<{
 function buildRemoteFullRelayPreflightCommand(params: Readonly<{
   configEnvPath: string;
   serviceName: string;
+  mode: 'user' | 'system';
 }>): string {
   const configEnvPath = quoteRemoteShellArg(params.configEnvPath);
   const unitName = quoteRemoteShellArg(`${params.serviceName}.service`);
+  const showDropIns = params.mode === 'user'
+    ? wrapRemoteSystemdUserCommand(`systemctl --user show ${unitName} --property=DropInPaths --value 2>/dev/null`)
+    : `systemctl show ${unitName} --property=DropInPaths --value 2>/dev/null`;
+  const showLoadState = params.mode === 'user'
+    ? wrapRemoteSystemdUserCommand(`systemctl --user show ${unitName} --property=LoadState --value 2>/dev/null`)
+    : `systemctl show ${unitName} --property=LoadState --value 2>/dev/null`;
   return [
     'set -eu',
     `config_env=${configEnvPath}`,
     '[ -f "$config_env" ]',
     '[ "$(stat -c %a "$config_env")" = 600 ]',
+    ...(params.mode === 'user' ? ['[ "$(stat -c %u "$config_env")" = "$(id -u)" ]'] : []),
     "grep -Eq '^[[:space:]]*(HAPPIER_DB_PROVIDER|HAPPY_DB_PROVIDER)[[:space:]]*=[[:space:]]*(postgres|postgresql|mysql)[[:space:]]*$' \"$config_env\"",
     "grep -Eq '^[[:space:]]*DATABASE_URL[[:space:]]*=' \"$config_env\"",
-    `if dropins="$(systemctl show ${unitName} --property=DropInPaths --value 2>/dev/null)"; then`,
+    `if dropins="$(${showDropIns})"; then`,
     '  :',
     'else',
     '  show_status=$?',
-    `  load_state="$(systemctl show ${unitName} --property=LoadState --value 2>/dev/null)" || exit "$show_status"`,
+    `  load_state="$(${showLoadState})" || exit "$show_status"`,
     '  [ "$load_state" = not-found ] || exit "$show_status"',
     "  dropins=''",
     'fi',
@@ -847,8 +855,9 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
 
   const showEffectiveLocalSystemdDropIns = (params: Readonly<{
     unitName: string;
-    mode: 'system';
+    mode: 'user' | 'system';
   }>) => runLocalText('systemctl', [
+    ...(params.mode === 'user' ? ['--user'] : []),
     'show',
     `${params.unitName}.service`,
     '--property=DropInPaths',
@@ -1891,8 +1900,8 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         throw new Error('The full relay profile does not accept environment overrides.');
       }
       const target = await deps.resolveRemoteReleaseTarget({ ssh: params.ssh, knownHostsMode });
-      if (target.os !== 'linux' || mode !== 'system') {
-        throw new Error('The full relay profile requires a Linux systemd system install.');
+      if (target.os !== 'linux') {
+        throw new Error('The full relay profile requires a Linux systemd user or system install.');
       }
       const defaults = resolveRelayDefaultsForRemote({ platform: 'linux', channel, mode });
       const preflight = await deps.runRemoteText({
@@ -1901,6 +1910,7 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         remoteCommand: buildRemoteFullRelayPreflightCommand({
           configEnvPath: `${defaults.configDir}/server.env`,
           serviceName: defaults.serviceName,
+          mode,
         }),
       });
       if (preflight.status !== 0) {

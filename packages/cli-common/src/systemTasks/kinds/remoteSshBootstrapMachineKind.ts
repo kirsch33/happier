@@ -33,6 +33,7 @@ export interface RemoteBootstrapMachineParams {
   relayRuntime?: Readonly<{
     enabled: boolean;
     mode?: 'user' | 'system';
+    profile?: 'light' | 'full';
     env?: Record<string, string>;
     selfHostRelayBinaryOverride?: string;
   }>;
@@ -319,6 +320,7 @@ export function parseRemoteBootstrapMachineParams(params: unknown): RemoteBootst
           relayRuntime: {
             enabled: relayRuntime.enabled === true,
             mode: relayRuntime.mode === 'system' ? 'system' : 'user',
+            profile: relayRuntime.profile === 'full' ? 'full' : 'light',
             ...(relayRuntime.env && typeof relayRuntime.env === 'object' && !Array.isArray(relayRuntime.env)
               ? {
                   env: Object.fromEntries(

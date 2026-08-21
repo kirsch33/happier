@@ -107,7 +107,7 @@ describe('RelayHostEngine remote installation ownership', () => {
       channel: 'stable',
       mode: 'system',
       profile: 'full',
-    })).rejects.toThrow(/full relay profile requires a Linux systemd system install/i);
+    })).rejects.toThrow(/full relay profile requires a Linux systemd user or system install/i);
     expect(installedComponents).toEqual([]);
   });
 
@@ -177,6 +177,48 @@ describe('RelayHostEngine remote installation ownership', () => {
     expect(installedComponents).toEqual(['happier-cli']);
     expect(commands[0]).toContain('LoadState');
     expect(commands[0]).not.toContain('|| true');
+  });
+
+  it('preflights and delegates a Linux systemd-user full install before uploading remote components', async () => {
+    const installedComponents: string[] = [];
+    const commands: string[] = [];
+    const engine = createRelayHostEngine({
+      resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+      copyLocalDirectoryToRemote: async () => {},
+      installRemoteComponent: async ({ componentId }) => {
+        installedComponents.push(componentId);
+        return { binaryPath: '$HOME/.happier/cli/current/happier', versionId: 'stable-1' };
+      },
+      runRemoteText: async ({ remoteCommand }) => {
+        commands.push(remoteCommand);
+        if (remoteCommand.includes('DropInPaths')) {
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        return {
+          status: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            kind: 'relay_host_install',
+            data: { relayUrl: 'http://127.0.0.1:3005', mode: 'user' },
+          })}\n`,
+          stderr: '',
+        };
+      },
+    });
+
+    await expect(engine.installOrUpdate({
+      target: { kind: 'ssh', ssh: { target: 'dev@example.test', auth: 'agent' } },
+      channel: 'stable',
+      mode: 'user',
+      profile: 'full',
+    })).resolves.toEqual({ relayUrl: 'http://127.0.0.1:3005', mode: 'user' });
+
+    expect(commands[0]).toContain('systemctl --user show');
+    expect(commands[0]).toContain('XDG_RUNTIME_DIR');
+    expect(commands[0]).toContain('stat -c %u');
+    expect(installedComponents).toEqual(['happier-cli']);
+    expect(commands[1]).toContain('--mode user');
+    expect(commands[1]).toContain('--profile full');
   });
 
   it('surfaces the canonical remote installer error instead of interpreting partial output', async () => {

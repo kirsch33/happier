@@ -5,6 +5,14 @@ import { join } from 'node:path';
 import type { RemoteBootstrapMachineParams } from '@happier-dev/cli-common/systemTasks';
 import { describe, expect, it, vi } from 'vitest';
 
+const { installOrUpdateRelayRuntimeDefaultMock } = vi.hoisted(() => ({
+    installOrUpdateRelayRuntimeDefaultMock: vi.fn(),
+}));
+
+vi.mock('./relayRuntimeTasks.js', () => ({
+    installOrUpdateRelayRuntimeDefault: installOrUpdateRelayRuntimeDefaultMock,
+}));
+
 import {
     installRemoteCliDefault,
     approveLocalRemoteAuthRequestDefault,
@@ -318,5 +326,41 @@ describe('runRemoteBootstrapCommandDefault', () => {
         } finally {
             fakeSsh.cleanup();
         }
+    });
+
+    it('forwards an explicit full relay profile to the canonical runtime installer', async () => {
+        installOrUpdateRelayRuntimeDefaultMock.mockResolvedValue({
+            relayUrl: 'http://127.0.0.1:3005',
+            mode: 'user',
+        });
+        const parsed: RemoteBootstrapMachineParams = {
+            ...createParsedRemoteBootstrapParams(),
+            relayRuntime: {
+                enabled: true,
+                mode: 'user',
+                profile: 'full',
+            },
+        };
+
+        await expect(runRemoteBootstrapCommandDefault({
+            label: 'relay.runtime.install',
+            parsed,
+            auth: { mode: 'agent' },
+            knownHostsMode: 'system',
+        })).resolves.toEqual({
+            ok: true,
+            data: {
+                relayUrl: 'http://127.0.0.1:3005',
+                mode: 'user',
+            },
+        });
+
+        expect(installOrUpdateRelayRuntimeDefaultMock).toHaveBeenCalledWith(expect.objectContaining({
+            channel: 'stable',
+            mode: 'user',
+            profile: 'full',
+        }), {
+            ensureRemoteCliInstalled: false,
+        });
     });
 });

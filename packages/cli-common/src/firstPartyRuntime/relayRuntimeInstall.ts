@@ -893,10 +893,20 @@ function isFullRelayServerEnv(text: string): boolean {
         && /^\s*DATABASE_URL\s*=/mu.test(text);
 }
 
-async function readRequiredFullRelayServerEnv(path: string): Promise<string> {
+async function readRequiredFullRelayServerEnv(params: Readonly<{
+    path: string;
+    mode: 'user' | 'system';
+}>): Promise<string> {
+    const path = params.path;
     const info = await stat(path).catch(() => null);
     if (!info?.isFile() || (info.mode & 0o777) !== 0o600) {
         throw new Error('[relay-runtime] full relay profile requires an existing owner-readable mode 0600 config/server.env; no files were changed');
+    }
+    if (params.mode === 'user') {
+        const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+        if (uid === null || info.uid !== uid) {
+            throw new Error('[relay-runtime] full relay profile requires config/server.env to be owned by the invoking user; no files were changed');
+        }
     }
     return await readFile(path, 'utf8');
 }
@@ -919,7 +929,7 @@ export type RelayRuntimeSystemdShowResult = Readonly<{ status: number; stdout: s
 
 export type RelayRuntimeEffectiveDropInReader = (params: Readonly<{
     unitName: string;
-    mode: 'system';
+    mode: 'user' | 'system';
 }>) => RelayRuntimeSystemdShowResult;
 
 function parseEffectiveSystemdDropInPaths(stdout: string): readonly string[] {
@@ -927,6 +937,16 @@ function parseEffectiveSystemdDropInPaths(stdout: string): readonly string[] {
         .split(/\s+/u)
         .map((value) => value.trim())
         .filter((value) => isAbsolute(value) && value.endsWith('.conf'));
+}
+
+function requiresDirectUserProfileInvocation(): boolean {
+    const effectiveUid = typeof process.getuid === 'function' ? process.getuid() : null;
+    if (effectiveUid !== 0) return false;
+
+    const sudoUidText = String(process.env.SUDO_UID ?? '').trim();
+    if (!/^[1-9]\d*$/u.test(sudoUidText)) return false;
+    const sudoUid = Number(sudoUidText);
+    return Number.isSafeInteger(sudoUid) && sudoUid !== effectiveUid;
 }
 
 export async function preflightFullRelayRuntimeInstall(params: Readonly<{
@@ -937,17 +957,21 @@ export async function preflightFullRelayRuntimeInstall(params: Readonly<{
     env?: Readonly<Record<string, string>>;
     showEffectiveDropIns: RelayRuntimeEffectiveDropInReader;
 }>): Promise<void> {
-    if (params.platform !== 'linux' || params.backend !== 'systemd-system') {
-        throw new Error('[relay-runtime] full relay profile requires Linux systemd system mode; no files were changed');
+    if (params.platform !== 'linux' || (params.backend !== 'systemd-user' && params.backend !== 'systemd-system')) {
+        throw new Error('[relay-runtime] full relay profile requires Linux systemd user or system mode; no files were changed');
+    }
+    if (params.backend === 'systemd-user' && requiresDirectUserProfileInvocation()) {
+        throw new Error('[relay-runtime] full relay profile requires direct owner invocation; no files were changed');
     }
     if (Object.keys(params.env ?? {}).length > 0) {
         throw new Error('[relay-runtime] full relay profile does not accept environment overrides; no files were changed');
     }
-    const fullServerEnv = await readRequiredFullRelayServerEnv(params.configEnvPath);
+    const mode = params.backend === 'systemd-user' ? 'user' : 'system';
+    const fullServerEnv = await readRequiredFullRelayServerEnv({ path: params.configEnvPath, mode });
     if (!isFullRelayServerEnv(fullServerEnv)) {
         throw new Error('[relay-runtime] full relay profile requires a configured Postgres or MySQL server.env; no files were changed');
     }
-    const showResult = params.showEffectiveDropIns({ unitName: params.serviceName, mode: 'system' });
+    const showResult = params.showEffectiveDropIns({ unitName: params.serviceName, mode });
     if (showResult.status !== 0) {
         throw new Error('[relay-runtime] unable to inspect effective systemd drop-ins for full relay profile; no files were changed');
     }

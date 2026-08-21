@@ -904,4 +904,148 @@ describe('RelayHostEngine (local health)', () => {
       await expect(readFile(statePath, 'utf8')).resolves.toBe('state-before\n');
     });
   });
+
+  it('runs a systemd-user full-profile drop-in preflight with the user bus before legacy or payload mutation', async () => {
+    await withTemporaryHome(async (homeDir) => {
+      const defaults = {
+        channel: 'stable' as const,
+        mode: 'user' as const,
+        installRoot: join(homeDir, 'runtime'),
+        binDir: join(homeDir, 'bin'),
+        configDir: join(homeDir, 'config'),
+        dataDir: join(homeDir, 'data'),
+        logDir: join(homeDir, 'logs'),
+        serviceName: 'happier-server',
+        serverHost: '127.0.0.1',
+        serverPort: 3005,
+        healthPath: '/v1/version',
+      };
+      const dropInPath = join(homeDir, 'systemd', 'happier-server.service.d', '50-vendor.conf');
+      const payloadStatePath = join(defaults.installRoot, 'payload-marker');
+      await mkdir(defaults.configDir, { recursive: true });
+      await mkdir(defaults.installRoot, { recursive: true });
+      await mkdir(dirname(dropInPath), { recursive: true });
+      await writeFile(join(defaults.configDir, 'server.env'), 'HAPPIER_DB_PROVIDER=postgres\nDATABASE_URL=postgres://example\n', { mode: 0o600 });
+      await writeFile(dropInPath, '[Service]\nExecStartPre=/vendor-migrate\n', 'utf8');
+      await writeFile(payloadStatePath, 'payload-before\n', 'utf8');
+
+      const commands: Array<Readonly<{ cmd: string; args: readonly string[]; env: NodeJS.ProcessEnv | undefined }>> = [];
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      vi.doMock('../firstPartyRuntime/relayRuntime.js', async () => {
+        const actual = await vi.importActual<typeof import('../firstPartyRuntime/relayRuntime.js')>('../firstPartyRuntime/relayRuntime.js');
+        return { ...actual, resolveRelayRuntimeDefaults: () => defaults };
+      });
+      vi.doMock('node:child_process', async () => {
+        const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+        return {
+          ...actual,
+          spawnSync: (cmd: string, args?: readonly string[], options?: Readonly<{ env?: NodeJS.ProcessEnv }>) => {
+            commands.push({ cmd, args: args ?? [], env: options?.env });
+            return { status: 0, stdout: `${dropInPath}\n`, stderr: '' };
+          },
+        };
+      });
+
+      const { createRelayHostEngine } = await import('./relayHostEngine.js');
+      const engine = createRelayHostEngine({
+        resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+        runRemoteText: async () => ({ status: 0, stdout: '', stderr: '' }),
+        copyLocalDirectoryToRemote: async () => {},
+        installRemoteComponent: async () => ({ binaryPath: '$HOME/.happier/happier-server/current/happier-server', versionId: 'publicdev-1' }),
+      });
+
+      await expect(engine.installOrUpdate({
+        target: { kind: 'local' },
+        channel: 'stable',
+        mode: 'user',
+        profile: 'full',
+        selfHostRelayBinaryOverride: join(homeDir, 'payload', 'happier-server'),
+      })).rejects.toThrow(/conflicting systemd drop-in/i);
+
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toMatchObject({
+        cmd: 'systemctl',
+        args: ['--user', 'show', 'happier-server.service', '--property=DropInPaths', '--value'],
+      });
+      const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+      expect(commands[0]?.env?.XDG_RUNTIME_DIR).toBe(`/run/user/${uid}`);
+      expect(commands[0]?.env?.DBUS_SESSION_BUS_ADDRESS).toBe(`unix:path=/run/user/${uid}/bus`);
+      await expect(readFile(payloadStatePath, 'utf8')).resolves.toBe('payload-before\n');
+    });
+  });
+
+  it('rejects a sudo-root systemd-user full profile before systemctl or payload mutation', async () => {
+    await withTemporaryHome(async (homeDir) => {
+      const defaults = {
+        channel: 'stable' as const,
+        mode: 'user' as const,
+        installRoot: join(homeDir, 'runtime'),
+        binDir: join(homeDir, 'bin'),
+        configDir: join(homeDir, 'config'),
+        dataDir: join(homeDir, 'data'),
+        logDir: join(homeDir, 'logs'),
+        serviceName: 'happier-server',
+        serverHost: '127.0.0.1',
+        serverPort: 3005,
+        healthPath: '/v1/version',
+      };
+      const payloadStatePath = join(defaults.installRoot, 'payload-marker');
+      const originalGetuid = process.getuid;
+      const originalSudoUid = process.env.SUDO_UID;
+      if (!originalGetuid) {
+        throw new Error('Linux full-profile preflight tests require process.getuid');
+      }
+      await mkdir(defaults.configDir, { recursive: true });
+      await mkdir(defaults.installRoot, { recursive: true });
+      await writeFile(join(defaults.configDir, 'server.env'), 'HAPPIER_DB_PROVIDER=postgres\nDATABASE_URL=postgres://example\n', { mode: 0o600 });
+      await writeFile(payloadStatePath, 'payload-before\n', 'utf8');
+
+      const commands: string[][] = [];
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      Object.defineProperty(process, 'getuid', { value: () => 0 });
+      process.env.SUDO_UID = '1000';
+      vi.doMock('../firstPartyRuntime/relayRuntime.js', async () => {
+        const actual = await vi.importActual<typeof import('../firstPartyRuntime/relayRuntime.js')>('../firstPartyRuntime/relayRuntime.js');
+        return { ...actual, resolveRelayRuntimeDefaults: () => defaults };
+      });
+      vi.doMock('node:child_process', async () => {
+        const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+        return {
+          ...actual,
+          spawnSync: (cmd: string, args?: readonly string[]) => {
+            commands.push([cmd, ...(args ?? [])]);
+            return { status: 0, stdout: '', stderr: '' };
+          },
+        };
+      });
+
+      try {
+        const { createRelayHostEngine } = await import('./relayHostEngine.js');
+        const engine = createRelayHostEngine({
+          resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+          runRemoteText: async () => ({ status: 0, stdout: '', stderr: '' }),
+          copyLocalDirectoryToRemote: async () => {},
+          installRemoteComponent: async () => ({ binaryPath: '$HOME/.happier/happier-server/current/happier-server', versionId: 'publicdev-1' }),
+        });
+
+        await expect(engine.installOrUpdate({
+          target: { kind: 'local' },
+          channel: 'stable',
+          mode: 'user',
+          profile: 'full',
+          selfHostRelayBinaryOverride: join(homeDir, 'payload', 'happier-server'),
+        })).rejects.toThrow(/direct owner invocation/i);
+
+        expect(commands).toEqual([]);
+        await expect(readFile(payloadStatePath, 'utf8')).resolves.toBe('payload-before\n');
+      } finally {
+        Object.defineProperty(process, 'getuid', { value: originalGetuid });
+        if (originalSudoUid === undefined) {
+          delete process.env.SUDO_UID;
+        } else {
+          process.env.SUDO_UID = originalSudoUid;
+        }
+      }
+    });
+  });
 });

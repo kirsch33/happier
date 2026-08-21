@@ -347,6 +347,7 @@ async function installRemoteRelayRuntimeUsingSharedEngine(params: Readonly<{
   knownHostsMode?: 'app' | 'system';
   channel?: 'stable' | 'preview' | 'dev';
   mode?: 'user' | 'system';
+  profile?: 'light' | 'full';
   env?: Record<string, string>;
   selfHostRelayBinaryOverride?: string;
 }>): Promise<Readonly<{ relayUrl: string; mode: 'user' | 'system' }>> {
@@ -450,6 +451,7 @@ async function installRemoteRelayRuntimeUsingSharedEngine(params: Readonly<{
     target: { kind: 'ssh', ssh: engineSsh },
     channel: params.channel,
     mode: params.mode,
+    profile: params.profile,
     env: params.env,
     selfHostRelayBinaryOverride: params.selfHostRelayBinaryOverride,
   });
@@ -585,6 +587,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
           knownHostsMode,
           channel: parsed.channel,
           mode: parsed.relayRuntime?.mode ?? 'user',
+          profile: parsed.relayRuntime?.profile ?? 'light',
           env: parsed.relayRuntime?.env,
           selfHostRelayBinaryOverride: parsed.relayRuntime?.selfHostRelayBinaryOverride,
         });

@@ -193,6 +193,7 @@ export async function runRemoteBootstrapCommandDefault(params: Readonly<{
       },
       channel: params.parsed.channel,
       mode: params.parsed.relayRuntime?.mode ?? 'user',
+      profile: params.parsed.relayRuntime?.profile ?? 'light',
       env: params.parsed.relayRuntime?.env,
       selfHostRelayBinaryOverride: params.parsed.relayRuntime?.selfHostRelayBinaryOverride,
     }, {

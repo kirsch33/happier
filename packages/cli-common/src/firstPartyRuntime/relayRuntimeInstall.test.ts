@@ -94,6 +94,96 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
     }
   });
 
+  it('accepts a directly owned systemd-user full profile and asks the user-mode drop-in reader', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-user-preflight-'));
+    try {
+      const configEnvPath = join(homeDir, 'server.env');
+      await writeFile(configEnvPath, 'HAPPIER_DB_PROVIDER=postgres\nDATABASE_URL=postgres://example\n', { mode: 0o600 });
+      const readerCalls: unknown[] = [];
+
+      await expect(preflightFullRelayRuntimeInstall({
+        platform: 'linux',
+        backend: 'systemd-user',
+        configEnvPath,
+        serviceName: 'happier-server',
+        showEffectiveDropIns: (params) => {
+          readerCalls.push(params);
+          return { status: 0, stdout: '', stderr: '' };
+        },
+      })).resolves.toBeUndefined();
+
+      expect(readerCalls).toEqual([{ unitName: 'happier-server', mode: 'user' }]);
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a systemd-user full profile before inspecting drop-ins when server.env is not owned by the invoking user', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-user-owner-'));
+    const originalGetuid = process.getuid;
+    if (!originalGetuid) {
+      throw new Error('Linux full-profile preflight tests require process.getuid');
+    }
+    const actualUid = originalGetuid();
+    try {
+      const configEnvPath = join(homeDir, 'server.env');
+      await writeFile(configEnvPath, 'HAPPIER_DB_PROVIDER=postgres\nDATABASE_URL=postgres://example\n', { mode: 0o600 });
+      Object.defineProperty(process, 'getuid', { value: () => actualUid + 1 });
+      let showCalls = 0;
+
+      await expect(preflightFullRelayRuntimeInstall({
+        platform: 'linux',
+        backend: 'systemd-user',
+        configEnvPath,
+        serviceName: 'happier-server',
+        showEffectiveDropIns: () => {
+          showCalls += 1;
+          return { status: 0, stdout: '', stderr: '' };
+        },
+      })).rejects.toThrow(/owned by the invoking user/i);
+      expect(showCalls).toBe(0);
+    } finally {
+      Object.defineProperty(process, 'getuid', { value: originalGetuid });
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a sudo-root systemd-user full profile before inspecting drop-ins', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-user-sudo-'));
+    const originalGetuid = process.getuid;
+    const originalSudoUid = process.env.SUDO_UID;
+    if (!originalGetuid) {
+      throw new Error('Linux full-profile preflight tests require process.getuid');
+    }
+    try {
+      const configEnvPath = join(homeDir, 'server.env');
+      await writeFile(configEnvPath, 'HAPPIER_DB_PROVIDER=postgres\nDATABASE_URL=postgres://example\n', { mode: 0o600 });
+      Object.defineProperty(process, 'getuid', { value: () => 0 });
+      process.env.SUDO_UID = '1000';
+      let showCalls = 0;
+
+      await expect(preflightFullRelayRuntimeInstall({
+        platform: 'linux',
+        backend: 'systemd-user',
+        configEnvPath,
+        serviceName: 'happier-server',
+        showEffectiveDropIns: () => {
+          showCalls += 1;
+          return { status: 0, stdout: '', stderr: '' };
+        },
+      })).rejects.toThrow(/direct owner invocation/i);
+      expect(showCalls).toBe(0);
+    } finally {
+      Object.defineProperty(process, 'getuid', { value: originalGetuid });
+      if (originalSudoUid === undefined) {
+        delete process.env.SUDO_UID;
+      } else {
+        process.env.SUDO_UID = originalSudoUid;
+      }
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('blocks full-profile preflight when systemd reports a vendor or dash-prefix conflict', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-full-preflight-'));
     try {
