@@ -5,7 +5,11 @@ import { listPendingQueueV2LocalIdsFromServer } from '@/api/session/pendingQueue
 import { buildInactiveSessionResumeSpawnOptions } from '@/daemon/sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions';
 import { tryDecryptSessionMetadata } from '@/session/transport/encryption/sessionEncryptionContext';
 import { fetchSessionByIdCompat } from '@/session/transport/http/sessionsHttp';
+import { sendSessionMessage } from '@/session/services/sendSessionMessage';
+import type { createFreshProviderRecoveryReservationStore } from './freshProviderRecoveryReservation';
 import { resolveVendorResumeIdFromSessionMetadata, inferAgentIdFromSessionMetadata } from '@happier-dev/agents';
+
+const RECOVERY_MESSAGE_MAX_LENGTH = 8_192;
 
 type ResumeFreshResult =
   | Readonly<{ ok: true; sessionId: string; providerSessionId: string }>
@@ -92,6 +96,8 @@ export async function resumeFreshProviderContext(params: Readonly<{
   credentials: Credentials;
   machineId: string;
   sessionId: string;
+  message?: string;
+  reservation: ReturnType<typeof createFreshProviderRecoveryReservationStore>;
   probeSessionRunnerServiceability: () => Promise<Readonly<{ state: string }>>;
   spawnSession: (options: NonNullable<ReturnType<typeof buildInactiveSessionResumeSpawnOptions>>) => Promise<SpawnSessionResult>;
   awaitCompletion: (input: Readonly<{ sessionId: string; requestId: string; previousProviderId: string | null; pid: number }>) => Promise<string | null>;
@@ -105,22 +111,101 @@ export async function resumeFreshProviderContext(params: Readonly<{
   if (!rawSession || rawSession.id !== sessionId || rawSession.archivedAt !== null || rawSession.active === true) {
     return { ok: false, errorCode: 'session_not_inactive', errorMessage: 'The exact session must be unarchived and inactive.' };
   }
-  if (rawSession.pendingCount !== 1 || typeof rawSession.pendingVersion !== 'number') {
-    return { ok: false, errorCode: 'pending_not_exact', errorMessage: 'The session must have exactly one Pending request.' };
+  if (
+    (rawSession.pendingCount !== 0 && rawSession.pendingCount !== 1)
+    || typeof rawSession.pendingVersion !== 'number'
+  ) {
+    return { ok: false, errorCode: 'pending_shape_mismatch', errorMessage: 'The session must have exactly one Pending request.' };
   }
-  const pendingIds = await listPendingQueueV2LocalIdsFromServer({ token: params.credentials.token, sessionId });
+  let freshRawSession = rawSession;
+  let pendingIds = await listPendingQueueV2LocalIdsFromServer({ token: params.credentials.token, sessionId });
+  if (pendingIds.length !== rawSession.pendingCount) {
+    return { ok: false, errorCode: 'pending_shape_mismatch', errorMessage: 'The session must have exactly one Pending request.' };
+  }
+  if (rawSession.pendingCount === 0) {
+    const message = typeof params.message === 'string' ? params.message.trim() : '';
+    if (!message || message.length > RECOVERY_MESSAGE_MAX_LENGTH) {
+      return { ok: false, errorCode: 'pending_shape_mismatch', errorMessage: 'A bounded recovery instruction is required when the session has no Pending request.' };
+    }
+    const preflightMetadata = tryDecryptSessionMetadata({ credentials: params.credentials, rawSession });
+    if (!preflightMetadata) {
+      return { ok: false, errorCode: 'identity_unavailable', errorMessage: 'The session metadata cannot be decrypted on this machine.' };
+    }
+    const preflightBase = buildInactiveSessionResumeSpawnOptions({
+      sessionId,
+      rawSession,
+      metadata: preflightMetadata,
+      initialTranscriptAfterSeq: rawSession.seq,
+    });
+    if (!preflightBase || preflightBase.machineId !== params.machineId) {
+      return { ok: false, errorCode: 'identity_unavailable', errorMessage: 'The exact session is not owned by this machine.' };
+    }
+    const admissionAttempt = await params.reservation.prepareAdmission(sessionId);
+    if (!admissionAttempt.ok || !admissionAttempt.localId) {
+      return {
+        ok: false,
+        errorCode: admissionAttempt.ok ? 'reservation_corrupt' : admissionAttempt.code,
+        errorMessage: 'A matching durable fresh recovery reservation is required before admission.',
+      };
+    }
+    const seeded = await sendSessionMessage({
+      credentials: params.credentials,
+      idOrPrefix: sessionId,
+      message,
+      wait: false,
+      timeoutMs: 5_000,
+      requestedAction: { v: 1, kind: 'enqueue' },
+      resumeInactiveSession: false,
+      localId: admissionAttempt.localId,
+    });
+    const seededId = seeded.ok && seeded.sessionId === sessionId && seeded.localId.trim() === admissionAttempt.localId
+      ? admissionAttempt.localId
+      : '';
+    if (!seededId) {
+      return { ok: false, errorCode: 'seed_admission_unconfirmed', errorMessage: 'The recovery Pending request was not durably confirmed.' };
+    }
+    const confirmedRawSession = await fetchSessionByIdCompat({
+      token: params.credentials.token,
+      sessionId,
+      reason: 'manual-recovery',
+    });
+    if (
+      !confirmedRawSession
+      || confirmedRawSession.id !== sessionId
+      || confirmedRawSession.archivedAt !== null
+      || confirmedRawSession.active === true
+      || confirmedRawSession.pendingCount !== 1
+      || typeof confirmedRawSession.pendingVersion !== 'number'
+    ) {
+      return { ok: false, errorCode: 'post_seed_snapshot_drift', errorMessage: 'The recovery Pending request did not retain the exact inactive snapshot.' };
+    }
+    const confirmedPendingIds = await listPendingQueueV2LocalIdsFromServer({ token: params.credentials.token, sessionId });
+    if (confirmedPendingIds.length !== 1 || confirmedPendingIds[0] !== seededId) {
+      return { ok: false, errorCode: 'post_seed_snapshot_drift', errorMessage: 'The recovery Pending request did not retain exact durable custody.' };
+    }
+    freshRawSession = confirmedRawSession;
+    pendingIds = confirmedPendingIds;
+  }
   if (pendingIds.length !== 1) {
-    return { ok: false, errorCode: 'pending_not_exact', errorMessage: 'The session must have exactly one Pending request.' };
+    return { ok: false, errorCode: 'pending_shape_mismatch', errorMessage: 'The session must have exactly one Pending request.' };
   }
-  const metadata = tryDecryptSessionMetadata({ credentials: params.credentials, rawSession });
+  const pendingVersion = freshRawSession.pendingVersion;
+  if (typeof pendingVersion !== 'number') {
+    return { ok: false, errorCode: 'pending_shape_mismatch', errorMessage: 'The session must retain an exact Pending version.' };
+  }
+  const reservationClaim = await params.reservation.claim(sessionId, pendingIds[0], pendingVersion);
+  if (!reservationClaim.ok) {
+    return { ok: false, errorCode: reservationClaim.code, errorMessage: 'A matching fresh recovery reservation is required.' };
+  }
+  const metadata = tryDecryptSessionMetadata({ credentials: params.credentials, rawSession: freshRawSession });
   if (!metadata) {
     return { ok: false, errorCode: 'identity_unavailable', errorMessage: 'The session metadata cannot be decrypted on this machine.' };
   }
   const base = buildInactiveSessionResumeSpawnOptions({
     sessionId,
-    rawSession,
+    rawSession: freshRawSession,
     metadata,
-    initialTranscriptAfterSeq: rawSession.seq,
+    initialTranscriptAfterSeq: freshRawSession.seq,
     executionAuthorization: { provenance: 'user_request', requestId: pendingIds[0] },
   });
   if (!base || base.machineId !== params.machineId) {
@@ -131,8 +216,8 @@ export async function resumeFreshProviderContext(params: Readonly<{
     machineId: params.machineId,
     sessionId,
     requestId: pendingIds[0],
-    pendingVersion: rawSession.pendingVersion,
-    expectedPendingSnapshot: { pendingVersion: rawSession.pendingVersion, requestId: pendingIds[0] },
+    pendingVersion,
+    expectedPendingSnapshot: { pendingVersion, requestId: pendingIds[0] },
     spawnSession: async (options) => {
       const { resume: _resume, ...withoutVendorResume } = options;
       return await params.spawnSession({
@@ -160,7 +245,12 @@ export async function resumeFreshProviderContext(params: Readonly<{
     previousProviderId,
     pid: activation.pid,
   });
-  return providerSessionId
-    ? { ok: true, sessionId, providerSessionId }
-    : { ok: false, errorCode: 'completion_unproven', errorMessage: 'Provider ID publication and Pending drain completion are not yet proven.' };
+  if (!providerSessionId) {
+    return { ok: false, errorCode: 'completion_unproven', errorMessage: 'Provider ID publication and Pending drain completion are not yet proven.' };
+  }
+  const reservationClear = await params.reservation.clearProven(sessionId, pendingIds[0], pendingVersion);
+  if (!reservationClear.ok) {
+    return { ok: false, errorCode: 'completion_unproven', errorMessage: 'Fresh recovery reservation completion could not be proven.' };
+  }
+  return { ok: true, sessionId, providerSessionId };
 }

@@ -101,6 +101,7 @@ import { startDaemonControlServer } from './controlServer';
 import { resolveTrackedSessionCatalogAgentId } from './sessions/resolveTrackedSessionCatalogAgentId';
 import { activatePendingInactiveSession } from './sessions/activatePendingInactiveSession';
 import { awaitFreshProviderCompletion, resumeFreshProviderContext } from './sessions/resumeFreshProviderContext';
+import { createFreshProviderRecoveryReservationStore } from './sessions/freshProviderRecoveryReservation';
 import { HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE } from '@/agent/runtime/freshProviderContext';
 import { resolveExistingRunnerAcceptance } from './spawn/resolveRunnerAcceptance';
 import {
@@ -1746,6 +1747,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
     // This prevents stuck lock files when auth is interrupted or cannot proceed.
     const auth = await authAndSetupMachineIfNeeded();
     const credentials = auth.credentials;
+    const freshRecoveryReservations = createFreshProviderRecoveryReservationStore({
+      happyHomeDir: configuration.happyHomeDir,
+      serverId: configuration.activeServerId,
+      token: credentials.token,
+    });
     let machineId = auth.machineId;
     logger.debug('[DAEMON RUN] Auth and machine setup complete');
 
@@ -4708,6 +4714,8 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           maxDelayMs: sessionRespawnMaxDelayMs,
           jitterMs: sessionRespawnJitterMs,
           isSessionAlreadyRunning,
+          isSessionRespawnSuppressed: async (sessionId) => await freshRecoveryReservations.isReserved(sessionId),
+          withRespawnLifecycle: async (sessionId, action) => await freshRecoveryReservations.withLifecycle(sessionId, action),
           spawnSession,
           resolveRespawnOptions: async (input) => {
             return await resolveRespawnSessionRuntimeSnapshot({
@@ -6428,11 +6436,13 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       stopSession,
       prepareStopSession: prepareStopSessionForDaemonStop,
       spawnSession,
-      resumeFreshProviderContext: async ({ sessionId }) =>
+      resumeFreshProviderContext: async ({ sessionId, message }) =>
         await resumeFreshProviderContext({
           credentials,
           machineId,
           sessionId,
+          ...(message ? { message } : {}),
+          reservation: freshRecoveryReservations,
           probeSessionRunnerServiceability: async () => await probeSessionRunnerServiceability(sessionId),
           spawnSession,
           awaitCompletion: async ({ requestId, previousProviderId, pid }) => awaitFreshProviderCompletion({
@@ -8378,22 +8388,25 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               });
 
               connectedApiMachine.onPendingSessionActivationHint(async (hint) => {
-                const result = await activatePendingInactiveSession({
-                  credentials,
-                  machineId,
-                  sessionId: hint.sessionId,
-                  requestId: hint.requestId,
-                  pendingVersion: hint.pendingVersion,
-                  spawnSession: async (options) => await spawnSession(options),
-                });
-                if (result.status === 'rejected') {
-                  logger.warn('[DAEMON RUN] Exact inactive Pending activation was rejected; Pending custody retained', {
+                await freshRecoveryReservations.withLifecycle(hint.sessionId, async () => {
+                  if (await freshRecoveryReservations.isReserved(hint.sessionId)) return;
+                  const result = await activatePendingInactiveSession({
+                    credentials,
+                    machineId,
                     sessionId: hint.sessionId,
                     requestId: hint.requestId,
-                    source: hint.source,
-                    reason: result.reason,
+                    pendingVersion: hint.pendingVersion,
+                    spawnSession: async (options) => await spawnSession(options),
                   });
-                }
+                  if (result.status === 'rejected') {
+                    logger.warn('[DAEMON RUN] Exact inactive Pending activation was rejected; Pending custody retained', {
+                      sessionId: hint.sessionId,
+                      requestId: hint.requestId,
+                      source: hint.source,
+                      reason: result.reason,
+                    });
+                  }
+                });
               });
 
               daemonConnectivityCoordinator = createDaemonConnectivityCoordinator({

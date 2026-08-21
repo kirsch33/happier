@@ -397,7 +397,7 @@ export function createDaemonControlApp({
   stopSession: (sessionId: string) => Promise<StopSessionResult>;
   prepareStopSession?: (child: TrackedSession) => Promise<void> | void;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
-  resumeFreshProviderContext?: (input: Readonly<{ sessionId: string }>) => Promise<unknown>;
+  resumeFreshProviderContext?: (input: Readonly<{ sessionId: string; message?: string }>) => Promise<unknown>;
   resolveSpawnSessionByNonce?: (spawnNonce: string) => Promise<SpawnSessionNonceResolution> | SpawnSessionNonceResolution;
   requestShutdown: () => void;
   beforeShutdown?: () => Promise<void>;
@@ -1771,7 +1771,10 @@ export function createDaemonControlApp({
 
   typed.post('/session/resume-fresh', {
     schema: {
-      body: z.object({ sessionId: z.string().trim().min(1) }).strict(),
+      body: z.object({
+        sessionId: z.string().trim().min(1),
+        message: z.string().trim().min(1).max(8_192).optional(),
+      }).strict(),
       response: {
         200: z.object({ ok: z.literal(true), sessionId: z.string(), providerSessionId: z.string() }),
         400: z.object({ ok: z.literal(false), errorCode: z.string(), errorMessage: z.string() }),
@@ -1784,7 +1787,10 @@ export function createDaemonControlApp({
       reply.code(400);
       return { ok: false as const, errorCode: 'completion_unproven', errorMessage: 'Fresh provider context is unavailable.' };
     }
-    const result = await resumeFreshProviderContext({ sessionId: request.body.sessionId });
+    const result = await resumeFreshProviderContext({
+      sessionId: request.body.sessionId,
+      ...(request.body.message ? { message: request.body.message } : {}),
+    });
     if (
       result && typeof result === 'object'
       && (result as { ok?: unknown }).ok === true
@@ -2302,7 +2308,7 @@ export function startDaemonControlServer({
   stopSession: (sessionId: string) => Promise<StopSessionResult>;
   prepareStopSession?: (child: TrackedSession) => Promise<void> | void;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
-  resumeFreshProviderContext?: (input: Readonly<{ sessionId: string }>) => Promise<unknown>;
+  resumeFreshProviderContext?: (input: Readonly<{ sessionId: string; message?: string }>) => Promise<unknown>;
   resolveSpawnSessionByNonce?: (spawnNonce: string) => Promise<SpawnSessionNonceResolution> | SpawnSessionNonceResolution;
   requestShutdown: () => void;
   beforeShutdown?: () => Promise<void>;

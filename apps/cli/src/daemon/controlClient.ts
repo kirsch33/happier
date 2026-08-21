@@ -818,8 +818,11 @@ export type ResumeFreshDaemonSessionResult =
   | Readonly<{ ok: true; sessionId: string; providerSessionId: string }>
   | Readonly<{ ok: false; errorCode: string; errorMessage: string }>;
 
-export async function resumeFreshDaemonSession(sessionId: string): Promise<ResumeFreshDaemonSessionResult> {
-  const result = await daemonPost('/session/resume-fresh', { sessionId });
+export async function resumeFreshDaemonSession(sessionId: string, message?: string): Promise<ResumeFreshDaemonSessionResult> {
+  const result = await daemonPost('/session/resume-fresh', {
+    sessionId,
+    ...(message ? { message } : {}),
+  });
   if (
     result && typeof result === 'object'
     && (result as { ok?: unknown }).ok === true

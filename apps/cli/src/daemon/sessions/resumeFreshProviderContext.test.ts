@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   activate: vi.fn(),
@@ -6,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   listPending: vi.fn(),
   decrypt: vi.fn(),
   build: vi.fn(),
+  send: vi.fn(),
   inferAgentId: vi.fn(),
   resolveVendorResumeId: vi.fn(),
 }));
@@ -25,12 +29,27 @@ vi.mock('@/session/transport/encryption/sessionEncryptionContext', () => ({
 vi.mock('@/daemon/sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions', () => ({
   buildInactiveSessionResumeSpawnOptions: mocks.build,
 }));
+vi.mock('@/session/services/sendSessionMessage', () => ({
+  sendSessionMessage: mocks.send,
+}));
 vi.mock('@happier-dev/agents', () => ({
   inferAgentIdFromSessionMetadata: mocks.inferAgentId,
   resolveVendorResumeIdFromSessionMetadata: mocks.resolveVendorResumeId,
 }));
 
 import { awaitFreshProviderCompletion, resumeFreshProviderContext } from './resumeFreshProviderContext';
+import { createFreshProviderRecoveryReservationStore } from './freshProviderRecoveryReservation';
+
+const reservationDirs: string[] = [];
+afterEach(async () => await Promise.all(reservationDirs.splice(0).map(async (dir) => await rm(dir, { recursive: true, force: true }))));
+
+function reservationToken(sub: string, jti: string): string {
+  return [
+    Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify({ sub, jti })).toString('base64url'),
+    'signature',
+  ].join('.');
+}
 
 describe('resumeFreshProviderContext', () => {
   const credentials = { token: 'token' } as any;
@@ -49,7 +68,7 @@ describe('resumeFreshProviderContext', () => {
   };
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mocks.fetch.mockResolvedValue(rawSession);
     mocks.listPending.mockResolvedValue(['pending_exact']);
     mocks.decrypt.mockReturnValue({ metadata: 'decrypted' });
@@ -57,6 +76,7 @@ describe('resumeFreshProviderContext', () => {
     mocks.inferAgentId.mockReturnValue('codex');
     mocks.resolveVendorResumeId.mockReturnValue('provider_old');
     mocks.activate.mockResolvedValue({ status: 'activated', runnerAcceptance: 'newly_accepted', pid: 777 });
+    mocks.send.mockResolvedValue({ ok: true, sessionId: 'sess_exact_123', localId: 'pending_seed', waited: false });
   });
 
   function validParams(overrides: Record<string, unknown> = {}) {
@@ -64,6 +84,11 @@ describe('resumeFreshProviderContext', () => {
       credentials,
       machineId: 'machine_local',
       sessionId: 'sess_exact_123',
+      reservation: {
+        prepareAdmission: vi.fn(async () => ({ ok: true, localId: 'pending_seed' })),
+        claim: vi.fn(async () => ({ ok: true })),
+        clearProven: vi.fn(async () => ({ ok: true })),
+      },
       probeSessionRunnerServiceability: async () => ({ state: 'runner_absent' }),
       spawnSession: vi.fn(async () => ({
         type: 'success' as const,
@@ -117,12 +142,268 @@ describe('resumeFreshProviderContext', () => {
     });
   });
 
+  it('requires a matching durable reservation claim before it can activate the exact Pending row', async () => {
+    const params = validParams({
+      reservation: { claim: vi.fn(async () => ({ ok: false, code: 'reservation_claim_mismatch' })), clearProven: vi.fn(async () => ({ ok: true })) },
+    });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: false, errorCode: 'reservation_claim_mismatch' });
+
+    expect(mocks.activate).not.toHaveBeenCalled();
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('retains the reservation when provider completion succeeds but durable clear proof fails', async () => {
+    const clearProven = vi.fn(async () => ({ ok: false }));
+    const params = validParams({
+      reservation: { claim: vi.fn(async () => ({ ok: true })), clearProven },
+    });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: false, errorCode: 'completion_unproven' });
+
+    expect(clearProven).toHaveBeenCalledWith('sess_exact_123', 'pending_exact', 7);
+  });
+
+  it('seeds exactly one queue-only Pending instruction before fresh activation when the exact inactive session has none', async () => {
+    const zeroPending = { ...rawSession, pendingCount: 0, pendingVersion: 6 };
+    const seededPending = { ...rawSession, pendingCount: 1, pendingVersion: 7 };
+    mocks.fetch.mockResolvedValueOnce(zeroPending).mockResolvedValueOnce(seededPending);
+    mocks.listPending.mockResolvedValueOnce([]).mockResolvedValueOnce(['pending_seed']);
+    const params = validParams({ message: 'Start fresh from this recovery instruction.' });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: true });
+
+    expect(mocks.send).toHaveBeenCalledWith({
+      credentials,
+      idOrPrefix: 'sess_exact_123',
+      message: 'Start fresh from this recovery instruction.',
+      wait: false,
+      timeoutMs: 5_000,
+      requestedAction: { v: 1, kind: 'enqueue' },
+      resumeInactiveSession: false,
+      localId: 'pending_seed',
+    });
+    expect(mocks.activate).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'pending_seed',
+      pendingVersion: 7,
+      expectedPendingSnapshot: { pendingVersion: 7, requestId: 'pending_seed' },
+    }));
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { raw: { ...rawSession, pendingCount: 0, pendingVersion: 6 }, pendingIds: [], message: undefined },
+    { raw: { ...rawSession, pendingCount: 2 }, pendingIds: ['pending_exact', 'pending_other'], message: 'Start fresh.' },
+  ])('rejects unsafe zero-or-many Pending recovery without admission or spawn', async ({ raw, pendingIds, message }) => {
+    mocks.fetch.mockResolvedValue(raw);
+    mocks.listPending.mockResolvedValue(pendingIds);
+    const params = validParams({ message });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: false });
+
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.activate).not.toHaveBeenCalled();
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: 'admission is unconfirmed',
+      send: { ok: false, code: 'timeout' },
+      postSeedIds: ['pending_seed'],
+    },
+    {
+      label: 'the re-fetched durable Pending row differs from the seeded local id',
+      send: { ok: true, sessionId: 'sess_exact_123', localId: 'pending_seed', waited: false },
+      postSeedIds: ['pending_other'],
+    },
+  ])('fails closed when $label', async ({ send, postSeedIds }) => {
+    const zeroPending = { ...rawSession, pendingCount: 0, pendingVersion: 6 };
+    const seededPending = { ...rawSession, pendingCount: 1, pendingVersion: 7 };
+    mocks.fetch.mockResolvedValueOnce(zeroPending).mockResolvedValueOnce(seededPending);
+    mocks.listPending.mockResolvedValueOnce([]).mockResolvedValueOnce(postSeedIds);
+    mocks.send.mockResolvedValue(send);
+    const params = validParams({ message: 'Start fresh from this recovery instruction.' });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({
+      ok: false,
+      errorCode: send.ok ? 'post_seed_snapshot_drift' : 'seed_admission_unconfirmed',
+    });
+
+    expect(mocks.activate).not.toHaveBeenCalled();
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unarmed zero-Pending recovery before it can admit or spawn work', async () => {
+    const zeroPending = { ...rawSession, pendingCount: 0, pendingVersion: 6 };
+    mocks.fetch.mockResolvedValue(zeroPending);
+    mocks.listPending.mockResolvedValue([]);
+    const params = validParams({
+      message: 'Start fresh from this recovery instruction.',
+      reservation: {
+        prepareAdmission: vi.fn(async () => ({ ok: false, code: 'reservation_missing' })),
+        claim: vi.fn(async () => ({ ok: true })),
+        clearProven: vi.fn(async () => ({ ok: true })),
+      },
+    });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: false, errorCode: 'reservation_missing' });
+
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.activate).not.toHaveBeenCalled();
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('reuses one durable admission id across concurrent zero-Pending recovery and a reload retry, admitting one row and accepting at most one fresh spawn', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-fresh-context-'));
+    reservationDirs.push(homeDir);
+    const token = reservationToken('account-a', 'issued-one');
+    const reservation = createFreshProviderRecoveryReservationStore({ happyHomeDir: homeDir, serverId: 'server-a', token });
+    await reservation.arm('sess_exact_123');
+    const zeroPending = { ...rawSession, pendingCount: 0, pendingVersion: 6 };
+    const seededPending = { ...rawSession, pendingCount: 1, pendingVersion: 7 };
+    const serverRows = new Set<string>();
+    let admitted = false;
+    let acceptedSpawns = 0;
+    mocks.fetch.mockImplementation(async () => admitted ? seededPending : zeroPending);
+    mocks.listPending.mockImplementation(async () => admitted ? [...serverRows] : []);
+    mocks.send.mockImplementation(async (input: { localId: string }) => {
+      serverRows.add(input.localId);
+      admitted = true;
+      return { ok: true, sessionId: 'sess_exact_123', localId: input.localId, waited: false };
+    });
+    mocks.activate.mockImplementation(async () => {
+      acceptedSpawns += 1;
+      return acceptedSpawns === 1
+        ? { status: 'activated', runnerAcceptance: 'newly_accepted', pid: 777 }
+        : { status: 'rejected', reason: 'already_active' };
+    });
+    const first = validParams({ message: 'Start fresh from this recovery instruction.', reservation });
+    const second = validParams({ message: 'Start fresh from this recovery instruction.', reservation });
+
+    const concurrent = await Promise.all([resumeFreshProviderContext(first), resumeFreshProviderContext(second)]);
+    expect(serverRows.size).toBe(1);
+    expect(new Set(mocks.send.mock.calls.map(([input]) => input.localId))).toEqual(serverRows);
+    expect(concurrent.filter((result) => result.ok)).toHaveLength(1);
+
+    const reloaded = createFreshProviderRecoveryReservationStore({
+      happyHomeDir: homeDir,
+      serverId: 'server-a',
+      token: reservationToken('account-a', 'issued-two'),
+    });
+    const retry = validParams({ message: 'Start fresh from this recovery instruction.', reservation: reloaded });
+    await expect(resumeFreshProviderContext(retry)).resolves.toMatchObject({ ok: false });
+    expect(serverRows.size).toBe(1);
+  });
+
+  it('retains a durably seeded but unconfirmed admission across reload and retries with the same local id without another row', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-fresh-context-retry-'));
+    reservationDirs.push(homeDir);
+    const token = reservationToken('account-a', 'issued-one');
+    const reservation = createFreshProviderRecoveryReservationStore({ happyHomeDir: homeDir, serverId: 'server-a', token });
+    await reservation.arm('sess_exact_123');
+    const zeroPending = { ...rawSession, pendingCount: 0, pendingVersion: 6 };
+    const seededPending = { ...rawSession, pendingCount: 1, pendingVersion: 7 };
+    const serverRows = new Set<string>();
+    const sentLocalIds: string[] = [];
+    let visiblePending = false;
+    mocks.fetch.mockImplementation(async () => visiblePending ? seededPending : zeroPending);
+    mocks.listPending.mockImplementation(async () => visiblePending ? [...serverRows] : []);
+    mocks.send.mockImplementation(async (input: { localId: string }) => {
+      sentLocalIds.push(input.localId);
+      serverRows.add(input.localId);
+      if (sentLocalIds.length === 1) return { ok: false, code: 'timeout' };
+      visiblePending = true;
+      return { ok: true, sessionId: 'sess_exact_123', localId: input.localId, waited: false };
+    });
+    const first = validParams({ message: 'Start fresh from this recovery instruction.', reservation });
+
+    await expect(resumeFreshProviderContext(first)).resolves.toMatchObject({ ok: false });
+    const reloaded = createFreshProviderRecoveryReservationStore({
+      happyHomeDir: homeDir,
+      serverId: 'server-a',
+      token: reservationToken('account-a', 'issued-two'),
+    });
+    const retry = validParams({ message: 'Start fresh from this recovery instruction.', reservation: reloaded });
+    await expect(resumeFreshProviderContext(retry)).resolves.toMatchObject({ ok: true });
+
+    expect(new Set(sentLocalIds).size).toBe(1);
+    expect(serverRows.size).toBe(1);
+    expect(mocks.activate).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a different sole Pending row after reloading a persisted admission id without send, activation, or spawn', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-fresh-context-wrong-row-'));
+    reservationDirs.push(homeDir);
+    const reservation = createFreshProviderRecoveryReservationStore({
+      happyHomeDir: homeDir, serverId: 'server-a', token: reservationToken('account-a', 'issued-one'),
+    });
+    await reservation.arm('sess_exact_123');
+    await reservation.prepareAdmission('sess_exact_123');
+    const reloaded = createFreshProviderRecoveryReservationStore({
+      happyHomeDir: homeDir, serverId: 'server-a', token: reservationToken('account-a', 'issued-two'),
+    });
+    mocks.listPending.mockResolvedValue(['pending-different']);
+    const params = validParams({ reservation: reloaded });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({
+      ok: false, errorCode: 'reservation_claim_mismatch',
+    });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.activate).not.toHaveBeenCalled();
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on a malformed persisted admission id before any zero-Pending send or activation', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-fresh-context-corrupt-admission-'));
+    reservationDirs.push(homeDir);
+    const reservation = createFreshProviderRecoveryReservationStore({
+      happyHomeDir: homeDir, serverId: 'server-a', token: reservationToken('account-a', 'issued-one'),
+    });
+    await reservation.arm('sess_exact_123');
+    const path = reservation.filePathFor('sess_exact_123');
+    const persisted = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    await writeFile(path, JSON.stringify({ ...persisted, admissionLocalId: ['not-a-string'] }), { mode: 0o600 });
+    mocks.fetch.mockResolvedValue({ ...rawSession, pendingCount: 0, pendingVersion: 6 });
+    mocks.listPending.mockResolvedValue([]);
+    const params = validParams({ message: 'Start fresh from this recovery instruction.', reservation });
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: false, errorCode: 'reservation_corrupt' });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.activate).not.toHaveBeenCalled();
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('does not enqueue a second recovery row when a retry sees the durable seeded Pending row', async () => {
+    const zeroPending = { ...rawSession, pendingCount: 0, pendingVersion: 6 };
+    const seededPending = { ...rawSession, pendingCount: 1, pendingVersion: 7 };
+    mocks.fetch
+      .mockResolvedValueOnce(zeroPending)
+      .mockResolvedValueOnce(seededPending)
+      .mockResolvedValueOnce(seededPending);
+    mocks.listPending
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(['pending_seed'])
+      .mockResolvedValueOnce(['pending_seed']);
+    const first = validParams({ message: 'Start fresh from this recovery instruction.' });
+    const retry = validParams({
+      message: 'Start fresh from this recovery instruction.',
+      probeSessionRunnerServiceability: async () => ({ state: 'runner_present' }),
+    });
+
+    await expect(resumeFreshProviderContext(first)).resolves.toMatchObject({ ok: true });
+    await expect(resumeFreshProviderContext(retry)).resolves.toMatchObject({ ok: false, errorCode: 'runner_not_absent' });
+
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(mocks.activate).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     { raw: null, expected: 'session_not_inactive' },
     { raw: { ...rawSession, archivedAt: '2026-08-21' }, expected: 'session_not_inactive' },
     { raw: { ...rawSession, active: true }, expected: 'session_not_inactive' },
-    { raw: { ...rawSession, pendingCount: 2 }, expected: 'pending_not_exact' },
-    { raw: { ...rawSession, pendingVersion: undefined }, expected: 'pending_not_exact' },
+    { raw: { ...rawSession, pendingCount: 2 }, expected: 'pending_shape_mismatch' },
+    { raw: { ...rawSession, pendingVersion: undefined }, expected: 'pending_shape_mismatch' },
   ])('rejects inactive/Pending preflight failure $expected without mutation', async ({ raw, expected }) => {
     mocks.fetch.mockResolvedValue(raw);
     const params = validParams();
@@ -132,8 +413,8 @@ describe('resumeFreshProviderContext', () => {
   });
 
   it.each([
-    { pendingIds: [], expected: 'pending_not_exact' },
-    { pendingIds: ['pending_exact', 'pending_other'], expected: 'pending_not_exact' },
+    { pendingIds: [], expected: 'pending_shape_mismatch' },
+    { pendingIds: ['pending_exact', 'pending_other'], expected: 'pending_shape_mismatch' },
     { decrypt: null, expected: 'identity_unavailable' },
     { build: null, expected: 'identity_unavailable' },
     { build: { ...spawnOptions, machineId: 'other_machine' }, expected: 'identity_unavailable' },

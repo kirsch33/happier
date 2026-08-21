@@ -218,6 +218,7 @@ const harness = vi.hoisted(() => {
     terminalStatus?: string;
   }) => Promise<unknown>) | null = null;
   let resolveSpawnSessionByNonceRef: ((spawnNonce: string) => Promise<unknown> | unknown) | null = null;
+  let resumeFreshProviderContextRef: ((input: { sessionId: string; message?: string }) => Promise<unknown>) | null = null;
   let pendingSessionActivationHintListenerRef: ((hint: {
     sessionId: string;
     requestId: string;
@@ -277,6 +278,10 @@ const harness = vi.hoisted(() => {
       resolveSpawnSessionByNonceRef = fn;
     },
     getResolveSpawnSessionByNonce: () => resolveSpawnSessionByNonceRef,
+    setResumeFreshProviderContext: (fn: (input: { sessionId: string; message?: string }) => Promise<unknown>) => {
+      resumeFreshProviderContextRef = fn;
+    },
+    getResumeFreshProviderContext: () => resumeFreshProviderContextRef,
     setStopSession: (fn: (sessionId: string) => Promise<import('./sessions/stopSessionContract').StopSessionResult>) => {
       stopSessionRef = fn;
     },
@@ -315,6 +320,7 @@ const harness = vi.hoisted(() => {
       isShuttingDownRef = null;
       turnLifecycleHandlerRef = null;
       resolveSpawnSessionByNonceRef = null;
+      resumeFreshProviderContextRef = null;
       pendingSessionActivationHintListenerRef = null;
     },
   };
@@ -375,7 +381,7 @@ vi.mock('@/ui/logger', () => ({
 vi.mock('@/ui/auth', () => ({
   authAndSetupMachineIfNeeded: vi.fn(async () => ({
     credentials: {
-      token: 'token-daemon',
+      token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
       encryption: { type: 'dataKey', publicKey: new Uint8Array(32).fill(1), machineKey: new Uint8Array(32).fill(2) },
     },
     machineId: 'machine-1',
@@ -484,7 +490,7 @@ const sessionRegistryCapture = vi.hoisted(() => ({
   clearSessionMarkerConnectedServiceRestartIntent: vi.fn(async (_pid: number) => {}),
   refreshSessionMarkerRespawn: vi.fn(async () => {}),
   removeSessionMarker: vi.fn(async (_pid: number) => {}),
-  writeSessionMarker: vi.fn(async (_marker: { respawn?: Record<string, unknown> }) => {}),
+  writeSessionMarker: vi.fn(async (_marker: { happySessionId?: string; respawn?: Record<string, unknown> }) => {}),
 }));
 const orphanedStartupSessionEndsCapture = vi.hoisted(() => ({
   publishOrphanedStartupSessionEnds: vi.fn((_params: {
@@ -661,6 +667,7 @@ vi.mock('./controlServer', () => ({
     isShuttingDown,
     handleConnectedServiceTurnLifecycle,
     resolveSpawnSessionByNonce,
+    resumeFreshProviderContext,
   }: {
     spawnSession: (options: any) => Promise<any>;
     stopSession: (sessionId: string) => Promise<import('./sessions/stopSessionContract').StopSessionResult>;
@@ -673,6 +680,7 @@ vi.mock('./controlServer', () => ({
       terminalStatus?: string;
     }) => Promise<unknown>;
     resolveSpawnSessionByNonce?: (spawnNonce: string) => Promise<unknown> | unknown;
+    resumeFreshProviderContext?: (input: { sessionId: string; message?: string }) => Promise<unknown>;
   }) => {
     harness.setSpawnSession(spawnSession);
     harness.setStopSession(stopSession);
@@ -690,6 +698,9 @@ vi.mock('./controlServer', () => ({
     }
     if (resolveSpawnSessionByNonce) {
       harness.setResolveSpawnSessionByNonce(resolveSpawnSessionByNonce);
+    }
+    if (resumeFreshProviderContext) {
+      harness.setResumeFreshProviderContext(resumeFreshProviderContext);
     }
     return {
       port: 43210,
@@ -887,7 +898,7 @@ vi.mock('./connectedServices/quotas/resolveConnectedServicesQuotasDaemonEnabled'
 }));
 
 describe('startDaemon spawn resume wiring (integration)', () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     harness.resetControlRefs();
     harness.apiMachine.recoverDaemonTerminalSessionMutationJournals.mockClear();
@@ -923,6 +934,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
     sessionRunnerActivityBoundaryMocks.readSessionRunnerLockStatus.mockResolvedValue({ ok: false, reason: 'not_found' });
     ensureSessionMachineAccessKeyBindingMock.mockReset();
     ensureSessionMachineAccessKeyBindingMock.mockResolvedValue(undefined);
+    await rm(join('/tmp/happy-home', 'fresh-provider-recovery-reservations'), { recursive: true, force: true });
     pendingMaterializationRpcMocks.callSessionRpc.mockImplementation(async (params) =>
       params.method.endsWith('wakeCapability.v1.get')
         ? { ok: true, capability: 'pending_queue_wake_v1', protocolVersion: 1, method: 'session.pendingQueue.wake.v1' }
@@ -976,7 +988,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
 
       await vi.waitFor(() => expect(ensureSessionMachineAccessKeyBindingMock).toHaveBeenCalledWith({
         serverUrl: expect.any(String),
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         sessionId: 'session-reattached-control',
         machineId: 'machine-1',
       }));
@@ -1040,7 +1052,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
 
       expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
       expect(listPendingQueueV2LocalIdsFromServer).toHaveBeenCalledWith({
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         sessionId: 'sess_plain',
       });
 
@@ -1069,6 +1081,159 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       } else {
         process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
       }
+      exitSpy.mockRestore();
+      if (run) {
+        harness.requestShutdown('happier-cli');
+        await run.catch(() => {});
+      }
+    }
+  });
+
+  it('suppresses replayed live and reconnect Pending hints only for an armed exact recovery, while an unrelated inactive session still activates', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    const rawSession = createSessionRecordFixture({
+      id: 'sess_plain',
+      seq: 12,
+      active: false,
+      encryptionMode: 'plain',
+      metadata: JSON.stringify({
+        machineId: 'machine-1',
+        flavor: 'codex',
+        codexSessionId: 'vendor-plain-1',
+        path: '/tmp',
+      }),
+      dataEncryptionKey: null,
+      pendingCount: 1,
+      pendingVersion: 9,
+    });
+    vi.mocked(fetchSessionByIdCompat).mockResolvedValue(rawSession);
+    vi.mocked(listPendingQueueV2LocalIdsFromServer).mockResolvedValue(['pending-unrelated']);
+    const { createFreshProviderRecoveryReservationStore } = await import('./sessions/freshProviderRecoveryReservation');
+    const reservations = createFreshProviderRecoveryReservationStore({
+      happyHomeDir: '/tmp/happy-home',
+      serverId: 'test-server',
+      token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
+    });
+    await reservations.arm('sess_reserved');
+    let run: Promise<void> | null = null;
+
+    try {
+      const { startDaemon } = await import('./startDaemon');
+      run = startDaemon();
+      await waitForSpawnSessionRegistration();
+
+      let releaseReservationGate: (() => void) | null = null;
+      let markReservationGateEntered: (() => void) | null = null;
+      const reservationGateEntered = new Promise<void>((resolve) => { markReservationGateEntered = resolve; });
+      const gate = reservations.withLifecycle('sess_reserved', async () => await new Promise<void>((resolve) => {
+        markReservationGateEntered?.();
+        releaseReservationGate = resolve;
+      }));
+      await reservationGateEntered;
+      let reservedListenerSettled = false;
+      const reservedHint = harness.emitPendingSessionActivationHint({
+        sessionId: 'sess_reserved', requestId: 'pending-reserved', pendingVersion: 3, source: 'live',
+      }).finally(() => { reservedListenerSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(reservedListenerSettled).toBe(false);
+      expect(vi.mocked(fetchSessionByIdCompat).mock.calls.some(([input]) => input.sessionId === 'sess_reserved')).toBe(false);
+      expect(vi.mocked(listPendingQueueV2LocalIdsFromServer).mock.calls.some(([input]) => input.sessionId === 'sess_reserved')).toBe(false);
+      expect(spawnHappyCLI).not.toHaveBeenCalled();
+      expect(sessionRegistryCapture.writeSessionMarker).not.toHaveBeenCalled();
+      releaseReservationGate!();
+      await gate;
+      await reservedHint;
+      expect(reservedListenerSettled).toBe(true);
+      expect(vi.mocked(fetchSessionByIdCompat).mock.calls.some(([input]) => input.sessionId === 'sess_reserved')).toBe(false);
+      expect(vi.mocked(listPendingQueueV2LocalIdsFromServer).mock.calls.some(([input]) => input.sessionId === 'sess_reserved')).toBe(false);
+      expect(sessionRegistryCapture.writeSessionMarker).not.toHaveBeenCalled();
+      await harness.emitPendingSessionActivationHint({
+        sessionId: 'sess_reserved', requestId: 'pending-reserved', pendingVersion: 3, source: 'changes',
+      });
+      expect(spawnHappyCLI).not.toHaveBeenCalled();
+
+      await harness.emitPendingSessionActivationHint({
+        sessionId: 'sess_plain', requestId: 'pending-unrelated', pendingVersion: 9, source: 'live',
+      });
+      expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+
+      harness.requestShutdown('happier-cli');
+      await run;
+      run = null;
+    } finally {
+      if (refreshEnvOriginal === undefined) {
+        delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      } else {
+        process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+      }
+      exitSpy.mockRestore();
+      if (run) {
+        harness.requestShutdown('happier-cli');
+        await run.catch(() => {});
+      }
+    }
+  });
+
+  it('does not let fresh recovery falsely succeed after the ordinary startup listener owns the Pending activation first', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+    process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+    let run: Promise<void> | null = null;
+    const rawSession = createSessionRecordFixture({
+      id: 'sess_generic_first', seq: 12, active: false, encryptionMode: 'plain', dataEncryptionKey: null,
+      metadata: JSON.stringify({ machineId: 'machine-1', flavor: 'codex', codexSessionId: 'provider-stale', path: '/tmp' }),
+      pendingCount: 1, pendingVersion: 9,
+    });
+    vi.mocked(fetchSessionByIdCompat).mockImplementation(async () => rawSession);
+    vi.mocked(listPendingQueueV2LocalIdsFromServer).mockResolvedValue(['pending-generic-first']);
+    let releaseMarkerWrite: (() => void) | null = null;
+    let markMarkerWriteEntered: (() => void) | null = null;
+    const markerWriteEntered = new Promise<void>((resolve) => { markMarkerWriteEntered = resolve; });
+    sessionRegistryCapture.writeSessionMarker.mockImplementationOnce(async (marker: { happySessionId?: string }) => {
+      expect(marker.happySessionId).toBe('sess_generic_first');
+      markMarkerWriteEntered?.();
+      await new Promise<void>((resolve) => { releaseMarkerWrite = resolve; });
+    });
+
+    try {
+      const { startDaemon } = await import('./startDaemon');
+      run = startDaemon();
+      await waitForSpawnSessionRegistration();
+
+      const generic = harness.emitPendingSessionActivationHint({
+        sessionId: 'sess_generic_first', requestId: 'pending-generic-first', pendingVersion: 9, source: 'live',
+      });
+      await markerWriteEntered;
+      expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+
+      const { createFreshProviderRecoveryReservationStore } = await import('./sessions/freshProviderRecoveryReservation');
+      const reservations = createFreshProviderRecoveryReservationStore({
+        happyHomeDir: '/tmp/happy-home', serverId: 'test-server',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
+      });
+      let armSettled = false;
+      const arm = reservations.arm('sess_generic_first').finally(() => { armSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(armSettled).toBe(false);
+      releaseMarkerWrite!();
+      await generic;
+      await arm;
+      sessionRunnerActivityBoundaryMocks.readProcessRunState.mockResolvedValue('servable');
+      const resumeFresh = harness.getResumeFreshProviderContext();
+      expect(resumeFresh).not.toBeNull();
+      await expect(resumeFresh!({ sessionId: 'sess_generic_first' })).resolves.toMatchObject({
+        ok: false, errorCode: 'runner_not_absent',
+      });
+      expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+
+      harness.requestShutdown('happier-cli');
+      await run;
+      run = null;
+    } finally {
+      if (refreshEnvOriginal === undefined) delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      else process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
       exitSpy.mockRestore();
       if (run) {
         harness.requestShutdown('happier-cli');
@@ -1184,7 +1349,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       const spawnOptions = {
         directory: '/tmp',
         backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         codexBackendMode: 'acp',
         spawnNonce: 'spawn-nonce-fast-ack',
         pendingFirstInput: {
@@ -1340,7 +1505,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         directory: '/tmp',
         backendTarget: { kind: 'builtInAgent' as const, agentId: 'codex' as const },
         existingSessionId: sessionId,
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         initialTranscriptAfterSeq: 17,
       };
 
@@ -1424,7 +1589,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       const spawnOptions = {
         directory: '/tmp',
         backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         codexBackendMode: 'acp',
         spawnNonce: `handoff-claim-failure-${claimAttemptIdentity}`,
         pendingFirstInput: {
@@ -3411,7 +3576,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         runnerAcceptance: 'preexisting_or_adopted',
       });
       expect(fetchSessionByIdCompat).toHaveBeenCalledWith(expect.objectContaining({
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         sessionId: 'sess_already_running',
         reason: 'manual-recovery',
       }));
@@ -3439,7 +3604,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       expect(spawnHappyCLI).not.toHaveBeenCalled();
       expect(explicitRecoveryCheckSpy).toHaveBeenCalledExactlyOnceWith({ sessionId: 'sess_already_running' });
       expect(callSessionRpc).toHaveBeenNthCalledWith(1, {
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         sessionId: 'sess_already_running',
         mode: 'plain',
         ctx: pendingMaterializationRpcMocks.ctx,
@@ -3447,7 +3612,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         request: {},
       });
       expect(callSessionRpc).toHaveBeenNthCalledWith(2, {
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         sessionId: 'sess_already_running',
         mode: 'plain',
         ctx: pendingMaterializationRpcMocks.ctx,
@@ -4907,7 +5072,7 @@ describe('startDaemon spawn resume wiring (integration)', () => {
 
       expect(guardedRpcMock).toHaveBeenCalledTimes(2);
       expect(guardedRpcMock.mock.calls[0]?.[0]).toEqual({
-        token: 'token-daemon',
+        token: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LWFjY291bnQifQ.signature',
         sessionId: 'sess_plain',
         mode: 'plain',
         ctx: pendingMaterializationRpcMocks.ctx,
