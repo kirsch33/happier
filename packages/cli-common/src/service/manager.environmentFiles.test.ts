@@ -7,10 +7,9 @@ describe('buildServiceDefinition environment files', () => {
     label: 'dev.happier.relay',
     programArgs: ['/opt/happier/bin/happier-server'],
     environmentFiles: ['/etc/happier/server.env', '/etc/happier/runtime env'],
-    execStartPre: ['/opt/happier/bin/happier-server', 'migrate', '--database', 'primary database'],
   } as const;
 
-  it('renders ordered environment files and an escaped pre-start argv without inlining environment contents', () => {
+  it('renders ordered environment files without inlining environment contents', () => {
     const definition = buildServiceDefinition({
       backend: 'systemd-system',
       homeDir: '/root',
@@ -19,12 +18,11 @@ describe('buildServiceDefinition environment files', () => {
 
     expect(definition.mode).toBe(0o644);
     expect(definition.contents).toContain('EnvironmentFile=/etc/happier/server.env\nEnvironmentFile="/etc/happier/runtime env"');
-    expect(definition.contents).toContain('ExecStartPre=/opt/happier/bin/happier-server migrate --database "primary database"');
     expect(definition.contents).not.toContain('database-password');
   });
 
   it.each(['launchd-system', 'schtasks-system'] as const)(
-    'rejects environment-file and pre-start features for %s before a definition can be written or commands planned',
+    'rejects environment-file features for %s before a definition can be written or commands planned',
     (backend) => {
       expect(() => buildServiceDefinition({ backend, homeDir: '/root', spec })).toThrow(/only supported by systemd/i);
     },

@@ -63,7 +63,6 @@ export function renderSystemdServiceUnit(params: Readonly<{
   workingDirectory?: string;
   env?: Record<string, string>;
   environmentFiles?: readonly string[];
-  execStartPre?: readonly string[];
   restart?: string;
   killMode?: 'control-group' | 'mixed' | 'process' | 'none';
   managedOomPreference?: 'none' | 'avoid' | 'omit';
@@ -102,9 +101,6 @@ export function renderSystemdServiceUnit(params: Readonly<{
 
   const envLines = systemdEnvLines(params.env);
   const environmentFileLines = systemdEnvironmentFileLines(params.environmentFiles);
-  const execStartPre = Array.isArray(params.execStartPre)
-    ? params.execStartPre.map((arg) => escapeSystemdExecArg(String(arg ?? ''))).join(' ')
-    : '';
   const workDirLine = workDir ? `WorkingDirectory=${workDir}\n` : '';
   const userLine = runAsUser ? `User=${runAsUser}\n` : '';
   const killModeLine = killMode ? `KillMode=${killMode}\n` : '';
@@ -121,7 +117,6 @@ export function renderSystemdServiceUnit(params: Readonly<{
 
   const environmentBlock = [...environmentFileLines, ...envLines];
   const envBlock = environmentBlock.length ? `\n${environmentBlock.join('\n')}\n` : '\n';
-  const execStartPreLine = execStartPre ? `ExecStartPre=${execStartPre}\n` : '';
 
   return `[Unit]
 Description=${desc}
@@ -130,7 +125,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-${workDirLine}${userLine}${killModeLine}${managedOomPreferenceLine}${envBlock}${execStartPreLine}ExecStart=${execStart}
+${workDirLine}${userLine}${killModeLine}${managedOomPreferenceLine}${envBlock}ExecStart=${execStart}
 Restart=${restartPolicy}
 RestartSec=2
 ${outLine}${errLine}[Install]

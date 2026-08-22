@@ -35,7 +35,6 @@ export type ServiceSpec = Readonly<{
   workingDirectory?: string;
   env?: Record<string, string>;
   environmentFiles?: readonly string[];
-  execStartPre?: readonly string[];
   runAsUser?: string;
   stdoutPath?: string;
   stderrPath?: string;
@@ -86,7 +85,6 @@ function normalizeSpec(spec: ServiceSpec): Required<ServiceSpec> {
     workingDirectory: String(spec?.workingDirectory ?? '').trim(),
     env: spec?.env ?? {},
     environmentFiles: Array.isArray(spec?.environmentFiles) ? spec.environmentFiles.map((path) => String(path ?? '')) : [],
-    execStartPre: Array.isArray(spec?.execStartPre) ? spec.execStartPre.map((arg) => String(arg ?? '')).filter(Boolean) : [],
     runAsUser: String(spec?.runAsUser ?? '').trim(),
     stdoutPath: String(spec?.stdoutPath ?? '').trim(),
     stderrPath: String(spec?.stderrPath ?? '').trim(),
@@ -135,9 +133,9 @@ export function resolveServiceDefinitionPath(params: Readonly<{
 export function buildServiceDefinition(params: Readonly<{ backend: ServiceBackend; homeDir: string; spec: ServiceSpec }>): ServiceDefinition {
   const s = normalizeSpec(params.spec);
   const backend = String(params.backend ?? '').trim() as ServiceBackend;
-  const hasSystemdOnlyFields = s.environmentFiles.length > 0 || s.execStartPre.length > 0;
+  const hasSystemdOnlyFields = s.environmentFiles.length > 0;
   if (hasSystemdOnlyFields && backend !== 'systemd-user' && backend !== 'systemd-system') {
-    throw new Error('environmentFiles and execStartPre are only supported by systemd service backends');
+    throw new Error('environmentFiles are only supported by systemd service backends');
   }
   const platform: NodeJS.Platform =
     backend === 'launchd-user' || backend === 'launchd-system'
@@ -162,7 +160,6 @@ export function buildServiceDefinition(params: Readonly<{ backend: ServiceBacken
       workingDirectory: s.workingDirectory,
       env: mergedEnv,
       environmentFiles: s.environmentFiles,
-      execStartPre: s.execStartPre,
       restart: s.restartPolicy,
       runAsUser: s.runAsUser,
       stdoutPath: s.stdoutPath,
