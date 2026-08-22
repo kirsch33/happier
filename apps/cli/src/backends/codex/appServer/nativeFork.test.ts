@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { createDeferred } from '@/testkit/async/deferred';
+
 import { createCodexAppServerRpcError } from './appServerCompatibility';
 import type { DisposableCodexAppServerClient } from './client/createCodexAppServerClient';
 import { forkCodexAppServerConversationNative } from './nativeFork';
@@ -178,16 +180,13 @@ describe('forkCodexAppServerConversationNative', () => {
     });
 
     it('waits for an ambiguous fork response to settle before disposing the client', async () => {
-        let resolveRequest: ((value: unknown) => void) | null = null;
-        let markRequestStarted: (() => void) | null = null;
-        const requestStarted = new Promise<void>((resolve) => {
-            markRequestStarted = resolve;
-        });
+        const requestStarted = createDeferred<void>();
+        const forkResponse = createDeferred<unknown>();
         const request = vi.fn<DisposableCodexAppServerClient['request']>()
-            .mockImplementationOnce(() => new Promise<unknown>((resolve) => {
-                resolveRequest = resolve;
-                markRequestStarted?.();
-            }));
+            .mockImplementationOnce(() => {
+                requestStarted.resolve();
+                return forkResponse.promise;
+            });
         const client = createClientDouble(request);
 
         const nativeFork = forkCodexAppServerConversationNative({
@@ -197,12 +196,10 @@ describe('forkCodexAppServerConversationNative', () => {
             createClient: async () => client,
         });
 
-        await requestStarted;
+        await requestStarted.promise;
         expect(client.dispose).not.toHaveBeenCalled();
 
-        const settle = resolveRequest;
-        if (!settle) throw new Error('Native fork request did not start');
-        settle({ threadId: '' });
+        forkResponse.resolve({ threadId: '' });
 
         await expect(nativeFork).resolves.toMatchObject({ type: 'indeterminate_after_dispatch' });
         expect(request).toHaveBeenCalledTimes(1);
