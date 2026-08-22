@@ -32,6 +32,7 @@ describe('activatePendingInactiveSession', () => {
       seq: 12,
       createdAt: 1,
       updatedAt: 1,
+      archivedAt: null,
       active: false,
       activeAt: 1,
       encryptionMode: 'plain',
@@ -55,6 +56,7 @@ describe('activatePendingInactiveSession', () => {
       type: 'success' as const,
       sessionId: 'session-1',
       runnerAcceptance: 'newly_accepted' as const,
+      pid: 321,
     }));
 
     await expect(activatePendingInactiveSession({
@@ -64,7 +66,7 @@ describe('activatePendingInactiveSession', () => {
       requestId: 'pending-after-ui-death',
       pendingVersion: 9,
       spawnSession,
-    })).resolves.toEqual({ status: 'activated', runnerAcceptance: 'newly_accepted' });
+    })).resolves.toEqual({ status: 'activated', runnerAcceptance: 'newly_accepted', pid: 321 });
 
     expect(spawnSession).toHaveBeenCalledTimes(1);
     expect(spawnSession).toHaveBeenCalledWith(expect.objectContaining({
@@ -104,7 +106,7 @@ describe('activatePendingInactiveSession', () => {
       machineId: 'machine-1',
       path: '/repo',
     };
-    const spawnSession = vi.fn();
+    const spawnSession = vi.fn(async () => ({ type: 'success' as const, sessionId: 'session-1' }));
 
     vi.mocked(fetchSessionByIdCompat).mockResolvedValue(baseSession);
     await expect(activatePendingInactiveSession({
@@ -128,6 +130,91 @@ describe('activatePendingInactiveSession', () => {
     })).resolves.toEqual({ status: 'not-needed', reason: 'pending-resolved' });
 
     expect(spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('requires the optional resume-fresh Pending snapshot to remain exactly one matching request', async () => {
+    const baseSession = {
+      id: 'session-1',
+      seq: 12,
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      active: false,
+      activeAt: 1,
+      encryptionMode: 'plain' as const,
+      metadata: JSON.stringify({ machineId: 'machine-1', path: '/repo', flavor: 'codex' }),
+      metadataVersion: 1,
+      agentState: null,
+      agentStateVersion: 0,
+      pendingCount: 1,
+      pendingVersion: 9,
+      dataEncryptionKey: null,
+      machineId: 'machine-1',
+      path: '/repo',
+    };
+    vi.mocked(fetchSessionByIdCompat).mockResolvedValue({ ...baseSession, pendingVersion: 10 });
+    vi.mocked(listPendingQueueV2LocalIdsFromServer).mockResolvedValue(['pending-after-ui-death', 'other-pending']);
+    const spawnSession = vi.fn(async () => ({ type: 'success' as const, sessionId: 'session-1' }));
+
+    await expect(activatePendingInactiveSession({
+      credentials,
+      machineId: 'machine-1',
+      sessionId: 'session-1',
+      requestId: 'pending-after-ui-death',
+      pendingVersion: 9,
+      expectedPendingSnapshot: { pendingVersion: 9, requestId: 'pending-after-ui-death' },
+      spawnSession,
+    })).resolves.toEqual({ status: 'rejected', reason: 'snapshot-stale' });
+
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a concurrent archive at the strict resume-fresh second fetch', async () => {
+    const archivedSession = {
+      id: 'session-1', seq: 12, createdAt: 1, updatedAt: 1, active: false, activeAt: 1,
+      archivedAt: 2,
+      encryptionMode: 'plain' as const,
+      metadata: JSON.stringify({ machineId: 'machine-1', path: '/repo', flavor: 'codex' }),
+      metadataVersion: 1, agentState: null, agentStateVersion: 0, pendingCount: 1, pendingVersion: 9,
+      dataEncryptionKey: null, machineId: 'machine-1', path: '/repo',
+    };
+    vi.mocked(fetchSessionByIdCompat).mockResolvedValue(archivedSession);
+    vi.mocked(listPendingQueueV2LocalIdsFromServer).mockResolvedValue(['pending-after-ui-death']);
+    const spawnSession = vi.fn(async () => ({ type: 'success' as const, sessionId: 'session-1' }));
+
+    await expect(activatePendingInactiveSession({
+      credentials,
+      machineId: 'machine-1',
+      sessionId: 'session-1',
+      requestId: 'pending-after-ui-death',
+      pendingVersion: 9,
+      expectedPendingSnapshot: { pendingVersion: 9, requestId: 'pending-after-ui-death' },
+      spawnSession,
+    })).resolves.toEqual({ status: 'rejected', reason: 'snapshot-stale' });
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps ordinary inactive-Pending activation permissive when no strict snapshot is requested', async () => {
+    const session = {
+      id: 'session-1', seq: 12, createdAt: 1, updatedAt: 1, active: false, activeAt: 1,
+      encryptionMode: 'plain' as const,
+      metadata: JSON.stringify({ machineId: 'machine-1', path: '/repo', flavor: 'codex' }),
+      metadataVersion: 1, agentState: null, agentStateVersion: 0, pendingCount: 2, pendingVersion: 10,
+      dataEncryptionKey: null, machineId: 'machine-1', path: '/repo',
+    };
+    vi.mocked(fetchSessionByIdCompat).mockResolvedValue(session);
+    vi.mocked(listPendingQueueV2LocalIdsFromServer).mockResolvedValue(['pending-after-ui-death', 'other-pending']);
+    const spawnSession = vi.fn(async () => ({ type: 'success' as const, sessionId: 'session-1' }));
+
+    await expect(activatePendingInactiveSession({
+      credentials,
+      machineId: 'machine-1',
+      sessionId: 'session-1',
+      requestId: 'pending-after-ui-death',
+      pendingVersion: 9,
+      spawnSession,
+    })).resolves.toEqual({ status: 'activated' });
+    expect(spawnSession).toHaveBeenCalledOnce();
   });
 
   it('rejects a Pending activation owned by a different exact machine', async () => {

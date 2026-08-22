@@ -88,6 +88,7 @@ import {
     type CodexAppServerProviderInputOutcomeBridge,
 } from './appServer/codexAppServerProviderInputOutcome';
 import { reportSessionToDaemonIfRunning } from '@/agent/runtime/startupSideEffects';
+import { consumeFreshProviderContextOnce } from '@/agent/runtime/freshProviderContext';
 import { isCodexAppServerNoActiveTurnToSteerError } from './appServer/appServerCompatibility';
 import { rememberCodexUsageLimitRecoveryPreference } from './appServer/rememberCodexUsageLimitRecoveryPreference';
 import { resolveConfiguredCodexHome } from './utils/resolveConfiguredCodexHome';
@@ -659,7 +660,8 @@ export async function runCodex(opts: {
     let useCodexAcp = codexBackendMode === 'acp';
     const useCodexAppServer = codexBackendMode === 'appServer';
     const remoteResumeBackendLabel = useCodexAppServer ? 'app-server' : 'ACP';
-    const resumeRequested = typeof opts.resume === 'string' && opts.resume.trim().length > 0;
+    const freshProviderContext = consumeFreshProviderContextOnce();
+    const resumeRequested = !freshProviderContext && typeof opts.resume === 'string' && opts.resume.trim().length > 0;
     let codexAcpAutoInstallError: string | null = null;
     if (useCodexAcp) {
         const ensureRuntimeInstallablesResult = await ensureRuntimeInstallablesForLaunch({
@@ -807,7 +809,9 @@ export async function runCodex(opts: {
         existingSessionId: opts.existingSessionId,
         uiLogPrefix: '[codex]',
         startupMetadataOverrides: createStartupMetadataOverrides(opts),
-        metadataKeysToUnsetOnAttach: codexBackendMode === 'acp'
+        metadataKeysToUnsetOnAttach: freshProviderContext
+            ? ['codexSessionId']
+            : codexBackendMode === 'acp'
             ? undefined
             : [
                 'acpSessionModesV1',
@@ -1675,6 +1679,7 @@ export async function runCodex(opts: {
     };
 
     const readAttachedCodexAppServerThreadId = (): string | null => {
+        if (freshProviderContext) return null;
         const metadata = session.getMetadataSnapshot() as Record<string, unknown> | null;
         if (resolveCodexSessionBackendMode({ metadata }) !== 'appServer') {
             return null;

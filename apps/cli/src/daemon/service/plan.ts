@@ -9,6 +9,7 @@ import { buildServicePath, planServiceAction, renderSystemdServiceUnit, renderWi
 export type DaemonServicePlatform = 'darwin' | 'linux' | 'win32';
 export type DaemonServiceMode = 'user' | 'system';
 export type DaemonServiceTargetMode = 'pinned' | 'default-following';
+export type DaemonServiceInstallActivation = 'immediate' | 'deferred';
 
 export type DaemonServicePlannedFile = Readonly<{
   path: string;
@@ -243,6 +244,7 @@ export function planDaemonServiceInstall(params: Readonly<{
   systemUser?: string;
   channel?: PublicReleaseRingId;
   targetMode?: DaemonServiceTargetMode;
+  activation?: DaemonServiceInstallActivation;
   darwinInstallMode?: 'rebootstrap' | 'kickstart';
   instanceId: string;
   activeServerId?: string | null;
@@ -255,6 +257,10 @@ export function planDaemonServiceInstall(params: Readonly<{
   entryPath: string;
   uid?: number;
 }>): DaemonServiceInstallPlan {
+  const activation: DaemonServiceInstallActivation = params.activation ?? 'immediate';
+  if (activation === 'deferred' && params.platform !== 'linux') {
+    throw new Error('Deferred daemon service installation is only supported on Linux');
+  }
   const instanceId = sanitizeServiceInstanceId(params.instanceId);
   const channel: PublicReleaseRingId = params.channel ?? 'stable';
   const targetMode: DaemonServiceTargetMode = params.targetMode ?? 'pinned';
@@ -427,7 +433,9 @@ export function planDaemonServiceInstall(params: Readonly<{
     });
   }
   commands.push({ cmd: 'systemctl', args: [...prefix, 'enable', unitName] });
-  commands.push({ cmd: 'systemctl', args: [...prefix, 'restart', unitName] });
+  if (activation === 'immediate') {
+    commands.push({ cmd: 'systemctl', args: [...prefix, 'restart', unitName] });
+  }
 
   return {
     platform: 'linux',
