@@ -327,7 +327,9 @@ export function classifyHappyProcess(proc: RawProcessInfo): HappyProcessInfo | n
     normalizedCommand.includes('@happier-dev/cli') ||
     normalizedCommand.includes('package-dist/index.mjs') ||
     normalizedName === 'happier' ||
-    normalizedName === 'happier.exe';
+    normalizedName === 'happier.exe' ||
+    normalizedName === 'hdev' ||
+    normalizedName === 'hdev.exe';
 
   if (!isHappy) return null;
 

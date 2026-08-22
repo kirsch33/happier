@@ -7,6 +7,17 @@ describe('classifyHappyProcess', () => {
     expect(res).toBeNull();
   });
 
+  it('recognizes hdev executable aliases as session wrappers without matching similarly named processes', () => {
+    for (const processInfo of [
+      { name: 'hdev', cmd: 'hdev --server greatwhitelab codex --yolo' },
+      { name: 'hdev.exe', cmd: 'C:\\Users\\alice\\.happier\\bin\\hdev.exe --server greatwhitelab codex --yolo' },
+    ]) {
+      expect(classifyHappyProcess({ pid: 123, ...processInfo })).toMatchObject({ type: 'dev-session' });
+    }
+
+    expect(classifyHappyProcess({ pid: 123, name: 'hdev-helper', cmd: 'hdev-helper --yolo' })).toBeNull();
+  });
+
   it('should detect a daemon process started from dist', () => {
     const res = classifyHappyProcess({
       pid: 123,
