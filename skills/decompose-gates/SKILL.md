@@ -5,7 +5,7 @@ description: Decompose a hard or multi-part task into independently checkable pi
 
 # Decompose With Gates
 
-Turn a hard task into pieces that can each pass or fail on their own, ordered so the riskiest assumption is tested first. Full doctrine: `docs/agent-craft.md` §2–§3.
+Turn a hard task into pieces that can each pass or fail on their own, ordered so the riskiest assumption is tested first.
 
 ## Procedure
 

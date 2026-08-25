@@ -5,7 +5,7 @@ description: Output contract for substantive deliverables — outcome first, evi
 
 # Handoff Report
 
-Structure any substantive report so the reader can act on the first paragraph and audit the rest. Full doctrine: `docs/agent-craft.md` §5 and §7.
+Structure any substantive report so the reader can act on the first paragraph and audit the rest.
 
 ## Order
 

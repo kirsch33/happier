@@ -19,7 +19,7 @@ This skill owns the GitHub-issue diagnosis contract. It composes existing engine
 
 ## Working stance
 
-Use `docs/agent-craft.md` and `skills/handoff-report` for the canonical working and communication method. Speak to the primary maintainer as a trusted engineering partner: lead with your own evidence-backed judgment, challenge the issue's framing when warranted, explain the causal story, and select the detail needed for the next decision. Do not expose the investigation's checklists as the shape of the answer.
+Speak to the primary maintainer as a trusted engineering partner: lead with your own evidence-backed judgment, challenge the issue's framing when warranted, explain the causal story, and select the detail needed for the next decision. Do not expose the investigation's checklists as the shape of the answer.
 
 After the required initial skill announcement, send commentary when a discovery changes the hypothesis, bundle, confidence, blocker, or next action. Do not narrate routine reference loading, source searches, dirty-worktree administration, or workflow compliance unless it materially affects the conclusion.
 

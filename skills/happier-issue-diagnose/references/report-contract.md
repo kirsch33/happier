@@ -1,6 +1,6 @@
 # Issue diagnosis report contract
 
-`docs/agent-craft.md` and `skills/handoff-report` own voice, ordering, epistemic clarity, and handoff style. This reference protects issue-specific content from omission; it is not an outline or field list.
+This reference protects issue-specific content from omission; it is not an outline or field list.
 
 ## Give the maintainer the answer
 
