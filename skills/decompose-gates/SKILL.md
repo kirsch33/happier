@@ -1,6 +1,6 @@
 ---
 name: decompose-gates
-description: Decompose a hard or multi-part task into independently checkable pieces with explicit verification gates and risk-weighted ordering. Use when planning corridor-sized work, writing lane briefs for subagents or Codex, or whenever a task is too large to verify as a whole.
+description: Decompose a hard or multi-part task into independently checkable pieces with explicit verification gates and risk-weighted ordering. Use when a task is too large to verify as a whole.
 ---
 
 # Decompose With Gates
@@ -18,17 +18,7 @@ Turn a hard task into pieces that can each pass or fail on their own, ordered so
 7. **Prefer consumed verticals over horizontal spines.** The first implementation slice should connect a real entry point through its canonical owner to an observable outcome. Do not split protocol/schema/producer/consumer into weeks of dormant layers whose correctness can only be known after activation. When compatibility forces phases, each phase names its active reader/consumer and removal condition.
 8. **Firewall live-path corrections.** If gated or dormant work exposes a live dispatch, lifecycle, persistence, migration, or startup defect, handle that correction as its own complete vertical at the live owner. Do not partially activate the dormant design to fix the production path.
 
-For compatibility-sensitive work, use `skills/happier-compatibility` and decompose the transition into independently falsifiable prepare/read, activate/write, migrate/backfill, mixed-version or rollback, and contract/removal claims only where those phases are reachable. Every such claim names its exact released/predecessor baseline and old/new producer-consumer direction; do not create empty phases for an additive or internal-only change.
-
-## When pieces become lane briefs
-
-- Coordinate conceptual seams, overlapping edit hunks, generated outputs, and exclusive runtime resources; do not treat file dirtiness or a prior edit as ownership. Keep an advisory integration map for live seams/resources when useful. Lanes may layer compatible changes onto the same current file, but must not overwrite concurrent work or independently make incompatible decisions for the same seam.
-- For cross-program work, name the seam authority and each lane's `Supersedes:`, `Extends:`, or `Consumes:` relationship. A dependent lane consumes a typed contract; it does not repair the owning seam from the wrong program.
-- Every brief carries its gate (the falsifiable claim plus its check). Update durable state only when plan-gate readiness, dependency availability, blocker state, approved authority/contract, substantial review-boundary state, or the final verdict changes. Ordinary closed subchecks, landed fixes, RED/GREEN iterations, and lane-local validations belong in command output and the concise lane handoff.
-- Hard gates are measured, not merely reported. Re-measure decision-material claims through their deciding test, source inspection, runtime observation, or artifact check; do not create decorative count gates.
-- A lane brief should be a sufficient restart brief on its own: if the lane dies, its on-disk report plus the brief must let a fresh agent continue without the lost transcript.
-- Include exact paths/symbols, observed evidence, in-scope and out-of-scope surfaces, success criteria, required validation, expected output, and stop/fallback conditions. For compatibility lanes, include baseline tags/commits/artifacts and component roles.
-- Schedule formal independent review at the fewest substantial integrated boundaries needed by the approved plan, plus explicit user-requested or high-risk triggers. Every lane performs a compact author self-attack without a separate workspace, report, or reviewer. Advisory review may inspect moving work; boundary/ship verdicts reconcile current decision-material paths. See root `AGENTS.md` → "Adversarial review and handoff".
+For compatibility-sensitive work, name the released baseline, old/new producer-consumer direction, and any reachable prepare, activation, migration, rollback, and removal claims. Do not invent phases for an additive or internal-only change.
 
 ## Output
 
