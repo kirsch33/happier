@@ -41,6 +41,7 @@ vi.mock('@/agent/runtime/startupSideEffects', () => ({
 }));
 
 import { createCodexAppServerRuntime, writeUsageLimitRecoveryIntentToMetadata } from './runtime';
+import { isCodexAppServerSteerTargetEndedError } from './appServerCompatibility';
 import { createCodexAppServerProcessEnv, createCodexAppServerTestEnvScope } from './testkit/fakeCodexAppServer';
 
 type CommittedSnapshotBody = Readonly<{
@@ -2210,11 +2211,18 @@ describe('createCodexAppServerRuntime', () => {
         });
     });
 
-    it('sets an initial resume goal before draining pending queue rows', async () => {
-        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-resume-initial-goal-');
-        const drainPending = vi.fn(async () => ({ materialized: 1, stoppedReason: 'no_pending' as const }));
+    it('waits for a response-later native active Goal turn before draining pending queue rows', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-resume-initial-goal-',
+            { emitGoalContinuationTurn: true },
+        );
+        let runtime!: ReturnType<typeof createCodexAppServerRuntime>;
+        const drainPending = vi.fn(async () => {
+            expect(runtime.canSteerPrompt()).toBe(true);
+            return { materialized: 1, stoppedReason: 'no_pending' as const };
+        });
 
-        const runtime = createCodexAppServerRuntime({
+        runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
             session: { updateMetadata: vi.fn() } as any,
@@ -2230,6 +2238,7 @@ describe('createCodexAppServerRuntime', () => {
             importHistory: false,
             initialGoal: {
                 objective: 'Line one\nLine two',
+                status: 'active',
             },
         } as any);
 
@@ -2247,8 +2256,73 @@ describe('createCodexAppServerRuntime', () => {
             params: {
                 threadId: 'resume-123',
                 objective: 'Line one\nLine two',
+                status: 'active',
             },
         });
+    });
+
+    it('rejects an unsupported initial Goal status before creating or resuming a provider thread', async () => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-invalid-initial-goal-',
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+            permissionMode: 'read-only',
+        });
+
+        await expect(runtime.startOrLoad({
+            initialGoal: {
+                objective: 'Blocked goal must be normalized by the recovery owner.',
+                status: 'blocked',
+            },
+        } as any)).rejects.toThrow('unsupported writable status');
+
+        expect(runtime.getSessionId()).toBeNull();
+    });
+
+    it('preserves a blocked recovery reason through the real paused initial Goal metadata publication', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-recovery-goal-reason-',
+        );
+        let metadataSnapshot: Record<string, unknown> = {};
+        const updateMetadata = vi.fn((updater: (metadata: Record<string, unknown>) => Record<string, unknown>) => {
+            metadataSnapshot = updater(metadataSnapshot);
+            return metadataSnapshot;
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({
+            initialGoal: {
+                objective: 'Recover after usage limits clear',
+                status: 'paused',
+                statusReason: 'usageLimited',
+            },
+        } as any);
+
+        await waitForCondition(() => {
+            const workState = metadataSnapshot.sessionWorkStateV1 as { items?: Array<{ statusReason?: string }> } | undefined;
+            return workState?.items?.some((item) => item.statusReason === 'usageLimited') === true;
+        }, {
+            timeoutMs: 1_000,
+            intervalMs: 5,
+            label: 'paused recovery Goal statusReason metadata publication',
+        });
+        expect(await readRequestLog(requestLogPath)).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                method: 'thread/goal/set',
+                params: expect.objectContaining({
+                    objective: 'Recover after usage limits clear',
+                    status: 'paused',
+                }),
+            }),
+        ]));
     });
 
     it('sends prompts over the persistent client and waits for turn completion notifications', async () => {
@@ -4188,7 +4262,7 @@ describe('createCodexAppServerRuntime', () => {
             label: 'active turn to become steerable before structured fallback race',
         });
 
-        await expect(runtime.steerPrompt('structured-fallback-owner-change', {
+        const ownerEndedError = await runtime.steerPrompt('structured-fallback-owner-change', {
             metadata: {
                 happierStructuredInputV1: {
                     vendorPluginMentions: [
@@ -4196,7 +4270,8 @@ describe('createCodexAppServerRuntime', () => {
                     ],
                 },
             },
-        })).rejects.toThrow('Codex app-server active turn is not steerable');
+        }).catch((error: unknown) => error);
+        expect(isCodexAppServerSteerTargetEndedError(ownerEndedError)).toBe(true);
         await sendPromptPromise;
 
         const requestLog = await readRequestLog(requestLogPath);
@@ -4322,7 +4397,8 @@ describe('createCodexAppServerRuntime', () => {
 
         expect(runtime.isTurnInFlight()).toBe(true);
         expect(activeTurnPendingPump.signal?.aborted).toBe(false);
-        await expect(runtime.steerPrompt('late-nudge')).rejects.toThrow('Codex app-server active turn is not steerable');
+        const lateSteerError = await runtime.steerPrompt('late-nudge').catch((error: unknown) => error);
+        expect(isCodexAppServerSteerTargetEndedError(lateSteerError)).toBe(true);
         await sendPromptPromise;
         expect(activeTurnPendingPump.signal?.aborted).toBe(true);
         activeTurnPendingPump.resolve?.();
@@ -4465,8 +4541,9 @@ describe('createCodexAppServerRuntime', () => {
             },
         };
 
-        await expect(runtime.steerPrompt('must-not-steer-after-owner-change', { metadata }))
-            .rejects.toThrow('Codex app-server active turn is not steerable');
+        const ownerChangedError = await runtime.steerPrompt('must-not-steer-after-owner-change', { metadata })
+            .catch((error: unknown) => error);
+        expect(isCodexAppServerSteerTargetEndedError(ownerChangedError)).toBe(true);
         await sendPromptPromise;
 
         const requestLog = await readRequestLog(requestLogPath);
@@ -7107,7 +7184,8 @@ describe('createCodexAppServerRuntime', () => {
             label: 'manual compaction enters active control turn',
         });
         expect(runtime.canSteerPrompt()).toBe(false);
-        await expect(runtime.steerPrompt('must-remain-queued-during-manual-compaction')).rejects.toThrow(/not steerable/i);
+        await expect(runtime.steerPrompt('must-remain-queued-during-manual-compaction'))
+            .rejects.toThrow(/not steerable|target turn ended/i);
         await expect(compactPromise).resolves.toBeUndefined();
 
         const requestLog = (await readFile(requestLogPath, 'utf8'))

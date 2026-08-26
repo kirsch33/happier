@@ -8,12 +8,43 @@ import { fetchSessionByIdCompat } from '@/session/transport/http/sessionsHttp';
 import { sendSessionMessage } from '@/session/services/sendSessionMessage';
 import type { createFreshProviderRecoveryReservationStore } from './freshProviderRecoveryReservation';
 import { resolveVendorResumeIdFromSessionMetadata, inferAgentIdFromSessionMetadata } from '@happier-dev/agents';
+import {
+  SessionWorkStateV1Schema,
+  type SessionInitialGoalRequestV1,
+} from '@happier-dev/protocol';
 
 const RECOVERY_MESSAGE_MAX_LENGTH = 8_192;
 
 type ResumeFreshResult =
   | Readonly<{ ok: true; sessionId: string; providerSessionId: string }>
   | Readonly<{ ok: false; errorCode: string; errorMessage: string }>;
+
+function readInitialGoalFromMetadata(metadata: unknown): SessionInitialGoalRequestV1 | null {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const parsed = SessionWorkStateV1Schema.safeParse(
+    (metadata as Record<string, unknown>).sessionWorkStateV1,
+  );
+  if (!parsed.success) return null;
+
+  const goal = parsed.data.primaryItemId
+    ? parsed.data.items.find((item) => (
+      item.id === parsed.data.primaryItemId && item.kind === 'goal'
+    ))
+    : null;
+  if (!goal) return null;
+
+  // Generic work state represents provider blocked/usage/budget states as `blocked`,
+  // but Codex only accepts active/paused/complete writes. Restore those goals paused
+  // so fresh startup is safe and retains the reason for recovery diagnostics.
+  const status = goal.status === 'blocked' ? 'paused' : goal.status;
+
+  return {
+    objective: goal.title,
+    status,
+    ...(goal.statusReason ? { statusReason: goal.statusReason } : {}),
+    ...(goal.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
+  };
+}
 
 export type FreshProviderCompletionObservation = Readonly<{
   daemonChildren: readonly Readonly<{
@@ -211,6 +242,7 @@ export async function resumeFreshProviderContext(params: Readonly<{
   if (!base || base.machineId !== params.machineId) {
     return { ok: false, errorCode: 'identity_unavailable', errorMessage: 'The exact session is not owned by this machine.' };
   }
+  const initialGoal = readInitialGoalFromMetadata(metadata);
   const activation = await activatePendingInactiveSession({
     credentials: params.credentials,
     machineId: params.machineId,
@@ -222,6 +254,7 @@ export async function resumeFreshProviderContext(params: Readonly<{
       const { resume: _resume, ...withoutVendorResume } = options;
       return await params.spawnSession({
         ...withoutVendorResume,
+        ...(initialGoal ? { initialGoal } : {}),
         freshProviderContextOnce: true,
       });
     },

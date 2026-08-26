@@ -142,6 +142,124 @@ describe('resumeFreshProviderContext', () => {
     });
   });
 
+  it('carries the durable paused primary goal into the fresh provider context', async () => {
+    mocks.decrypt.mockReturnValue({
+      sessionWorkStateV1: {
+        v: 1,
+        backendId: 'codex',
+        updatedAt: 10,
+        primaryItemId: 'goal:provider_old',
+        items: [{
+          id: 'goal:provider_old',
+          kind: 'goal',
+          origin: 'vendor',
+          status: 'paused',
+          title: 'Complete the durable platform goal.',
+          tokenBudget: null,
+          updatedAt: 10,
+        }],
+      },
+    });
+    mocks.activate.mockImplementationOnce(async (input: any) => {
+      await input.spawnSession(spawnOptions);
+      return { status: 'activated', runnerAcceptance: 'newly_accepted', pid: 777 };
+    });
+    const params = validParams();
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: true });
+
+    expect(params.spawnSession).toHaveBeenCalledWith({
+      existingSessionId: 'sess_exact_123',
+      machineId: 'machine_local',
+      freshProviderContextOnce: true,
+      initialGoal: {
+        objective: 'Complete the durable platform goal.',
+        status: 'paused',
+        tokenBudget: null,
+      },
+    });
+  });
+
+  it.each(['blocked', 'usageLimited', 'budgetLimited'] as const)(
+    'restores a durable blocked primary goal paused while preserving its %s reason',
+    async (statusReason) => {
+      mocks.decrypt.mockReturnValue({
+        sessionWorkStateV1: {
+          v: 1,
+          backendId: 'codex',
+          updatedAt: 10,
+          primaryItemId: 'goal:provider_old',
+          items: [{
+            id: 'goal:provider_old',
+            kind: 'goal',
+            origin: 'vendor',
+            status: 'blocked',
+            statusReason,
+            title: 'Recover the blocked durable goal safely.',
+            updatedAt: 10,
+          }],
+        },
+      });
+      mocks.activate.mockImplementationOnce(async (input: any) => {
+        await input.spawnSession(spawnOptions);
+        return { status: 'activated', runnerAcceptance: 'newly_accepted', pid: 777 };
+      });
+      const params = validParams();
+
+      await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: true });
+
+      expect(params.spawnSession).toHaveBeenCalledWith(expect.objectContaining({
+        initialGoal: {
+          objective: 'Recover the blocked durable goal safely.',
+          status: 'paused',
+          statusReason,
+        },
+      }));
+    },
+  );
+
+  it('does not revive a non-primary historical goal when another work item is primary', async () => {
+    mocks.decrypt.mockReturnValue({
+      sessionWorkStateV1: {
+        v: 1,
+        backendId: 'codex',
+        updatedAt: 11,
+        primaryItemId: 'todo:current',
+        items: [
+          {
+            id: 'goal:historical',
+            kind: 'goal',
+            origin: 'vendor',
+            status: 'paused',
+            title: 'Do not revive this historical goal.',
+            updatedAt: 10,
+          },
+          {
+            id: 'todo:current',
+            kind: 'todo',
+            origin: 'vendor',
+            status: 'active',
+            title: 'Current provider work.',
+            updatedAt: 11,
+          },
+        ],
+      },
+    });
+    mocks.activate.mockImplementationOnce(async (input: any) => {
+      await input.spawnSession(spawnOptions);
+      return { status: 'activated', runnerAcceptance: 'newly_accepted', pid: 777 };
+    });
+    const params = validParams();
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({ ok: true });
+
+    expect(params.spawnSession).toHaveBeenCalledWith({
+      existingSessionId: 'sess_exact_123',
+      machineId: 'machine_local',
+      freshProviderContextOnce: true,
+    });
+  });
+
   it('requires a matching durable reservation claim before it can activate the exact Pending row', async () => {
     const params = validParams({
       reservation: { claim: vi.fn(async () => ({ ok: false, code: 'reservation_claim_mismatch' })), clearProven: vi.fn(async () => ({ ok: true })) },

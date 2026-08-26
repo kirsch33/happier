@@ -48,6 +48,7 @@ export type DrainPendingOptions = {
 export type DrainPendingResult = {
   materialized: number;
   stoppedReason: DrainPendingStoppedReason;
+  retryAfterMs?: number;
 };
 
 export type ActiveTurnPendingPumpOptions = Omit<DrainPendingOptions, 'abortSignal'> & {

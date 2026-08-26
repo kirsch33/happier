@@ -94,6 +94,8 @@ const enqueueTranscriptMessageMock = vi.fn(async (_mutation: unknown) => ({ pers
 const flushOutboxMock = vi.fn(async (_reason: unknown) => {});
 const closeOutboxMock = vi.fn(async () => {});
 const setServerContractMock = vi.fn(async (_result: unknown) => {});
+let runtimeActivitySnapshotTail: ReturnType<SessionMutationOutbox['readRuntimeActivitySnapshotTail']>;
+let waitForRuntimeActivitySnapshotTailChangeMock = vi.fn(async (_sequence: number, _signal?: AbortSignal) => false);
 
 vi.mock('./mutations/createSessionMutationOutbox', () => ({
   createSessionMutationOutbox: (): SessionMutationOutbox => ({
@@ -101,18 +103,9 @@ vi.mock('./mutations/createSessionMutationOutbox', () => ({
     enqueueTranscriptMessage: (mutation: unknown) => enqueueTranscriptMessageMock(mutation),
     enqueueRuntimeActivitySnapshot: async () => ({ persisted: true, delivered: true }),
     setSessionSyncPendingInputServerContract: (result: unknown) => setServerContractMock(result),
-    readRuntimeActivitySnapshotTail: () => ({
-      sequence: 1,
-      custody: null,
-      settlement: {
-        identity: { mutationKey: 'runtime-activity-snapshot:s1', admissionOrder: 1 },
-        desiredValue: { state: 'idle', activeCount: 0 },
-        result: 'applied',
-        committedProjection: { state: 'idle', activeCount: 0, observedAt: 1, revision: 1 },
-        committedRevision: 1,
-      },
-    }),
-    waitForRuntimeActivitySnapshotTailChange: async () => false,
+    readRuntimeActivitySnapshotTail: () => runtimeActivitySnapshotTail,
+    waitForRuntimeActivitySnapshotTailChange: (sequence, signal) =>
+      waitForRuntimeActivitySnapshotTailChangeMock(sequence, signal),
     awaitReady: async () => {},
     flush: (reason: unknown) => flushOutboxMock(reason),
     close: () => closeOutboxMock(),
@@ -178,6 +171,7 @@ async function createClient(
   options: Readonly<{
     sessionSocketEmitWithAck?: NonNullable<Parameters<typeof createApiSessionSocketStub>[0]>['emitWithAck'];
     serverContractMode?: 'current' | 'released';
+    awaitSupervisorConnected?: boolean;
   }> = {},
 ) {
   const customEmitWithAck = options.sessionSocketEmitWithAck;
@@ -208,7 +202,7 @@ async function createClient(
     },
   } as any);
   (client as unknown as { accountIdPromise: Promise<string> }).accountIdPromise = Promise.resolve('account-1');
-  await supervisorConnectedPromise;
+  if (options.awaitSupervisorConnected !== false) await supervisorConnectedPromise;
   return client;
 }
 
@@ -340,6 +334,15 @@ function createProviderDeliveryMaterializeResult(localId: string, pendingVersion
 }
 
 describe('ApiSessionClient pending-queue turn-end drain', () => {
+  it('observes a Pending eligibility wake that lands before sequence-based listener registration', async () => {
+    const client = await createClient({ latestTurnStatus: 'completed', pendingCount: 0, pendingVersion: 0 });
+    const sequence = client.readPendingEligibilityWakeSequence();
+
+    (client as unknown as { publishPendingEligibilityWake: () => void }).publishPendingEligibilityWake();
+
+    await expect(client.waitForPendingEligibilityUpdateSince(sequence)).resolves.toBe(true);
+  });
+
   beforeAll(async () => {
     sessionClientModulePromise ??= import('./sessionClient');
     await sessionClientModulePromise;
@@ -385,6 +388,18 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     flushOutboxMock.mockClear();
     closeOutboxMock.mockClear();
     setServerContractMock.mockClear();
+    runtimeActivitySnapshotTail = {
+      sequence: 1,
+      custody: null,
+      settlement: {
+        identity: { mutationKey: 'runtime-activity-snapshot:s1', admissionOrder: 1 },
+        desiredValue: { state: 'idle', activeCount: 0 },
+        result: 'applied',
+        committedProjection: { state: 'idle', activeCount: 0, observedAt: 1, revision: 1 },
+        committedRevision: 1,
+      },
+    };
+    waitForRuntimeActivitySnapshotTailChangeMock = vi.fn(async () => false);
     readCredentialsMock.mockReset();
     readCredentialsMock.mockResolvedValue({
       token: 'tok',
@@ -462,6 +477,48 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     await expect(client.materializeNextPendingMessageSafely({ reconcileWhenEmpty: 'force' }))
       .resolves.toEqual({ type: 'no_pending' });
     expect(materializeNextMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('wakes a waiting Pending consumer when the current server contract becomes ready', async () => {
+    const readiness = createDeferred<boolean>();
+    runtimeActivitySnapshotTail = {
+      sequence: 1,
+      custody: {
+        identity: { mutationKey: 'runtime-activity-snapshot:s1', admissionOrder: 1 },
+        value: { state: 'idle', activeCount: 0 },
+      },
+      settlement: null,
+    };
+    waitForRuntimeActivitySnapshotTailChangeMock = vi.fn(async () => {
+      const changed = await readiness.promise;
+      runtimeActivitySnapshotTail = {
+        sequence: 2,
+        custody: null,
+        settlement: {
+          identity: { mutationKey: 'runtime-activity-snapshot:s1', admissionOrder: 1 },
+          desiredValue: { state: 'idle', activeCount: 0 },
+          result: 'applied',
+          committedProjection: { state: 'idle', activeCount: 0, observedAt: 1, revision: 1 },
+          committedRevision: 1,
+        },
+      };
+      return changed;
+    });
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 1,
+      pendingBlockedCount: 0,
+      pendingVersion: 1,
+    }, { awaitSupervisorConnected: false });
+    const wake = client.waitForPendingEligibilityUpdate();
+
+    readiness.resolve(true);
+    await supervisorConnectedPromise;
+
+    await expect(Promise.race([
+      wake,
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+    ])).resolves.toBe(true);
   });
 
   it('performs zero provider input when the current result object is replaced during materialization', async () => {

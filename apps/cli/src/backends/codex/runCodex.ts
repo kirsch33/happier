@@ -89,7 +89,7 @@ import {
 } from './appServer/codexAppServerProviderInputOutcome';
 import { reportSessionToDaemonIfRunning } from '@/agent/runtime/startupSideEffects';
 import { consumeFreshProviderContextOnce } from '@/agent/runtime/freshProviderContext';
-import { isCodexAppServerNoActiveTurnToSteerError } from './appServer/appServerCompatibility';
+import { isCodexAppServerSteerTargetEndedError } from './appServer/appServerCompatibility';
 import { rememberCodexUsageLimitRecoveryPreference } from './appServer/rememberCodexUsageLimitRecoveryPreference';
 import { resolveConfiguredCodexHome } from './utils/resolveConfiguredCodexHome';
 import { buildCodexAppServerConfigOverrides } from './appServer/buildCodexAppServerConfigOverrides';
@@ -661,6 +661,8 @@ export async function runCodex(opts: {
     const useCodexAppServer = codexBackendMode === 'appServer';
     const remoteResumeBackendLabel = useCodexAppServer ? 'app-server' : 'ACP';
     const freshProviderContext = consumeFreshProviderContextOnce();
+    let freshActiveGoalBootstrapPending = freshProviderContext
+        && initialGoalForStartOrLoad?.status === 'active';
     const resumeRequested = !freshProviderContext && typeof opts.resume === 'string' && opts.resume.trim().length > 0;
     let codexAcpAutoInstallError: string | null = null;
     if (useCodexAcp) {
@@ -901,6 +903,9 @@ export async function runCodex(opts: {
             shouldAttemptPendingMaterialization: () => session.shouldAttemptPendingMaterialization?.() ?? true,
             reconcilePendingQueueState: (opts) => session.reconcilePendingQueueState?.(opts),
             waitForPendingEligibilityUpdate: (signal) => session.waitForPendingEligibilityUpdate(signal),
+            readPendingEligibilityWakeSequence: () => session.readPendingEligibilityWakeSequence(),
+            waitForPendingEligibilityUpdateSince: (sequence, signal) =>
+                session.waitForPendingEligibilityUpdateSince(sequence, signal),
             ...(typeof session.readRuntimeActivitySnapshotTail === 'function'
                 ? {
                     readRuntimeActivitySnapshotTail: session.readRuntimeActivitySnapshotTail.bind(session),
@@ -1161,7 +1166,7 @@ export async function runCodex(opts: {
                             permissionModeUpdatedAt: activeTurnPermissionModeUpdatedAtBeforeMessage,
                         });
                     }
-                    if (!isCodexAppServerNoActiveTurnToSteerError(error)) {
+                    if (!isCodexAppServerSteerTargetEndedError(error)) {
                         await blockProviderPromptDeliveryBeforeAcceptance({
                             localIds,
                             reason: resolveProviderPromptFailureDeliveryReason(error, true),
@@ -1563,6 +1568,24 @@ export async function runCodex(opts: {
     // externally visible during startup can still fail closed instead of returning "method not available".
     localRemoteSwitchController.registerRemoteSwitchHandler();
 
+    const inputConsumer = createSessionProviderInputConsumer<EnhancedMode, string>({
+        messageQueue,
+        session: createCodexInputConsumerSession(),
+        initialReconcileWhenEmpty: 'force',
+        pendingDrainMaxPopPerWake: pendingQueueDrainMaxPopPerWake,
+        resolveActiveTurnSteerability: resolvePendingForegroundSteerability,
+        resolvePendingQueueDeliveryTiming: () => resolveSessionPendingQueueDeliveryTiming(
+            getActiveAccountSettingsSnapshot()?.settings
+            ?? opts.accountSettingsContext?.settings
+            ?? null,
+        ),
+        onMetadataUpdate: () => syncOverridesFromMetadata(),
+    });
+    providerInputConsumer = inputConsumer;
+    if (providerInputAdmissionClosed) {
+        providerInputDispatchDrain = inputConsumer.closeProviderInputAdmissionAndWaitForDispatches();
+    }
+
     //
     // Start Context 
     //
@@ -1686,23 +1709,6 @@ export async function runCodex(opts: {
         }
         return resolveVendorResumeIdFromSessionMetadata('codex', metadata);
     };
-
-    const inputConsumer = createSessionProviderInputConsumer<EnhancedMode, string>({
-        messageQueue,
-        session: createCodexInputConsumerSession(),
-        pendingDrainMaxPopPerWake: pendingQueueDrainMaxPopPerWake,
-        resolveActiveTurnSteerability: resolvePendingForegroundSteerability,
-        resolvePendingQueueDeliveryTiming: () => resolveSessionPendingQueueDeliveryTiming(
-            getActiveAccountSettingsSnapshot()?.settings
-            ?? opts.accountSettingsContext?.settings
-            ?? null,
-        ),
-        onMetadataUpdate: () => syncOverridesFromMetadata(),
-    });
-    providerInputConsumer = inputConsumer;
-    if (providerInputAdmissionClosed) {
-        providerInputDispatchDrain = inputConsumer.closeProviderInputAdmissionAndWaitForDispatches();
-    }
 
     if (useCodexAcp) {
         codexAcpRuntime = createCodexAcpRuntime({
@@ -2437,7 +2443,7 @@ export async function runCodex(opts: {
                             await awaitReplaySeedSettlement();
                             continue;
                         } catch (error) {
-                            if (!isCodexAppServerNoActiveTurnToSteerError(error)) {
+                            if (!isCodexAppServerSteerTargetEndedError(error)) {
                                 throw error;
                             }
                             await blockProviderPromptDeliveryBeforeAcceptance({
@@ -2592,6 +2598,51 @@ export async function runCodex(opts: {
                         await sessionModeSync?.flushPendingAfterStart();
                         await configOptionSync?.flushPendingAfterStart();
                         await modelSync?.flushPendingAfterStart();
+                        const isFreshActiveGoalBootstrapSend = freshActiveGoalBootstrapPending
+                            && message.pendingProviderAction === 'send';
+                        freshActiveGoalBootstrapPending = false;
+                        const canSteerTurnStartedDuringStartOrLoad =
+                            useCodexAppServer
+                            && specialCommand.type === null
+                            && (
+                                isFreshActiveGoalBootstrapSend
+                                || message.pendingProviderAction === 'steer'
+                                || message.pendingProviderAction === undefined
+                            )
+                            && (codexRuntime.canSteerPrompt
+                                ? codexRuntime.canSteerPrompt()
+                                : codexRuntime.isTurnInFlight());
+                        if (canSteerTurnStartedDuringStartOrLoad) {
+                            const providerDispatch = await resolveProviderDispatch();
+                            try {
+                                didAttemptProviderSend = true;
+                                await dispatchProviderInputOrThrow(async () => {
+                                    await codexRuntime.steerPrompt(providerDispatch.text, {
+                                        ...providerPromptIdentityOption(localIds),
+                                        metadata: providerDispatch.metadata,
+                                        userMessageSeq: message.maxUserMessageSeq ?? null,
+                                    });
+                                });
+                                retireReplaySeedOnConfirmedDelivery();
+                                await awaitReplaySeedSettlement();
+                                continue;
+                            } catch (error) {
+                                if (!isCodexAppServerSteerTargetEndedError(error)) {
+                                    throw error;
+                                }
+                                if (message.pendingProviderAction === 'steer') {
+                                    await blockProviderPromptDeliveryBeforeAcceptance({
+                                        localIds,
+                                        reason: 'steering_unavailable',
+                                        userMessageSeq: message.maxUserMessageSeq ?? null,
+                                    });
+                                    continue;
+                                }
+                                // The Goal turn may finish between the readiness check and steer.
+                                // An implicit action may fall through to an ordinary prompt; an
+                                // explicit steer above remains fail-closed instead of changing turns.
+                            }
+                        }
                     }
 
                     if (specialCommand.type === 'compact') {
