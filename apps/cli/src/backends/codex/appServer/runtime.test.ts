@@ -153,7 +153,9 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     rejectPermissionsProfile?: boolean;
     rejectGoalMethods?: boolean;
     rejectGoalMethodsAsInvalidRequest?: boolean;
+    requireObjectiveForGoalSet?: boolean;
     emitGoalContinuationTurn?: boolean;
+    emitWhitespaceGoalContinuationTurn?: boolean;
     emitGoalContinuationUsageLimitFailure?: boolean;
     emitGoalContinuationItemsBeforeStarted?: boolean;
     rejectReviewStartMethodUnavailable?: boolean;
@@ -368,6 +370,10 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        continue;',
         '    }',
         '    if (msg.method === "thread/goal/set") {',
+        `        if (${JSON.stringify(params.requireObjectiveForGoalSet === true)} && typeof msg.params?.objective !== "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: objective required" } }) + "\\n");',
+        '            continue;',
+        '        }',
         `        if (${JSON.stringify(params.rejectGoalMethodsAsInvalidRequest === true)}) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32600, message: "Invalid request" } }) + "\\n");',
         '            continue;',
@@ -378,7 +384,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        }',
         '        process.stdout.write(JSON.stringify({ id: msg.id, result: { goal: { threadId: msg.params?.threadId ?? "thread-started", objective: msg.params?.objective ?? "Current objective", status: msg.params?.status ?? "active", tokenBudget: Object.prototype.hasOwnProperty.call(msg.params ?? {}, "tokenBudget") ? msg.params.tokenBudget : undefined, updatedAt: "2026-05-13T10:05:00.000Z" } } }) + "\\n");',
         '        process.stdout.write(JSON.stringify({ method: "thread/goal/updated", params: { threadId: msg.params?.threadId ?? "thread-started", goal: { threadId: msg.params?.threadId ?? "thread-started", objective: msg.params?.objective ?? "Current objective", status: msg.params?.status ?? "active", tokenBudget: Object.prototype.hasOwnProperty.call(msg.params ?? {}, "tokenBudget") ? msg.params.tokenBudget : undefined, updatedAt: "2026-05-13T10:05:00.000Z" } } }) + "\\n");',
-        `        if (${JSON.stringify(params.emitGoalContinuationTurn === true || params.emitGoalContinuationUsageLimitFailure === true)}) {`,
+        `        if (${JSON.stringify(params.emitGoalContinuationTurn === true || params.emitWhitespaceGoalContinuationTurn === true || params.emitGoalContinuationUsageLimitFailure === true)} && msg.params?.status !== "paused") {`,
         '            const goalThreadId = msg.params?.threadId ?? "thread-started";',
         '            const goalTurnId = "turn-goal-continuation";',
         `            if (${JSON.stringify(params.emitGoalContinuationUsageLimitFailure === true)}) {`,
@@ -388,6 +394,21 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '                setTimeout(() => {',
         '                    process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: goalThreadId, turn: { id: goalTurnId, status: "failed", error: { message: "Usage limit reached", codexErrorInfo: "UsageLimitExceeded", additionalDetails: null } } } }) + "\\n");',
         '                }, 100);',
+        '                continue;',
+        '            }',
+        `            if (${JSON.stringify(params.emitWhitespaceGoalContinuationTurn === true)}) {`,
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId: goalThreadId, turn: { id: goalTurnId } } }) + "\\n");',
+        '                }, 5);',
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: goalThreadId, turnId: goalTurnId, itemId: "goal_msg_1", delta: "\\n\\n" } }) + "\\n");',
+        '                }, 6);',
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId: goalThreadId, turnId: goalTurnId, item: { id: "goal_msg_1", type: "agentMessage", text: "\\n\\n" } } }) + "\\n");',
+        '                }, 7);',
+        '                setTimeout(() => {',
+        '                    process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId: goalThreadId, turn: { id: goalTurnId } } }) + "\\n");',
+        '                }, 8);',
         '                continue;',
         '            }',
         `            if (${JSON.stringify(params.emitGoalContinuationItemsBeforeStarted === true)}) {`,
@@ -1584,7 +1605,9 @@ describe('createCodexAppServerRuntime', () => {
             rejectPermissionsProfile?: boolean;
             rejectGoalMethods?: boolean;
             rejectGoalMethodsAsInvalidRequest?: boolean;
+            requireObjectiveForGoalSet?: boolean;
             emitGoalContinuationTurn?: boolean;
+            emitWhitespaceGoalContinuationTurn?: boolean;
             emitGoalContinuationUsageLimitFailure?: boolean;
             emitGoalContinuationItemsBeforeStarted?: boolean;
             rejectReviewStartMethodUnavailable?: boolean;
@@ -1640,7 +1663,9 @@ describe('createCodexAppServerRuntime', () => {
             rejectPermissionsProfile: options.rejectPermissionsProfile,
             rejectGoalMethods: options.rejectGoalMethods,
             rejectGoalMethodsAsInvalidRequest: options.rejectGoalMethodsAsInvalidRequest,
+            requireObjectiveForGoalSet: options.requireObjectiveForGoalSet,
             emitGoalContinuationTurn: options.emitGoalContinuationTurn,
+            emitWhitespaceGoalContinuationTurn: options.emitWhitespaceGoalContinuationTurn,
             emitGoalContinuationUsageLimitFailure: options.emitGoalContinuationUsageLimitFailure,
             emitGoalContinuationItemsBeforeStarted: options.emitGoalContinuationItemsBeforeStarted,
             rejectReviewStartMethodUnavailable: options.rejectReviewStartMethodUnavailable,
@@ -3019,6 +3044,59 @@ describe('createCodexAppServerRuntime', () => {
         expect(sessionTurnLifecycle.markRollbackEligible).not.toHaveBeenCalled();
         const requestLog = await readRequestLog(requestLogPath);
         expect(requestLog.filter((entry) => entry.method === 'turn/start')).toEqual([]);
+    });
+
+    it('pauses an active native Goal when its adopted continuation completes with only whitespace', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-goal-empty-continuation-', {
+            requireObjectiveForGoalSet: true,
+            emitWhitespaceGoalContinuationTurn: true,
+        });
+        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const session = {
+            updateMetadata: vi.fn(),
+            sendAgentMessageCommitted: vi.fn(async () => {}),
+            sendCodexMessage: vi.fn(),
+            sessionTurnLifecycle,
+        };
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: session as any,
+            permissionMode: 'default',
+        });
+
+        await runtime.startOrLoad({});
+        await (runtime as unknown as { setGoal: (objective: string) => Promise<void> }).setGoal('Continue autonomously');
+
+        await waitForCondition(async () => {
+            const requestLog = await readRequestLog(requestLogPath);
+            return requestLog.some((entry) => (
+                entry.method === 'thread/goal/set'
+                && (entry.params as { status?: string } | null)?.status === 'paused'
+                && (entry.params as { objective?: string } | null)?.objective === 'Ship the Codex app-server lane'
+            ));
+        }, {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'contentless native Goal continuation guard',
+        });
+
+        const committedMessages = (session.sendAgentMessageCommitted.mock.calls as unknown as Array<
+            [string, { type?: string; message?: string }]
+        >)
+            .map(([, body]) => body)
+            .filter((body) => body.type === 'message')
+            .map((body) => String(body.message ?? ''));
+        expect(committedMessages.filter((message) => message.trim().length === 0)).toEqual([]);
+        expect(committedMessages).toEqual([
+            'Goal paused automatically because its native continuation completed without meaningful output.',
+        ]);
+        expect(sessionTurnLifecycle.beginTurn).toHaveBeenCalledTimes(1);
+        await waitForCondition(() => vi.mocked(sessionTurnLifecycle.completeTurn).mock.calls.length === 1, {
+            timeoutMs: 1_000,
+            intervalMs: 10,
+            label: 'contentless native Goal continuation lifecycle completion',
+        });
     });
 
     it.each([
