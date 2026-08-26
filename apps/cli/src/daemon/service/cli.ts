@@ -960,15 +960,21 @@ export async function resolveDaemonServiceListEntries(
   const expectedDefaultRuntimeTarget = await resolveDaemonServiceInstallRuntimeTarget({
     allowBootstrap: false,
     currentExecPath: runtime.nodePath,
+    explicitNodePath: process.env.HAPPIER_DAEMON_SERVICE_NODE_PATH ?? '',
+    explicitEntryPath: process.env.HAPPIER_DAEMON_SERVICE_ENTRY_PATH ?? '',
     targetMode: 'default-following',
     processEnv: {
       ...process.env,
       HAPPIER_HOME_DIR: runtime.happierHomeDir,
     },
-  }).catch(() => ({
-    nodePath: runtime.nodePath,
-    entryPath: runtime.entryPath,
-  }));
+  }).catch(() => null);
+
+  if (!expectedDefaultRuntimeTarget) {
+    return resolvedEntries.map((entry) => entry.targetMode === 'default-following'
+      && entry.releaseChannel === runtime.channel
+      ? { ...entry, installedDefinitionMatchesExpected: false }
+      : entry);
+  }
 
   const expectedDefaultPlan = planDaemonServiceInstall({
     platform: runtime.platform,

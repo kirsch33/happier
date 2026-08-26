@@ -15,6 +15,8 @@ describe('resolveDaemonServiceListEntries', () => {
     'HAPPIER_HOME_DIR',
     'HAPPIER_ACTIVE_SERVER_ID',
     'HAPPIER_PUBLIC_RELEASE_CHANNEL',
+    'HAPPIER_DAEMON_SERVICE_NODE_PATH',
+    'HAPPIER_DAEMON_SERVICE_ENTRY_PATH',
   ]);
 
   afterEach(() => {
@@ -89,6 +91,121 @@ describe('resolveDaemonServiceListEntries', () => {
       const defaultEntry = entries.find((entry) => entry.path === expectedServicePath) ?? null;
       expect(defaultEntry).not.toBeNull();
       expect(defaultEntry?.installedDefinitionMatchesExpected).toBe(true);
+    });
+  });
+
+  it('matches a default-following systemd unit installed through the launcher managed runtime', async () => {
+    await withTempDir('happier-daemon-service-list-managed-runtime-', async (userHomeDir) => {
+      const happierHomeDir = join(userHomeDir, '.happier');
+      const managedRuntimePath = join(happierHomeDir, 'tools', 'js-runtime', 'current', 'bin', 'happier-js-runtime');
+      const managedEntryPath = join(happierHomeDir, 'cli-dev', 'current', 'package-dist', 'index.mjs');
+      const managedDefaultShimPath = join(happierHomeDir, 'bin', 'happier');
+
+      mkdirSync(dirname(managedDefaultShimPath), { recursive: true });
+      writeFileSync(managedDefaultShimPath, '#!/bin/sh\n', 'utf8');
+      writeFileSync(join(happierHomeDir, 'default-cli-release-channel.json'), '{"releaseChannel":"publicdev"}\n', 'utf8');
+
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_ACTIVE_SERVER_ID: 'cloud',
+        HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+        HAPPIER_DAEMON_SERVICE_NODE_PATH: managedRuntimePath,
+        HAPPIER_DAEMON_SERVICE_ENTRY_PATH: managedEntryPath,
+      });
+      vi.resetModules();
+
+      const [{ planDaemonServiceInstall }, { resolveDaemonServiceListEntries }] = await Promise.all([
+        import('./plan'),
+        import('./cli'),
+      ]);
+      const runtime = {
+        platform: 'linux' as const,
+        channel: 'publicdev' as const,
+        targetMode: 'default-following' as const,
+        instanceId: 'cloud',
+        activeServerId: 'cloud',
+        uid: 1000,
+        userHomeDir,
+        happierHomeDir,
+        serverUrl: 'https://example.test',
+        webappUrl: 'https://app.example.test',
+        publicServerUrl: 'https://example.test',
+        nodePath: managedRuntimePath,
+        entryPath: managedEntryPath,
+      };
+      const expectedPlan = planDaemonServiceInstall({
+        platform: runtime.platform,
+        mode: 'user',
+        channel: runtime.channel,
+        targetMode: runtime.targetMode,
+        instanceId: runtime.instanceId,
+        activeServerId: runtime.activeServerId,
+        uid: runtime.uid,
+        userHomeDir: runtime.userHomeDir,
+        happierHomeDir: runtime.happierHomeDir,
+        serverUrl: runtime.serverUrl,
+        webappUrl: runtime.webappUrl,
+        publicServerUrl: runtime.publicServerUrl,
+        nodePath: managedRuntimePath,
+        entryPath: managedEntryPath,
+      });
+      const expectedServicePath = expectedPlan.files[0]?.path ?? '';
+      mkdirSync(dirname(expectedServicePath), { recursive: true });
+      writeFileSync(expectedServicePath, expectedPlan.files[0]?.content ?? '', 'utf8');
+
+      const entries = await resolveDaemonServiceListEntries(runtime, { mode: 'user' });
+      const defaultEntry = entries.find((entry) => entry.path === expectedServicePath) ?? null;
+      expect(defaultEntry?.installedDefinitionMatchesExpected).toBe(true);
+    });
+  });
+
+  it('reports an unresolved launcher target as not matching instead of trusting the current runtime fallback', async () => {
+    await withTempDir('happier-daemon-service-list-unresolved-runtime-', async (userHomeDir) => {
+      const happierHomeDir = join(userHomeDir, '.happier');
+      const runtimeNodePath = '/managed/runtime/happier-js-runtime';
+      const runtimeEntryPath = join(happierHomeDir, 'cli-dev', 'current', 'package-dist', 'index.mjs');
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_ACTIVE_SERVER_ID: 'cloud',
+        HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+      });
+      vi.resetModules();
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: vi.fn(async () => {
+          throw new ReferenceError('launcher target unavailable');
+        }),
+      }));
+
+      const [{ planDaemonServiceInstall }, { resolveDaemonServiceListEntries }] = await Promise.all([
+        import('./plan'),
+        import('./cli'),
+      ]);
+      const runtime = {
+        platform: 'linux' as const,
+        channel: 'publicdev' as const,
+        targetMode: 'default-following' as const,
+        instanceId: 'cloud',
+        activeServerId: 'cloud',
+        uid: 1000,
+        userHomeDir,
+        happierHomeDir,
+        serverUrl: 'https://example.test',
+        webappUrl: 'https://app.example.test',
+        publicServerUrl: 'https://example.test',
+        nodePath: runtimeNodePath,
+        entryPath: runtimeEntryPath,
+      };
+      const installedPlan = planDaemonServiceInstall({
+        ...runtime,
+        mode: 'user',
+      });
+      const installedPath = installedPlan.files[0]?.path ?? '';
+      mkdirSync(dirname(installedPath), { recursive: true });
+      writeFileSync(installedPath, installedPlan.files[0]?.content ?? '', 'utf8');
+
+      const entries = await resolveDaemonServiceListEntries(runtime, { mode: 'user' });
+      const defaultEntry = entries.find((entry) => entry.path === installedPath) ?? null;
+      expect(defaultEntry?.installedDefinitionMatchesExpected).toBe(false);
     });
   });
 
