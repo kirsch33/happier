@@ -2520,6 +2520,198 @@ describe('runDaemonServiceCliCommand', () => {
     });
   });
 
+  it.each(['start', 'restart'] as const)('keeps %s on the managed default shim after runtime re-exec', async (action) => {
+    await withTempDir(`happier-service-${action}-managed-shim-`, async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const managedShimPath = join(happierHomeDir, 'bin', 'happier');
+      let expectedServiceLabel = '';
+      let expectedCliVersion = '';
+      let writeDaemonStateImpl: ((state: DaemonLocallyPersistedState) => void) | null = null;
+
+      mkdirSync(dirname(managedShimPath), { recursive: true });
+      writeFileSync(managedShimPath, '#!/bin/sh\n', 'utf-8');
+      writeFileSync(join(happierHomeDir, 'default-cli-release-channel.json'), '{"releaseChannel":"dev"}\n', 'utf-8');
+
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'default-following',
+        HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_TIMEOUT_MS: '120',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_ACTIVE_GRACE_TIMEOUT_MS: '0',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_POLL_MS: '10',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_STABLE_MS: '20',
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command: string, args: readonly string[] = []) => {
+        if (command === 'systemctl' && (args.includes('start') || args.includes('restart'))) {
+          writeDaemonStateImpl?.({
+            pid: process.pid,
+            httpPort: 43138,
+            startedAt: Date.now(),
+            startedWithCliVersion: expectedCliVersion,
+            startedWithPublicReleaseChannel: 'dev',
+            startupSource: 'background-service',
+            serviceLabel: expectedServiceLabel,
+            runtimeId: `runtime-managed-shim-${action}`,
+          });
+        }
+        if (command === 'systemctl' && args.includes('is-active')) {
+          return { status: 0, stdout: Buffer.from('active'), stderr: Buffer.from('') };
+        }
+        return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+      });
+      vi.doMock('./commandExistsInPath', () => ({
+        commandExistsInPath: vi.fn(() => true),
+      }));
+
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
+        loadCliModule(),
+        import('@/persistence'),
+        import('@/configuration'),
+      ]);
+      writeDaemonStateImpl = writeDaemonState;
+      expectedCliVersion = configuration.currentCliVersion;
+
+      const runtime = resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' });
+      const paths = resolveDaemonServicePaths(runtime);
+      expectedServiceLabel = paths.label;
+      const expectedPlan = planDaemonServiceInstall({
+        platform: runtime.platform,
+        mode: 'user',
+        channel: runtime.channel,
+        targetMode: runtime.targetMode,
+        instanceId: runtime.instanceId,
+        activeServerId: runtime.activeServerId,
+        uid: runtime.uid ?? undefined,
+        userHomeDir: runtime.userHomeDir,
+        happierHomeDir: runtime.happierHomeDir,
+        serverUrl: runtime.serverUrl,
+        webappUrl: runtime.webappUrl,
+        publicServerUrl: runtime.publicServerUrl,
+        nodePath: managedShimPath,
+        entryPath: '',
+      });
+      const expectedContents = expectedPlan.files[0]?.content ?? '';
+      mkdirSync(dirname(paths.installedPath), { recursive: true });
+      writeFileSync(paths.installedPath, expectedContents, 'utf-8');
+      await writeCredentialsLegacy({ secret: new Uint8Array(32).fill(1), token: 'token-managed-shim-restart' });
+      clearDaemonState();
+
+      const output = captureStdoutJsonOutput<{ ok: boolean; platform: string }>();
+      try {
+        await runDaemonServiceCliCommand({ argv: [action, '--json'] });
+        expect(output.json().ok).toBe(true);
+      } finally {
+        output.restore();
+      }
+
+      expect(managedShimPath).not.toBe(process.execPath);
+      expect(readFileSync(paths.installedPath, 'utf-8')).toBe(expectedContents);
+      expect(readFileSync(paths.installedPath, 'utf-8')).toContain(`ExecStart=${managedShimPath} daemon start-sync --takeover`);
+      expect(configuration.currentCliVersion).toBeTruthy();
+    });
+  });
+
+  it('preserves the installed definition when the lifecycle drift runtime cannot be resolved', async () => {
+    await withTempDir('happier-service-restart-unresolved-drift-runtime-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const managedShimPath = join(happierHomeDir, 'bin', 'happier');
+      const resolveInstallRuntimeTargetMock = vi.fn(async () => {
+        throw new ReferenceError('managed default shim is unavailable');
+      });
+      let expectedServiceLabel = '';
+      let expectedCliVersion = '';
+      let writeDaemonStateImpl: ((state: DaemonLocallyPersistedState) => void) | null = null;
+
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'default-following',
+        HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_TIMEOUT_MS: '120',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_ACTIVE_GRACE_TIMEOUT_MS: '0',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_POLL_MS: '10',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_STABLE_MS: '20',
+      });
+      vi.resetModules();
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: resolveInstallRuntimeTargetMock,
+      }));
+      doMockChildProcessSpawnSync((command: string, args: readonly string[] = []) => {
+        if (command === 'systemctl' && args.includes('restart')) {
+          writeDaemonStateImpl?.({
+            pid: process.pid,
+            httpPort: 43138,
+            startedAt: Date.now(),
+            startedWithCliVersion: expectedCliVersion,
+            startedWithPublicReleaseChannel: 'dev',
+            startupSource: 'background-service',
+            serviceLabel: expectedServiceLabel,
+            runtimeId: 'runtime-unresolved-drift-restart',
+          });
+        }
+        if (command === 'systemctl' && args.includes('is-active')) {
+          return { status: 0, stdout: Buffer.from('active'), stderr: Buffer.from('') };
+        }
+        return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+      });
+      vi.doMock('./commandExistsInPath', () => ({
+        commandExistsInPath: vi.fn(() => true),
+      }));
+
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
+        loadCliModule(),
+        import('@/persistence'),
+        import('@/configuration'),
+      ]);
+      writeDaemonStateImpl = writeDaemonState;
+      expectedCliVersion = configuration.currentCliVersion;
+
+      const runtime = resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' });
+      const paths = resolveDaemonServicePaths(runtime);
+      expectedServiceLabel = paths.label;
+      const installedContents = planDaemonServiceInstall({
+        platform: runtime.platform,
+        mode: 'user',
+        channel: runtime.channel,
+        targetMode: runtime.targetMode,
+        instanceId: runtime.instanceId,
+        activeServerId: runtime.activeServerId,
+        uid: runtime.uid ?? undefined,
+        userHomeDir: runtime.userHomeDir,
+        happierHomeDir: runtime.happierHomeDir,
+        serverUrl: runtime.serverUrl,
+        webappUrl: runtime.webappUrl,
+        publicServerUrl: runtime.publicServerUrl,
+        nodePath: managedShimPath,
+        entryPath: '',
+      }).files[0]?.content ?? '';
+      mkdirSync(dirname(paths.installedPath), { recursive: true });
+      writeFileSync(paths.installedPath, installedContents, 'utf-8');
+      await writeCredentialsLegacy({ secret: new Uint8Array(32).fill(1), token: 'token-unresolved-drift-restart' });
+      clearDaemonState();
+
+      const stderr = captureStderr();
+      const output = captureStdoutJsonOutput<{ ok: boolean; platform: string }>();
+      try {
+        await runDaemonServiceCliCommand({ argv: ['restart', '--json'] });
+        expect(output.json().ok).toBe(true);
+        expect(stderr.text()).toContain('Drift check skipped: managed default shim is unavailable');
+      } finally {
+        output.restore();
+        stderr.restore();
+      }
+
+      expect(readFileSync(paths.installedPath, 'utf-8')).toBe(installedContents);
+      expect(readFileSync(paths.installedPath, 'utf-8')).toContain(`ExecStart=${managedShimPath} daemon start-sync --takeover`);
+    });
+  });
+
   it('restores the manual daemon when service start takeover does not switch relay ownership', async () => {
     await withTempDir('happier-service-start-owner-takeover-postcondition-', async (homeDir) => {
       const happierHomeDir = `${homeDir}/.happier`;

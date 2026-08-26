@@ -1992,6 +1992,18 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
     let serviceDefinitionReloadCommands: DaemonServicePlannedCommand[] = [];
     if (action === 'start' || action === 'restart') {
       try {
+        const expectedRuntimeTarget = await resolveDaemonServiceInstallRuntimeTarget({
+          currentExecPath: process.execPath,
+          explicitNodePath: process.env.HAPPIER_DAEMON_SERVICE_NODE_PATH ?? '',
+          explicitEntryPath: process.env.HAPPIER_DAEMON_SERVICE_ENTRY_PATH ?? '',
+          allowBootstrap: false,
+          targetMode: runtime.targetMode,
+          channel: runtime.channel,
+          processEnv: {
+            ...process.env,
+            HAPPIER_HOME_DIR: runtime.happierHomeDir,
+          },
+        });
         const expectedPlan = planDaemonServiceInstall({
           platform: runtime.platform,
           mode,
@@ -2006,8 +2018,8 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
           serverUrl: runtime.serverUrl,
           webappUrl: runtime.webappUrl,
           publicServerUrl: runtime.publicServerUrl,
-          nodePath: runtime.nodePath,
-          entryPath: runtime.entryPath,
+          nodePath: expectedRuntimeTarget.nodePath,
+          entryPath: expectedRuntimeTarget.entryPath,
         });
         const expectedFile = expectedPlan.files[0];
         if (expectedFile) {
