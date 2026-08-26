@@ -52,11 +52,11 @@ export function createCodexAppServerRpcError(params: Readonly<{
     return error;
 }
 
-export function isCodexAppServerNoActiveTurnToSteerError(error: unknown): boolean {
+export function isCodexAppServerSteerTargetUnavailableError(error: unknown): boolean {
     if (!(error instanceof Error)) return false;
     const method = (error as Partial<CodexAppServerRpcError>).method;
     if (typeof method === 'string' && method !== 'turn/steer') return false;
-    return /\bno\s+active\s+turn\s+to\s+steer\b/i.test(error.message);
+    return /(?:\bno\s+active\s+turn\s+to\s+steer\b|\brequires\s+an\s+active\s+turn\b|\bactive\s+turn\s+is\s+not\s+steerable\b)/i.test(error.message);
 }
 
 function readCode(error: unknown): number | null {

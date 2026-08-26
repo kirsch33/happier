@@ -107,7 +107,7 @@ import {
     isCodexAppServerInvalidParamsForFieldError,
     isCodexAppServerInvalidParamsError,
     isCodexAppServerMethodNotFoundError,
-    isCodexAppServerNoActiveTurnToSteerError,
+    isCodexAppServerSteerTargetUnavailableError,
 } from './appServerCompatibility';
 import { readCodexRateLimitsSnapshot } from './readCodexRateLimitsSnapshot';
 import {
@@ -4627,7 +4627,9 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 ) {
                     return createCodexAppServerSteerTargetEndedError();
                 }
-                return new Error('Codex app-server active turn is not steerable');
+                return createCodexAppServerSteerTargetEndedError(
+                    new Error('Codex app-server active turn is not steerable'),
+                );
             };
             assertConnectedServiceAuthGroupAvailable();
             const client = await ensureClient();
@@ -4668,7 +4670,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 try {
                     await requestSteer(input, turnIdKey);
                 } catch (error) {
-                    if (isCodexAppServerNoActiveTurnToSteerError(error)) {
+                    if (isCodexAppServerSteerTargetUnavailableError(error)) {
                         const currentTurn = pendingTurn;
                         if (currentTurn?.promise === activeTurn.promise) {
                             logger.debug('[codex-app-server] Native turn already inactive during steer; clearing local pending turn state');

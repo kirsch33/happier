@@ -149,7 +149,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     rejectFirstInterruptAsNoActiveTurn?: boolean;
     interruptTerminalWithoutResponse?: boolean;
     interruptTerminalDelayMs?: number;
-    rejectSteerAsNoActiveTurn?: boolean;
+    rejectSteerErrorMessage?: string;
     rejectPermissionsProfile?: boolean;
     rejectGoalMethods?: boolean;
     rejectGoalMethodsAsInvalidRequest?: boolean;
@@ -1502,8 +1502,8 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            }, 80);',
         '            continue;',
         '        }',
-        `        if (${JSON.stringify(params.rejectSteerAsNoActiveTurn === true)}) {`,
-        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: "no active turn to steer" } }) + "\\n");',
+        `        if (${JSON.stringify(params.rejectSteerErrorMessage ?? null)}) {`,
+        `            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32000, message: ${JSON.stringify(params.rejectSteerErrorMessage ?? '')} } }) + "\\n");`,
         '            continue;',
         '        }',
         '        const expectedTurnId = typeof msg.params?.expectedTurnId === "string" ? msg.params.expectedTurnId : null;',
@@ -1580,7 +1580,7 @@ describe('createCodexAppServerRuntime', () => {
             rejectFirstInterruptAsNoActiveTurn?: boolean;
             interruptTerminalWithoutResponse?: boolean;
             interruptTerminalDelayMs?: number;
-            rejectSteerAsNoActiveTurn?: boolean;
+            rejectSteerErrorMessage?: string;
             rejectPermissionsProfile?: boolean;
             rejectGoalMethods?: boolean;
             rejectGoalMethodsAsInvalidRequest?: boolean;
@@ -1636,7 +1636,7 @@ describe('createCodexAppServerRuntime', () => {
             rejectFirstInterruptAsNoActiveTurn: options.rejectFirstInterruptAsNoActiveTurn,
             interruptTerminalWithoutResponse: options.interruptTerminalWithoutResponse,
             interruptTerminalDelayMs: options.interruptTerminalDelayMs,
-            rejectSteerAsNoActiveTurn: options.rejectSteerAsNoActiveTurn,
+            rejectSteerErrorMessage: options.rejectSteerErrorMessage,
             rejectPermissionsProfile: options.rejectPermissionsProfile,
             rejectGoalMethods: options.rejectGoalMethods,
             rejectGoalMethodsAsInvalidRequest: options.rejectGoalMethodsAsInvalidRequest,
@@ -4058,9 +4058,13 @@ describe('createCodexAppServerRuntime', () => {
         await sendPromptPromise;
     });
 
-    it('clears stale in-flight state when native steer reports no active turn', async () => {
+    it.each([
+        'no active turn to steer',
+        'turn/steer requires an active turn',
+        'active turn is not steerable',
+    ])('clears stale in-flight state when native steer reports a terminal target race: %s', async (steerErrorMessage) => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-steer-no-active-', {
-            rejectSteerAsNoActiveTurn: true,
+            rejectSteerErrorMessage: steerErrorMessage,
         });
 
         const onThinkingChange = vi.fn();
@@ -4079,7 +4083,9 @@ describe('createCodexAppServerRuntime', () => {
         });
 
         expect(runtime.isTurnInFlight()).toBe(true);
-        await expect(runtime.steerPrompt('nudge')).rejects.toThrow(/no active turn to steer/i);
+        const steerError = await runtime.steerPrompt('nudge').catch((error: unknown) => error);
+        expect(isCodexAppServerSteerTargetEndedError(steerError)).toBe(true);
+        expect(steerError).toEqual(expect.objectContaining({ message: steerErrorMessage }));
         expect(runtime.isTurnInFlight()).toBe(false);
         expect(runtime.canSteerPrompt()).toBe(false);
         expect(onThinkingChange).toHaveBeenLastCalledWith(false);

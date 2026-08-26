@@ -17,6 +17,7 @@ import {
     SessionUsageLimitOperationResponseV1Schema,
             SessionUsageLimitWaitResumeCancelRequestV1Schema,
     SessionUsageLimitWaitResumeEnableRequestV1Schema,
+    SessionInitialGoalRequestV1Schema,
     SessionGoalSetRequestV1Schema,
     SessionSkillCatalogListResponseV1Schema,
     SessionVendorPluginCatalogListResponseV1Schema,
@@ -152,6 +153,16 @@ describe('session work-state RPC contracts', () => {
             tokenBudget: null,
         });
         expect(() => SessionGoalSetRequestV1Schema.parse({})).toThrow();
+        expect(SessionInitialGoalRequestV1Schema.parse({
+            objective: 'Recover the durable goal',
+            status: 'paused',
+            statusReason: 'usageLimited',
+        })).toEqual({
+            objective: 'Recover the durable goal',
+            status: 'paused',
+            statusReason: 'usageLimited',
+        });
+        expect(() => SessionInitialGoalRequestV1Schema.parse({ status: 'paused', statusReason: 'usageLimited' })).toThrow();
         expect(DaemonSessionGoalSetRequestV1Schema.parse({ sessionId: 's1', status: 'paused' })).toEqual({
             sessionId: 's1',
             status: 'paused',

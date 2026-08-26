@@ -4080,6 +4080,8 @@ describe('runCodex CodexACP resume behavior', () => {
 
     process.env[HAPPIER_DAEMON_INITIAL_GOAL_ENV_KEY] = serializeDaemonInitialGoalForEnv({
       objective: 'continue the goal',
+      status: 'paused',
+      statusReason: 'usageLimited',
     });
     mockAttachedSessionMetadata({
       connectedServices: {
@@ -4144,7 +4146,11 @@ describe('runCodex CodexACP resume behavior', () => {
     expect(startOrLoad).toHaveBeenCalledWith(expect.objectContaining({
       resumeId: 'thread-goal-resume',
       importHistory: false,
-      initialGoal: { objective: 'continue the goal' },
+      initialGoal: {
+        objective: 'continue the goal',
+        status: 'paused',
+        statusReason: 'usageLimited',
+      },
     }));
     expect(appServerRuntime.sendPrompt).not.toHaveBeenCalled();
     expect(appServerRuntime.flushTurn).not.toHaveBeenCalled();
