@@ -1994,8 +1994,6 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
       try {
         const expectedRuntimeTarget = await resolveDaemonServiceInstallRuntimeTarget({
           currentExecPath: process.execPath,
-          explicitNodePath: process.env.HAPPIER_DAEMON_SERVICE_NODE_PATH ?? '',
-          explicitEntryPath: process.env.HAPPIER_DAEMON_SERVICE_ENTRY_PATH ?? '',
           allowBootstrap: false,
           targetMode: runtime.targetMode,
           channel: runtime.channel,

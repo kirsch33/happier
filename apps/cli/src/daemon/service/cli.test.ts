@@ -2524,6 +2524,8 @@ describe('runDaemonServiceCliCommand', () => {
     await withTempDir(`happier-service-${action}-managed-shim-`, async (homeDir) => {
       const happierHomeDir = `${homeDir}/.happier`;
       const managedShimPath = join(happierHomeDir, 'bin', 'happier');
+      const launcherRuntimePath = join(happierHomeDir, 'tools', 'js-runtime', 'current', 'bin', 'happier-js-runtime');
+      const launcherEntryPath = join(happierHomeDir, 'cli-dev', 'current', 'package-dist', 'index.mjs');
       let expectedServiceLabel = '';
       let expectedCliVersion = '';
       let writeDaemonStateImpl: ((state: DaemonLocallyPersistedState) => void) | null = null;
@@ -2539,6 +2541,8 @@ describe('runDaemonServiceCliCommand', () => {
         HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
         HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'default-following',
         HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+        HAPPIER_DAEMON_SERVICE_NODE_PATH: launcherRuntimePath,
+        HAPPIER_DAEMON_SERVICE_ENTRY_PATH: launcherEntryPath,
         HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_TIMEOUT_MS: '120',
         HAPPIER_DAEMON_SERVICE_OWNERSHIP_ACTIVE_GRACE_TIMEOUT_MS: '0',
         HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_POLL_MS: '10',
@@ -2611,6 +2615,7 @@ describe('runDaemonServiceCliCommand', () => {
       expect(managedShimPath).not.toBe(process.execPath);
       expect(readFileSync(paths.installedPath, 'utf-8')).toBe(expectedContents);
       expect(readFileSync(paths.installedPath, 'utf-8')).toContain(`ExecStart=${managedShimPath} daemon start-sync --takeover`);
+      expect(readFileSync(paths.installedPath, 'utf-8')).not.toContain(launcherEntryPath);
       expect(configuration.currentCliVersion).toBeTruthy();
     });
   });
