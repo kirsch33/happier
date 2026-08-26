@@ -2520,12 +2520,10 @@ describe('runDaemonServiceCliCommand', () => {
     });
   });
 
-  it.each(['start', 'restart'] as const)('keeps %s on the launcher managed runtime after re-exec', async (action) => {
-    await withTempDir(`happier-service-${action}-managed-runtime-`, async (homeDir) => {
+  it.each(['start', 'restart'] as const)('keeps %s on the managed default shim after runtime re-exec', async (action) => {
+    await withTempDir(`happier-service-${action}-managed-shim-`, async (homeDir) => {
       const happierHomeDir = `${homeDir}/.happier`;
       const managedShimPath = join(happierHomeDir, 'bin', 'happier');
-      const managedRuntimePath = join(happierHomeDir, 'tools', 'js-runtime', 'current', 'bin', 'happier-js-runtime');
-      const managedEntryPath = join(happierHomeDir, 'cli-dev', 'current', 'package-dist', 'index.mjs');
       let expectedServiceLabel = '';
       let expectedCliVersion = '';
       let writeDaemonStateImpl: ((state: DaemonLocallyPersistedState) => void) | null = null;
@@ -2541,8 +2539,6 @@ describe('runDaemonServiceCliCommand', () => {
         HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
         HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'default-following',
         HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
-        HAPPIER_DAEMON_SERVICE_NODE_PATH: managedRuntimePath,
-        HAPPIER_DAEMON_SERVICE_ENTRY_PATH: managedEntryPath,
         HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_TIMEOUT_MS: '120',
         HAPPIER_DAEMON_SERVICE_OWNERSHIP_ACTIVE_GRACE_TIMEOUT_MS: '0',
         HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_POLL_MS: '10',
@@ -2595,8 +2591,8 @@ describe('runDaemonServiceCliCommand', () => {
         serverUrl: runtime.serverUrl,
         webappUrl: runtime.webappUrl,
         publicServerUrl: runtime.publicServerUrl,
-        nodePath: managedRuntimePath,
-        entryPath: managedEntryPath,
+        nodePath: managedShimPath,
+        entryPath: '',
       });
       const expectedContents = expectedPlan.files[0]?.content ?? '';
       mkdirSync(dirname(paths.installedPath), { recursive: true });
@@ -2612,9 +2608,9 @@ describe('runDaemonServiceCliCommand', () => {
         output.restore();
       }
 
-      expect(managedRuntimePath).not.toBe(process.execPath);
+      expect(managedShimPath).not.toBe(process.execPath);
       expect(readFileSync(paths.installedPath, 'utf-8')).toBe(expectedContents);
-      expect(readFileSync(paths.installedPath, 'utf-8')).toContain(`ExecStart=${managedRuntimePath} ${managedEntryPath} daemon start-sync --takeover`);
+      expect(readFileSync(paths.installedPath, 'utf-8')).toContain(`ExecStart=${managedShimPath} daemon start-sync --takeover`);
       expect(configuration.currentCliVersion).toBeTruthy();
     });
   });
