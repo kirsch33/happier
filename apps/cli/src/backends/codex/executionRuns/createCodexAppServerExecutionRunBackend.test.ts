@@ -49,6 +49,29 @@ describe('createCodexAppServerExecutionRunBackend', () => {
     ]);
   });
 
+  it('accepts lifecycle events emitted by the shared app-server runtime without failing the run', async () => {
+    const { createCodexAppServerExecutionRunBackend } = await import('./createCodexAppServerExecutionRunBackend');
+    const backend = createCodexAppServerExecutionRunBackend({
+      cwd: '/tmp/happier-worktree',
+      env: {},
+      permissionMode: 'read-only' as any,
+      permissionHandler: null,
+    });
+    const observed: unknown[] = [];
+    backend.onMessage((message) => observed.push(message));
+
+    const runtimeParams = createCodexAppServerRuntimeMock.mock.calls[0]?.[0] as any;
+    expect(() => runtimeParams.session.sendSessionEvent({
+      type: 'context-compaction',
+      phase: 'completed',
+      lifecycleId: 'compact_1',
+      provider: 'codex',
+      source: 'provider-event',
+      providerEventId: 'compact_1',
+    })).not.toThrow();
+    expect(observed).toEqual([]);
+  });
+
   it('passes the isolated execution-run env through to the app-server runtime (no process.env fallback)', async () => {
     const { createCodexAppServerExecutionRunBackend } = await import('./createCodexAppServerExecutionRunBackend');
 
