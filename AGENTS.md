@@ -126,6 +126,14 @@ process does not prove it opened the incumbent database.
   narrowest relevant test; a CLI typecheck can consume several GiB and must be
   stopped if it ceases making progress. Never overlap a stalled typecheck,
   build, Git operation, or release gate with another heavy check.
+- The current CLI bundle takes about 18 minutes on the RPi while remaining
+  CPU-active; pkgroll's 10-minute default is therefore too short on this host.
+  For the one canonical versioned CLI build, set
+  `HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1200000` and monitor CPU, available memory,
+  and output at least every 30 seconds. Do not raise the bound or retry merely
+  because pkgroll is quiet. Once `apps/cli/dist/.build-manifest.json` records
+  the intended version, the multi-target release command must reuse that dist;
+  stop and diagnose if packaging starts another full CLI bundle.
 - Verify artifact architecture, archive root, embedded version, and checksum
   before promotion. Cross-compiled x64 payloads are supported. `EACCES` under
   `runuser` previously came from inheriting `/root` as the working directory,
@@ -148,6 +156,9 @@ process does not prove it opened the incumbent database.
    installer atomically advance `current`, retain `previous`, repair shims, and
    prune older generations. Do not copy the binary, edit the pointer, or pin a
    generated unit manually.
+   Before promotion, compare every live session runner path with the two
+   generations the installer will retain. Do not promote while it would prune
+   files used by a live third-oldest runner; quiesce that session first.
 4. On Debian, execute install and service commands as `akirsch` with
    `HOME=/home/akirsch`, `USER=akirsch`, `LOGNAME=akirsch`, the canonical
    Happier bin path, `XDG_RUNTIME_DIR=/run/user/1000`, the matching user-bus
@@ -198,6 +209,12 @@ beyond `current` plus `previous`, and any temporary rollback whose retirement
 condition passed. Preserve engine-owned live relay data and the one required
 known-good generation. Report retained byte/count limits and final free space.
 Do not defer producer cleanup to generic trash expiry or another host sweep.
+
+The `kirsch33/happier` fork has no enabled GitHub Actions workflows unless the
+operator deliberately re-enables one. Local Great White Lab builds are not
+GitHub release evidence. After any temporary CI use, delete artifacts once
+their named consumer and rollback window end; do not buy minutes or retain
+multi-gigabyte test matrices by default.
 
 ## TypeScript compiler ownership
 
