@@ -210,11 +210,15 @@ condition passed. Preserve engine-owned live relay data and the one required
 known-good generation. Report retained byte/count limits and final free space.
 Do not defer producer cleanup to generic trash expiry or another host sweep.
 
-The `kirsch33/happier` fork has no enabled GitHub Actions workflows unless the
-operator deliberately re-enables one. Local Great White Lab builds are not
-GitHub release evidence. After any temporary CI use, delete artifacts once
-their named consumer and rollback window end; do not buy minutes or retain
-multi-gigabyte test matrices by default.
+The `kirsch33/happier` fork's default branch intentionally contains no
+`.github/workflows` files unless the operator deliberately restores one.
+GitHub's workflow API may still label deleted historical registrations
+`active`; verify the default-branch tree and absence of newer runs instead of
+mistaking that label for a runnable workflow. Replay the workflow-deletion
+commit after upstream integration if the merge restores those files. Local
+Great White Lab builds are not GitHub release evidence. After any temporary CI
+use, delete artifacts once their named consumer and rollback window end; do not
+buy minutes or retain multi-gigabyte test matrices by default.
 
 ## TypeScript compiler ownership
 
