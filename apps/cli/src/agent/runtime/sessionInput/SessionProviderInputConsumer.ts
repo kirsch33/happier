@@ -20,6 +20,10 @@ import type {
 import { PENDING_QUEUE_ONE_AT_A_TIME_MAX_POP_PER_WAKE } from './pendingQueueDrainPolicy';
 import { readPendingLocalId } from '@happier-dev/protocol';
 import type { RuntimeActivitySnapshotTail } from '@/api/session/mutations/createSessionMutationOutbox';
+import type {
+  MaterializeNextPendingOptions,
+  PendingMaterializationDiagnosticPhase,
+} from '@/api/session/sessionClientPort';
 
 const PENDING_INPUT_SLOW_PHASE_DIAGNOSTIC_MS = 30_000;
 
@@ -31,13 +35,7 @@ export class PendingQueueMaterializationAuthError extends Error {
 }
 
 export interface SessionProviderInputConsumerSession {
-  materializeNextPendingMessageSafely: (opts?: {
-    expectedPendingVersion?: number;
-    reconcileWhenEmpty?: PendingMaterializationReconcileWhenEmpty;
-    activeTurnSteerability?: PendingForegroundSteerability;
-    pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
-    expectedRuntimeActivityRevision?: number;
-  }) => Promise<PendingMaterializationResult>;
+  materializeNextPendingMessageSafely: (opts?: MaterializeNextPendingOptions) => Promise<PendingMaterializationResult>;
   shouldAttemptPendingMaterialization?: ((opts?: {
     activeTurnSteerability?: PendingForegroundSteerability;
     pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
@@ -77,13 +75,7 @@ function buildMaterializeOptions(
   activeTurnSteerability: PendingForegroundSteerability | undefined,
   pendingQueueDeliveryTiming: PendingQueueDeliveryTiming | undefined,
   expectedRuntimeActivityRevision?: number,
-): {
-  expectedPendingVersion?: number;
-  reconcileWhenEmpty: PendingMaterializationReconcileWhenEmpty;
-  activeTurnSteerability?: PendingForegroundSteerability;
-  pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming;
-  expectedRuntimeActivityRevision?: number;
-} {
+): MaterializeNextPendingOptions {
   return {
     reconcileWhenEmpty,
     ...(activeTurnSteerability ? { activeTurnSteerability } : {}),
@@ -121,7 +113,10 @@ async function materializeWithRuntimeActivityTail(
 ): Promise<PendingMaterializationResult> {
   const first = await observePendingInputPhase(
     'materialize',
-    async () => await session.materializeNextPendingMessageSafely(options),
+    async (onDiagnosticPhase) => await session.materializeNextPendingMessageSafely({
+      ...options,
+      onDiagnosticPhase,
+    }),
   );
   if (
     options.pendingQueueDeliveryTiming !== 'after_runtime_idle'
@@ -136,9 +131,10 @@ async function materializeWithRuntimeActivityTail(
     if (expectedRuntimeActivityRevision !== undefined) {
       return await observePendingInputPhase(
         'materialize_runtime_tail_retry',
-        async () => await session.materializeNextPendingMessageSafely({
+        async (onDiagnosticPhase) => await session.materializeNextPendingMessageSafely({
           ...options,
           expectedRuntimeActivityRevision,
+          onDiagnosticPhase,
         }),
       );
     }
@@ -765,9 +761,20 @@ async function materializePendingMessage<Mode, Message>(
   if (result.type === 'deferred' && result.reason === 'supervisor_auth_failed') {
     throw new PendingQueueMaterializationAuthError();
   }
-  return result.type === 'retryable_transport' && result.retryAfterMs !== undefined
-    ? result.retryAfterMs
-    : null;
+  if (result.type !== 'retryable_transport') return null;
+
+  // A transport retry without a server-provided delay can otherwise consume the only
+  // eligibility wake and then wait forever for another event. Reuse the session client's
+  // authoritative reconciliation hook before one bounded local retry; connection recovery
+  // remains responsible for publishing subsequent wakes, so this is not a polling loop.
+  if (opts.session.reconcilePendingQueueState) {
+    await Promise.resolve(opts.session.reconcilePendingQueueState({ force: true })).catch((error: unknown) => {
+      logger.debug('[pendingQueue] retryable transport reconciliation failed (non-fatal)', error);
+    });
+  }
+  return result.retryAfterMs
+    ?? opts.metadataWaitRetryBackoffMs
+    ?? DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS;
 }
 
 function withDefaultDrainOptions(
@@ -999,30 +1006,54 @@ async function callMetadataUpdate(
   }
 }
 
-async function observePendingInputPhase<T>(
-  phase: 'materialize' | 'materialize_runtime_tail_retry' | 'metadata_reconcile',
-  operation: () => Promise<T>,
-): Promise<T> {
-  const startedAt = Date.now();
-  let slowDiagnosticEmitted = false;
-  const timer = setTimeout(() => {
-    slowDiagnosticEmitted = true;
-    logger.infoFile('[pendingQueue] input consumer phase remains unsettled', {
-      elapsedMs: Date.now() - startedAt,
-      phase,
-    });
-  }, PENDING_INPUT_SLOW_PHASE_DIAGNOSTIC_MS);
-  timer.unref?.();
+type PendingInputConsumerDiagnosticPhase =
+  | 'materialize'
+  | 'materialize_runtime_tail_retry'
+  | 'metadata_reconcile'
+  | PendingMaterializationDiagnosticPhase;
 
-  try {
-    return await operation();
-  } finally {
-    clearTimeout(timer);
+async function observePendingInputPhase<T>(
+  initialPhase: PendingInputConsumerDiagnosticPhase,
+  operation: (onPhase: (phase: PendingMaterializationDiagnosticPhase) => void) => Promise<T>,
+): Promise<T> {
+  let phase = initialPhase;
+  let startedAt = Date.now();
+  let slowDiagnosticEmitted = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const finishPhase = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
     if (slowDiagnosticEmitted) {
       logger.infoFile('[pendingQueue] input consumer slow phase settled', {
         elapsedMs: Date.now() - startedAt,
         phase,
       });
     }
+  };
+  const startPhase = () => {
+    startedAt = Date.now();
+    slowDiagnosticEmitted = false;
+    timer = setTimeout(() => {
+      slowDiagnosticEmitted = true;
+      logger.infoFile('[pendingQueue] input consumer phase remains unsettled', {
+        elapsedMs: Date.now() - startedAt,
+        phase,
+      });
+    }, PENDING_INPUT_SLOW_PHASE_DIAGNOSTIC_MS);
+    timer.unref?.();
+  };
+  const onPhase = (nextPhase: PendingMaterializationDiagnosticPhase) => {
+    if (nextPhase === phase) return;
+    finishPhase();
+    phase = nextPhase;
+    startPhase();
+  };
+
+  startPhase();
+  try {
+    return await operation(onPhase);
+  } finally {
+    finishPhase();
   }
 }

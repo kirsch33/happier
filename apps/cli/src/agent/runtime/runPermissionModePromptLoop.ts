@@ -15,6 +15,7 @@ import { resolveProviderPromptForDispatch } from '@/agent/runtime/prompt/resolve
 import { normalizePendingDeliveryLocalIds } from '@/agent/runtime/session/pendingDelivery/undeliverableProviderPrompt';
 import { isAbortLikeError } from '@/agent/executionRuns/runtime/turnDelivery';
 import { configuration } from '@/configuration';
+import { isAgentNativeResumeIdentityMismatchError } from '@/session/agentTransition/agentNativeReturn';
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 import { readPendingLocalId } from '@happier-dev/protocol';
 import { readNewestSessionModelsMetadataStateV1 } from '@happier-dev/agents';
@@ -32,6 +33,7 @@ type PromptRuntime = {
   // Read at dispatch to reconstruct provider context for composer references (INV-9).
   listVendorPlugins?: () => Promise<unknown>;
   listSkills?: () => Promise<unknown>;
+  isProviderNativeCommand?: (prompt: string) => Promise<boolean>;
   compactContext?: (command: string) => Promise<void>;
   failTurn?: (error: unknown) => void | boolean | Promise<void | boolean>;
   flushTurn: () => void | Promise<void>;
@@ -120,6 +122,14 @@ export async function runPermissionModePromptLoop(opts: {
   setCurrentPermissionModeUpdatedAt: (updatedAt: number) => void;
   initialResumeId?: string;
   strictInitialResume?: boolean;
+  /**
+   * The host removes a failed requested native identity before a later
+   * departure capture can treat it as a successful return.
+   */
+  onStrictInitialResumeFailure?: ((params: Readonly<{
+    resumeId: string;
+    error: unknown;
+  }>) => void | Promise<void>) | null;
   failClosedOnResumeFailure?: boolean;
   startRuntimeBeforeFirstPrompt?: boolean;
   onAfterStart?: (() => void | Promise<void>) | null;
@@ -251,10 +261,21 @@ export async function runPermissionModePromptLoop(opts: {
         await opts.runtime.startOrLoad(buildStartOrLoadOptions({ resumeId, importHistory: false }));
       } catch (error) {
         if (opts.shouldExit()) return { startedFreshSessionForTurn };
+        // A requested native id is only disproven by the provider's typed
+        // identity-mismatch fact. Ordinary startup failures (quota, overload,
+        // auth, transport) retain the normal resume fallback unless this
+        // provider independently requires a fail-closed resume contract.
+        const strictNativeIdentityMismatch =
+          opts.strictInitialResume === true
+          && resume?.origin === 'initial'
+          && isAgentNativeResumeIdentityMismatchError(error);
         const shouldFailClosed =
           opts.failClosedOnResumeFailure === true ||
-          (opts.strictInitialResume === true && resume?.origin === 'initial');
+          strictNativeIdentityMismatch;
         if (shouldFailClosed) {
+          if (strictNativeIdentityMismatch) {
+            await opts.onStrictInitialResumeFailure?.({ resumeId, error });
+          }
           const formatted = opts.formatPromptErrorMessage(error);
           opts.messageBuffer.addMessage(`Resume failed; cannot continue: ${formatted}`, 'status');
           opts.session.sendAgentMessage(opts.agentMessageType, { type: 'message', message: `Resume failed; cannot continue: ${formatted}` });
@@ -264,7 +285,7 @@ export async function runPermissionModePromptLoop(opts: {
             // ignore cleanup failure
           }
           if (opts.shouldExit()) return { startedFreshSessionForTurn };
-          strictAbort = opts.strictInitialResume === true && resume?.origin === 'initial'
+          strictAbort = strictNativeIdentityMismatch
             ? new StrictInitialResumeError('Strict initial resume failed', error)
             : new ResumeFailClosedError('Resume failed closed', error);
         } else {
@@ -425,7 +446,6 @@ export async function runPermissionModePromptLoop(opts: {
     try {
       turnInFlight = true;
       let shouldApplyFreshSessionSystemPrompt = pendingFreshSessionSystemPrompt;
-      pendingFreshSessionSystemPrompt = false;
       const localId = typeof message.message.localId === 'string' && message.message.localId ? message.message.localId : null;
       const committedUserMessageSeq = await waitForCommittedUserPromptBoundary(opts.session, localId);
       if (opts.shouldExit()) {
@@ -477,24 +497,38 @@ export async function runPermissionModePromptLoop(opts: {
         continue;
       }
 
+      const providerNativeCommand = special.type === null
+        && typeof opts.runtime.isProviderNativeCommand === 'function'
+        && await opts.runtime.isProviderNativeCommand(message.message.text);
+      pendingFreshSessionSystemPrompt = providerNativeCommand
+        ? shouldApplyFreshSessionSystemPrompt
+        : false;
+
       const nowMs = Date.now();
-      const seedResolution = await resolveProviderPromptForDispatch({
-        session: opts.session,
-        userText: message.message.text,
-        allowSeed: special.type === null,
-        localId,
-        nowMs,
-        refreshMetadataBeforeRead: false,
-        meta: message.message.meta,
-        catalogs: {
-          ...(typeof opts.runtime.listSkills === 'function'
-            ? { listSkills: () => opts.runtime.listSkills!() }
-            : {}),
-          ...(typeof opts.runtime.listVendorPlugins === 'function'
-            ? { listVendorPlugins: () => opts.runtime.listVendorPlugins!() }
-            : {}),
-        },
-      });
+      const seedResolution = providerNativeCommand
+        ? {
+            providerPrompt: message.message.text,
+            meta: message.message.meta,
+            seedApplied: false,
+            settleReplaySeedOnProviderAcceptance: async () => undefined,
+          }
+        : await resolveProviderPromptForDispatch({
+            session: opts.session,
+            userText: message.message.text,
+            allowSeed: special.type === null,
+            localId,
+            nowMs,
+            refreshMetadataBeforeRead: false,
+            meta: message.message.meta,
+            catalogs: {
+              ...(typeof opts.runtime.listSkills === 'function'
+                ? { listSkills: () => opts.runtime.listSkills!() }
+                : {}),
+              ...(typeof opts.runtime.listVendorPlugins === 'function'
+                ? { listVendorPlugins: () => opts.runtime.listVendorPlugins!() }
+                : {}),
+            },
+          });
       const dispatchMeta = seedResolution.meta;
       if (seedResolution.seedApplied) {
         pendingReplaySeedSettlement = seedResolution.settleReplaySeedOnProviderAcceptance;
@@ -505,6 +539,7 @@ export async function runPermissionModePromptLoop(opts: {
       }
       snapshotFreshForNextPromptBoundary = false;
       didReplaySeedBootstrap = true;
+      shouldApplyFreshSessionSystemPrompt = shouldApplyFreshSessionSystemPrompt && !providerNativeCommand;
       const explicitBaseOverride = shouldApplyFreshSessionSystemPrompt
         ? resolveAppendSystemPromptBaseOverride(message.mode)
         : undefined;

@@ -33,6 +33,10 @@ import { normalizeNodeForView } from '@/components/ui/rendering/normalizeNodeFor
 import { runAfterInteractionsWithFallback } from '@/utils/timing/runAfterInteractionsWithFallback';
 import { setClipboardStringSafe } from '@/utils/ui/clipboard';
 import { Icon } from '@/components/ui/icons/Icon';
+import {
+    shouldForceFreshNewSessionEntryFromPressEvent,
+    useResolveNewSessionOrdinaryEntryRoute,
+} from '@/components/sessions/new/navigation/newSessionOrdinaryEntryRoute';
 
 export type SessionGettingStartedGuidanceVariant = 'phone' | 'sidebar' | 'primaryPane' | 'newSessionBlocking';
 
@@ -51,7 +55,7 @@ export type SessionGettingStartedGuidanceViewModel = Readonly<{
     serverName: string;
     showServerSetup: boolean;
     onOpenSetup?: () => void;
-    onStartNewSession?: () => void;
+    onStartNewSession?: (event?: unknown) => void;
     onConnectTerminal?: () => void;
     onEnterUrlManually?: () => void;
     connectIsLoading?: boolean;
@@ -236,10 +240,11 @@ function resolveAppVariantForCliInstall(): AppVariant {
     );
 }
 
-function buildCliInstallCommand(): string {
+function buildCliInstallCommand(options?: Readonly<{ suppressAutomaticSetup?: boolean }>): string {
     return buildHappierCliInstallCommand({
         appVariant: resolveAppVariantForCliInstall(),
         distTagOverride: config.cliNpmDistTag,
+        suppressAutomaticSetup: options?.suppressAutomaticSetup,
     });
 }
 
@@ -283,31 +288,21 @@ function buildSteps(model: SessionGettingStartedGuidanceViewModel): SessionGetti
                 id: 'install_cli',
                 title: t('sessionGettingStarted.steps.installCli.title'),
                 description: t('sessionGettingStarted.steps.installCli.description'),
-                command: buildCliInstallCommand(),
+                // This card already knows which relay the user is connecting.
+                // Suppress the installer's generic automatic handoff, then let
+                // the one target-bound setup command own relay selection,
+                // authentication, and service reconciliation.
+                command: buildCliInstallCommand({ suppressAutomaticSetup: true }),
                 copyLabel: t('sessionGettingStarted.steps.installCli.copyLabel'),
             });
-            if (model.showServerSetup) {
-                steps.push({
-                    id: 'server_setup',
-                    title: t('sessionGettingStarted.steps.serverSetup.title'),
-                    description: t('sessionGettingStarted.steps.serverSetup.description'),
-                    command: `${cliCommandName} server add --name \"${model.serverName}\" --server-url \"${model.serverUrl}\" --use`,
-                    copyLabel: t('sessionGettingStarted.steps.serverSetup.copyLabel'),
-                });
-            }
             steps.push({
                 id: 'auth_login',
                 title: t('sessionGettingStarted.steps.authLogin.title'),
                 description: t('sessionGettingStarted.steps.authLogin.description'),
-                command: `${cliCommandName} auth login`,
+                command: model.showServerSetup
+                    ? `${cliCommandName} setup --relay \"${model.serverUrl}\"`
+                    : `${cliCommandName} setup`,
                 copyLabel: t('sessionGettingStarted.steps.authLogin.copyLabel'),
-            });
-            steps.push({
-                id: 'daemon_install',
-                title: t('sessionGettingStarted.steps.daemonInstall.title'),
-                description: t('sessionGettingStarted.steps.daemonInstall.description'),
-                command: `${cliCommandName} service install`,
-                copyLabel: t('sessionGettingStarted.steps.daemonInstall.copyLabel'),
             });
             steps.push({
                 id: 'create_session',
@@ -647,14 +642,18 @@ export function useShouldBlockNewSessionWithGettingStartedGuidance(): boolean {
 
 function useSessionGettingStartedGuidanceViewModelBase(): SessionGettingStartedGuidanceViewModel {
     const baseModel = useSessionGettingStartedGuidanceBaseModel();
+    const resolveNewSessionOrdinaryEntryRoute = useResolveNewSessionOrdinaryEntryRoute();
     const canOpenSetup = isTauriDesktop();
     const onOpenSetup = React.useCallback(() => {
         router.push('/setup' as any);
     }, []);
 
-    const onStartNewSession = React.useCallback(() => {
-        router.push('/new' as any);
-    }, []);
+    const onStartNewSession = React.useCallback((event?: unknown) => {
+        const { draftId, draftOrigin } = resolveNewSessionOrdinaryEntryRoute({
+            forceFresh: shouldForceFreshNewSessionEntryFromPressEvent(event),
+        });
+        router.push({ pathname: '/new', params: { draftId, draftOrigin } });
+    }, [resolveNewSessionOrdinaryEntryRoute]);
 
     return React.useMemo(() => ({
         kind: baseModel.kind,

@@ -1,7 +1,10 @@
 import type { Credentials } from '@/persistence';
 import type { SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
 import { activatePendingInactiveSession } from './activatePendingInactiveSession';
-import { listPendingQueueV2LocalIdsFromServer } from '@/api/session/pendingQueueV2Transport';
+import {
+  listPendingQueueV2LocalIdsFromServer,
+  updatePendingQueueV2RequestedActionViaHttp,
+} from '@/api/session/pendingQueueV2Transport';
 import { buildInactiveSessionResumeSpawnOptions } from '@/daemon/sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions';
 import { tryDecryptSessionMetadata } from '@/session/transport/encryption/sessionEncryptionContext';
 import { fetchSessionByIdCompat } from '@/session/transport/http/sessionsHttp';
@@ -150,6 +153,7 @@ export async function resumeFreshProviderContext(params: Readonly<{
   }
   let freshRawSession = rawSession;
   let pendingIds = await listPendingQueueV2LocalIdsFromServer({ token: params.credentials.token, sessionId });
+  let seededRecoveryRequest = false;
   if (pendingIds.length !== rawSession.pendingCount) {
     return { ok: false, errorCode: 'pending_shape_mismatch', errorMessage: 'The session must have exactly one Pending request.' };
   }
@@ -185,7 +189,7 @@ export async function resumeFreshProviderContext(params: Readonly<{
       message,
       wait: false,
       timeoutMs: 5_000,
-      requestedAction: { v: 1, kind: 'enqueue' },
+      requestedAction: { v: 1, kind: 'send_now' },
       resumeInactiveSession: false,
       localId: admissionAttempt.localId,
     });
@@ -216,9 +220,53 @@ export async function resumeFreshProviderContext(params: Readonly<{
     }
     freshRawSession = confirmedRawSession;
     pendingIds = confirmedPendingIds;
+    seededRecoveryRequest = true;
   }
   if (pendingIds.length !== 1) {
     return { ok: false, errorCode: 'pending_shape_mismatch', errorMessage: 'The session must have exactly one Pending request.' };
+  }
+  if (!seededRecoveryRequest) {
+    try {
+      await updatePendingQueueV2RequestedActionViaHttp({
+        token: params.credentials.token,
+        sessionId,
+        localId: pendingIds[0],
+        requestedAction: { v: 1, kind: 'send_now' },
+      });
+    } catch {
+      return {
+        ok: false,
+        errorCode: 'pending_action_promotion_failed',
+        errorMessage: 'The exact Pending request could not be promoted to durable send-now authority.',
+      };
+    }
+    const promotedRawSession = await fetchSessionByIdCompat({
+      token: params.credentials.token,
+      sessionId,
+      reason: 'manual-recovery',
+    });
+    const promotedPendingIds = await listPendingQueueV2LocalIdsFromServer({
+      token: params.credentials.token,
+      sessionId,
+    });
+    if (
+      !promotedRawSession
+      || promotedRawSession.id !== sessionId
+      || promotedRawSession.archivedAt !== null
+      || promotedRawSession.active === true
+      || promotedRawSession.pendingCount !== 1
+      || typeof promotedRawSession.pendingVersion !== 'number'
+      || promotedPendingIds.length !== 1
+      || promotedPendingIds[0] !== pendingIds[0]
+    ) {
+      return {
+        ok: false,
+        errorCode: 'pending_action_promotion_failed',
+        errorMessage: 'The exact Pending request changed while acquiring durable send-now authority.',
+      };
+    }
+    freshRawSession = promotedRawSession;
+    pendingIds = promotedPendingIds;
   }
   const pendingVersion = freshRawSession.pendingVersion;
   if (typeof pendingVersion !== 'number') {

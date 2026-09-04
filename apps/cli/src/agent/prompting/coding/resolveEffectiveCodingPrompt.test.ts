@@ -148,7 +148,7 @@ describe('resolveEffectiveCodingPromptText', () => {
     expect(out).toContain('use `memory_get_window`');
   });
 
-  it('appends provider behavior blocks after the shared base and prompt library blocks', async () => {
+  it('does not append repository tool-execution policy to Codex prompts', async () => {
     const credentials = createCredentials();
 
     const out = await resolveEffectiveCodingPromptText({
@@ -162,11 +162,10 @@ describe('resolveEffectiveCodingPromptText', () => {
     });
 
     expect(out).toContain('BASE');
-    expect(out).toContain('Tool execution ordering');
-    expect(out.indexOf('BASE')).toBeLessThan(out.indexOf('Tool execution ordering'));
+    expect(out).not.toContain('Tool execution ordering');
   });
 
-  it('treats a null base override as dropping the shared base while preserving provider and shell-bridge blocks', async () => {
+  it('treats a null base override as dropping the shared base while preserving shell-bridge blocks', async () => {
     const credentials = createCredentials();
 
     const out = await resolveEffectiveCodingPromptText({
@@ -183,7 +182,7 @@ describe('resolveEffectiveCodingPromptText', () => {
     });
 
     expect(out).not.toContain('You are an AI assistant');
-    expect(out).toContain('Tool execution ordering');
+    expect(out).not.toContain('Tool execution ordering');
     expect(out).toContain('Happier tools are available through the CLI bridge');
   });
 
@@ -215,6 +214,110 @@ describe('resolveEffectiveCodingPromptText', () => {
     expect(out).not.toContain('change_title');
     expect(out).not.toContain('rename the session');
     expect(out).not.toContain('# Session title');
+  });
+
+  it('omits shell-bridge title guidance when a profile codingPromptBehaviorV1 override disables title updates', async () => {
+    const credentials = createCredentials();
+
+    const settings = {
+      codingPromptBehaviorV1: {
+        v: 1,
+        sessionTitleUpdates: 'ongoing',
+        responseOptions: 'agent',
+      },
+      profiles: [
+        {
+          id: 'profile-no-titles',
+          name: 'Profile (no titles)',
+          codingPromptBehaviorV1: {
+            v: 1,
+            sessionTitleUpdates: 'disabled',
+          },
+        },
+      ],
+    };
+
+    const out = await resolveEffectiveCodingPromptText({
+      credentials,
+      settings,
+      profileId: 'profile-no-titles',
+      executionRunsFeatureEnabled: false,
+      toolDelivery: 'shell_bridge',
+      toolDeliverySessionId: 's1',
+      toolDeliveryDirectory: '/tmp/worktree',
+      fetchPromptArtifactRecord: async () => null,
+    });
+
+    // The profile override must reach the tool-delivery appendix too, not only the
+    // base blocks: no rename guidance may appear anywhere in the composed prompt.
+    expect(out).not.toContain('change_title');
+    expect(out).not.toContain('rename the session');
+    expect(out).not.toContain('# Session title');
+    expect(out).not.toContain('Required first action');
+    expect(out).toContain('Happier tools are available through the CLI bridge');
+  });
+
+  it('keeps shell-bridge title guidance when no profile override applies (REQ-2)', async () => {
+    const credentials = createCredentials();
+
+    const out = await resolveEffectiveCodingPromptText({
+      credentials,
+      settings: {
+        codingPromptBehaviorV1: {
+          v: 1,
+          sessionTitleUpdates: 'ongoing',
+          responseOptions: 'agent',
+        },
+      },
+      profileId: null,
+      executionRunsFeatureEnabled: false,
+      toolDelivery: 'shell_bridge',
+      toolDeliverySessionId: 's1',
+      toolDeliveryDirectory: '/tmp/worktree',
+      fetchPromptArtifactRecord: async () => null,
+    });
+
+    expect(out).toContain('Happier tools are available through the CLI bridge');
+    expect(out).toContain('# Session title');
+    expect(out).toContain('change_title');
+  });
+
+  it('leaves the shell-bridge appendix unchanged when the profile override sets only responseOptions', async () => {
+    const credentials = createCredentials();
+
+    const settings = {
+      codingPromptBehaviorV1: {
+        v: 1,
+        sessionTitleUpdates: 'ongoing',
+        responseOptions: 'agent',
+      },
+      profiles: [
+        {
+          id: 'profile-options-only',
+          name: 'Profile (options only)',
+          codingPromptBehaviorV1: {
+            v: 1,
+            responseOptions: 'disabled',
+          },
+        },
+      ],
+    };
+
+    const out = await resolveEffectiveCodingPromptText({
+      credentials,
+      settings,
+      profileId: 'profile-options-only',
+      executionRunsFeatureEnabled: false,
+      toolDelivery: 'shell_bridge',
+      toolDeliverySessionId: 's1',
+      toolDeliveryDirectory: '/tmp/worktree',
+      fetchPromptArtifactRecord: async () => null,
+    });
+
+    // responseOptions does not affect the appendix; title guidance stays from the global.
+    expect(out).toContain('# Session title');
+    expect(out).toContain('change_title');
+    expect(out).not.toContain('# Options');
   });
 
   it('uses start-only shell-bridge title guidance for initial title updates', async () => {
@@ -264,5 +367,95 @@ describe('resolveEffectiveCodingPromptText', () => {
     expect(out).not.toContain('# Options');
     expect(out).not.toContain('# Plan mode with options');
     expect(out).not.toContain('<options>');
+  });
+
+  it('applies a profile codingPromptBehaviorV1 override that disables responseOptions', async () => {
+    const credentials = createCredentials();
+
+    const settings = {
+      profiles: [
+        {
+          id: 'profile-no-options',
+          name: 'Profile (no options)',
+          codingPromptBehaviorV1: {
+            v: 1,
+            responseOptions: 'disabled',
+          },
+        },
+      ],
+    };
+
+    const out = await resolveEffectiveCodingPromptText({
+      credentials,
+      settings,
+      profileId: 'profile-no-options',
+      executionRunsFeatureEnabled: false,
+      providerId: 'claude',
+      fetchPromptArtifactRecord: async () => null,
+    });
+
+    // Override wins: responseOptions disabled => options block omitted.
+    expect(out).not.toContain('# Options');
+    expect(out).not.toContain('<options>');
+    // The other knob still inherits the global default (ongoing title updates).
+    expect(out).toContain('# Session title');
+  });
+
+  it('inherits the global default when the selected profile has no codingPromptBehaviorV1 override', async () => {
+    const credentials = createCredentials();
+
+    const settings = {
+      profiles: [
+        {
+          id: 'profile-default',
+          name: 'Profile (default)',
+          // No codingPromptBehaviorV1 field => inherit global default.
+        },
+      ],
+    };
+
+    const out = await resolveEffectiveCodingPromptText({
+      credentials,
+      settings,
+      profileId: 'profile-default',
+      executionRunsFeatureEnabled: false,
+      providerId: 'claude',
+      fetchPromptArtifactRecord: async () => null,
+    });
+
+    // Global default responseOptions is 'agent' => options block present.
+    expect(out).toContain('# Options');
+    expect(out).toContain('<options>');
+  });
+
+  it('applies a profile override that disables session title updates while leaving options at the global default', async () => {
+    const credentials = createCredentials();
+
+    const settings = {
+      profiles: [
+        {
+          id: 'profile-no-title',
+          name: 'Profile (no title)',
+          codingPromptBehaviorV1: {
+            v: 1,
+            sessionTitleUpdates: 'disabled',
+          },
+        },
+      ],
+    };
+
+    const out = await resolveEffectiveCodingPromptText({
+      credentials,
+      settings,
+      profileId: 'profile-no-title',
+      executionRunsFeatureEnabled: false,
+      providerId: 'claude',
+      fetchPromptArtifactRecord: async () => null,
+    });
+
+    // Override wins only for title; options inherit the global default.
+    expect(out).not.toContain('# Session title');
+    expect(out).toContain('# Options');
+    expect(out).toContain('<options>');
   });
 });

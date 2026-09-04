@@ -13,7 +13,10 @@ vi.mock('@/sync/ops', () => ({ forkSession: forkSessionMock }));
 vi.mock('@/components/sessions/transcript/forkContext/completeSessionForkNavigation', () => ({
     completeSessionForkNavigation: completeSessionForkNavigationMock,
 }));
-vi.mock('@/sync/sync', () => ({ sync: { refreshSessions: refreshSessionsMock } }));
+vi.mock('@/sync/sync', () => ({ sync: {
+    refreshSessions: refreshSessionsMock,
+    acquireUserRequestLease: () => () => {},
+} }));
 vi.mock('@/sync/domains/state/storage', () => ({
     storage: { getState: () => ({ sessions: sessionsRef.current }) },
 }));
@@ -94,6 +97,28 @@ describe('useSessionForkStrategyFlow', () => {
         expect(onNavigated).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps the completed fork in activity without navigating after the initiating surface unmounts', async () => {
+        const forkSettlement: { current: ((value: { ok: true; childSessionId: string }) => void) | null } = { current: null };
+        forkSessionMock.mockImplementationOnce(() => new Promise((resolve) => {
+            forkSettlement.current = resolve;
+        }));
+        const { harness, navigate, onNavigated } = await mountFlow();
+        let submission: Promise<void> | null = null;
+
+        await act(async () => {
+            submission = harness.getCurrent().submit('native');
+            await Promise.resolve();
+        });
+        await vi.waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
+        await harness.unmount();
+        forkSettlement.current?.({ ok: true, childSessionId: 'child_detached' });
+        await submission;
+
+        expect(completeSessionForkNavigationMock).not.toHaveBeenCalled();
+        expect(navigate).not.toHaveBeenCalled();
+        expect(onNavigated).not.toHaveBeenCalled();
+    });
+
     it('reuses one requestId across retries of the same route so a transport retry cannot double-fork', async () => {
         forkSessionMock.mockResolvedValue({ ok: false, errorCode: 'SPAWN_FAILED', errorMessage: 'nope' });
         const { harness } = await mountFlow();
@@ -157,6 +182,8 @@ describe('useSessionForkStrategyFlow', () => {
         });
         const { harness, onNavigated } = await mountFlow();
         await act(async () => { await harness.getCurrent().submit('replay'); });
+        const requestId = forkSessionMock.mock.calls[0]?.[0]?.requestId;
+        expect(typeof requestId).toBe('string');
 
         refreshSessionsMock.mockImplementation(async () => {
             sessionsRef.current = {
@@ -166,9 +193,10 @@ describe('useSessionForkStrategyFlow', () => {
                         forkV1: {
                             v: 1,
                             parentSessionId: 'parent_1',
-                            parentCutoffSeqInclusive: 12,
+                            parentCutoffSeqInclusive: 11,
                             createdAtMs: 5,
                             strategy: 'replay',
+                            requestId,
                         },
                     },
                 },
@@ -204,6 +232,8 @@ describe('useSessionForkStrategyFlow', () => {
         });
         const { harness } = await mountFlow();
         await act(async () => { await harness.getCurrent().submit('replay'); });
+        const requestId = forkSessionMock.mock.calls[0]?.[0]?.requestId;
+        expect(typeof requestId).toBe('string');
 
         const lineage = {
             v: 1,
@@ -211,6 +241,7 @@ describe('useSessionForkStrategyFlow', () => {
             parentCutoffSeqInclusive: 12,
             createdAtMs: 5,
             strategy: 'replay',
+            requestId,
         };
         refreshSessionsMock.mockImplementation(async () => {
             sessionsRef.current = {

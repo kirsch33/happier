@@ -8,6 +8,10 @@ import { PressableSurface } from '@/components/ui/interaction/PressableSurface';
 import { resolveTabBarMetrics } from '@/components/ui/navigation/tabBarMetrics';
 import { useSetting } from '@/sync/domains/state/storage';
 import { t } from '@/text';
+import {
+    shouldForceFreshNewSessionEntryFromPressEvent,
+    useResolveNewSessionOrdinaryEntryRoute,
+} from '@/components/sessions/new/navigation/newSessionOrdinaryEntryRoute';
 
 /**
  * The "+" capsule that sits beside the floating tab bar on the sessions list — a
@@ -44,12 +48,16 @@ const styles = StyleSheet.create({
 
 export const TabBarNewSessionButton = React.memo(function TabBarNewSessionButton() {
     const router = useRouter();
+    const resolveNewSessionOrdinaryEntryRoute = useResolveNewSessionOrdinaryEntryRoute();
     const { theme } = useUnistyles();
     const metrics = resolveTabBarMetrics(useSetting('tabBarSize'), useSetting('tabBarShowLabels'));
 
-    const handlePress = React.useCallback(() => {
-        router.push('/new');
-    }, [router]);
+    const handlePress = React.useCallback((event?: unknown) => {
+        const { draftId, draftOrigin } = resolveNewSessionOrdinaryEntryRoute({
+            forceFresh: shouldForceFreshNewSessionEntryFromPressEvent(event),
+        });
+        router.push({ pathname: '/new', params: { draftId, draftOrigin } });
+    }, [resolveNewSessionOrdinaryEntryRoute, router]);
 
     return (
         <GlassPanel radius={CAPSULE_RADIUS} style={styles.capsule}>
@@ -58,9 +66,7 @@ export const TabBarNewSessionButton = React.memo(function TabBarNewSessionButton
                 accessibilityRole="button"
                 accessibilityLabel={t('newSession.title')}
                 onPress={handlePress}
-                // No `hitSlop`: the capsule is the full bar height, so even the
-                // smallest tab-bar size paints a ≥41pt target, and slop here would
-                // overlap the neighbouring tab's own slop across the 8pt gap.
+                // Keep this capsule's hit area out of the neighbouring tab's expanded press area.
                 focusRingRadius={CAPSULE_RADIUS}
                 style={styles.press}
             >

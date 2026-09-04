@@ -218,6 +218,13 @@ describe('AGENTS', () => {
     await expect(getDirectSessionProviderOps('opencode')).resolves.toMatchObject({
       listCandidates: expect.any(Function),
     });
+    await expect(getDirectSessionProviderOps('pi')).resolves.toMatchObject({
+      listCandidates: expect.any(Function),
+      pageTranscript: expect.any(Function),
+      readAfterTranscript: expect.any(Function),
+      getActivity: expect.any(Function),
+      resolveTakeoverSpawnOptions: expect.any(Function),
+    });
   });
 
   it('loads provider-attach ops through backend catalog hooks only for supporting providers', async () => {
@@ -312,8 +319,7 @@ describe('AGENTS', () => {
       providerId: 'codex',
       generationApplicationScope: 'per_session_runtime',
       refreshedCredentialApplication: {
-        mode: 'restart_required',
-        noRestartRequiredWhenAccessTokenCallbackServiceIds: ['openai-codex'],
+        mode: 'hot_apply',
       },
       runtimeAuthApply: {
         directLiveHotAuth: {
@@ -433,12 +439,6 @@ describe('AGENTS', () => {
         ]),
         sharedStatePrivacyRiskAcknowledgementRequired: true,
         symlinkUnavailableDegradePolicy: 'degrade_to_isolated',
-      },
-      dynamicEntryPatterns: {
-        sqlite: expect.objectContaining({
-          scope: 'state',
-          mode: 'linked',
-        }),
       },
       transforms: expect.arrayContaining([
         expect.objectContaining({

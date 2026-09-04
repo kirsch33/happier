@@ -162,6 +162,14 @@ const sharedSessionMutationOutboxes = new Map<string, SessionMutationOutboxShare
 
 const loggedUnsupportedSessionTurnMutationDiagnostics = new Set<string>();
 
+function isSessionTurnMutationParkedForReleasedServer(
+    mutation: QueuedSessionMutation,
+    serverContract: SessionSyncPendingInputServerContractResult | null,
+): boolean {
+    return mutation.kind === 'session_turn'
+        && serverContract?.mode === 'released_server_v0_2_1';
+}
+
 function createQueuedSessionTurn(mutation: SessionTurnMutationV1): QueuedSessionMutation {
     const now = Date.now();
     return {
@@ -804,11 +812,23 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
                 ? Number.POSITIVE_INFINITY
                 : resolveSessionMutationTranscriptFlushBatchLimit();
             let transcriptDeliveriesThisFlush = 0;
+            // Runtime activity is an independent projection. Preserve ordering for blocked
+            // session-turn/transcript mutations, but still allow a later activity snapshot to
+            // clear stale background activity.
+            let earlierAuthoritativeMutationBlocked = false;
             const refreshInFlightMutations = (nextIndex: number) => {
                 advanceInFlightBatch(nextIndex);
             };
             for (let index = 0; index < batch.length; index += 1) {
                 const mutation = batch[index];
+                if (isSessionTurnMutationParkedForReleasedServer(
+                    mutation,
+                    sessionSyncPendingInputServerContract,
+                )) {
+                    remaining.push(mutation);
+                    refreshInFlightMutations(index + 1);
+                    continue;
+                }
                 if (mutation.kind === 'runtime_activity_snapshot') {
                     if (!supportsRuntimeActivityV2(sessionSyncPendingInputServerContract)) {
                         if (sessionSyncPendingInputServerContract?.runtimeActivity === 'legacy') {
@@ -827,20 +847,25 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
                     refreshInFlightMutations(index + 1);
                     continue;
                 }
+                if (earlierAuthoritativeMutationBlocked && mutation.kind !== 'runtime_activity_snapshot') {
+                    remaining.push(mutation);
+                    refreshInFlightMutations(index + 1);
+                    continue;
+                }
                 const shouldRedriveAuthoritative = (
                     (reason === 'connect' || reason === 'startup')
                     && isAuthoritativeSessionMutationKind(mutation.kind)
                 );
                 if (!shouldRedriveAuthoritative && reason !== 'flush' && mutation.nextAttemptAt > now) {
-                    if (mutation.kind === 'transcript_message_append' || mutation.kind === 'runtime_activity_snapshot') {
+                    if (mutation.kind === 'runtime_activity_snapshot') {
                         remaining.push(mutation);
                         refreshInFlightMutations(index + 1);
                         continue;
                     }
                     remaining.push(mutation);
-                    remaining.push(...batch.slice(index + 1));
-                    inFlightBatch = null;
-                    break;
+                    earlierAuthoritativeMutationBlocked = true;
+                    refreshInFlightMutations(index + 1);
+                    continue;
                 }
                 const parsedMutation = params.admission(mutation, params.sessionId);
                 if (!parsedMutation.ok) {
@@ -938,11 +963,11 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
                         diagnostic: createDeliveryDiagnostic(outcome),
                     });
                     remaining.push(failedMutation);
-                    remaining.push(...batch.slice(index + 1));
-                    inFlightBatch = null;
+                    earlierAuthoritativeMutationBlocked = true;
+                    refreshInFlightMutations(index + 1);
                     didChange = true;
                     shouldRequestReconnect = true;
-                    break;
+                    continue;
                 } catch (error) {
                     if (isAuthenticationError(error)) {
                         remaining.push({
@@ -998,11 +1023,11 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
                     },
                 });
                 remaining.push(failedMutation);
-                remaining.push(...batch.slice(index + 1));
-                inFlightBatch = null;
+                earlierAuthoritativeMutationBlocked = true;
+                refreshInFlightMutations(index + 1);
                 didChange = true;
                 shouldRequestReconnect = true;
-                break;
+                continue;
             }
             mutations = mergeQueuedSessionMutations(remaining, mutations);
             inFlightBatch = null;
@@ -1035,10 +1060,16 @@ function createSessionMutationOutboxInstance(params: CreateSessionMutationJourna
                 publishRuntimeActivityTail({ custody: null, settlement: null });
             }
             const hasDeliverableMutation = mutations.some((mutation) => (
-                mutation.kind !== 'runtime_activity_snapshot'
-                || (
-                    runtimeActivitySnapshotInitialized
-                    && supportsRuntimeActivityV2(sessionSyncPendingInputServerContract)
+                !isSessionTurnMutationParkedForReleasedServer(
+                    mutation,
+                    sessionSyncPendingInputServerContract,
+                )
+                && (
+                    mutation.kind !== 'runtime_activity_snapshot'
+                    || (
+                        runtimeActivitySnapshotInitialized
+                        && supportsRuntimeActivityV2(sessionSyncPendingInputServerContract)
+                    )
                 )
             ));
             if (!closed && hasDeliverableMutation) {

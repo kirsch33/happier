@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   activate: vi.fn(),
   fetch: vi.fn(),
   listPending: vi.fn(),
+  promotePending: vi.fn(),
   decrypt: vi.fn(),
   build: vi.fn(),
   send: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock('@/session/transport/http/sessionsHttp', () => ({
 }));
 vi.mock('@/api/session/pendingQueueV2Transport', () => ({
   listPendingQueueV2LocalIdsFromServer: mocks.listPending,
+  updatePendingQueueV2RequestedActionViaHttp: mocks.promotePending,
 }));
 vi.mock('@/session/transport/encryption/sessionEncryptionContext', () => ({
   tryDecryptSessionMetadata: mocks.decrypt,
@@ -71,6 +73,7 @@ describe('resumeFreshProviderContext', () => {
     vi.resetAllMocks();
     mocks.fetch.mockResolvedValue(rawSession);
     mocks.listPending.mockResolvedValue(['pending_exact']);
+    mocks.promotePending.mockResolvedValue({ ok: true });
     mocks.decrypt.mockReturnValue({ metadata: 'decrypted' });
     mocks.build.mockReturnValue(spawnOptions);
     mocks.inferAgentId.mockReturnValue('codex');
@@ -134,6 +137,12 @@ describe('resumeFreshProviderContext', () => {
       pendingVersion: 7,
       expectedPendingSnapshot: { pendingVersion: 7, requestId: 'pending_exact' },
     }));
+    expect(mocks.promotePending).toHaveBeenCalledWith({
+      token: 'token',
+      sessionId: 'sess_exact_123',
+      localId: 'pending_exact',
+      requestedAction: { v: 1, kind: 'send_now' },
+    });
     expect(params.awaitCompletion).toHaveBeenCalledWith({
       sessionId: 'sess_exact_123',
       requestId: 'pending_exact',
@@ -297,7 +306,7 @@ describe('resumeFreshProviderContext', () => {
       message: 'Start fresh from this recovery instruction.',
       wait: false,
       timeoutMs: 5_000,
-      requestedAction: { v: 1, kind: 'enqueue' },
+      requestedAction: { v: 1, kind: 'send_now' },
       resumeInactiveSession: false,
       localId: 'pending_seed',
     });
@@ -306,6 +315,20 @@ describe('resumeFreshProviderContext', () => {
       pendingVersion: 7,
       expectedPendingSnapshot: { pendingVersion: 7, requestId: 'pending_seed' },
     }));
+    expect(mocks.promotePending).not.toHaveBeenCalled();
+    expect(params.spawnSession).not.toHaveBeenCalled();
+  });
+
+  it('does not activate when an existing Pending request cannot be promoted to durable send-now authority', async () => {
+    mocks.promotePending.mockRejectedValueOnce(new Error('action-conflict'));
+    const params = validParams();
+
+    await expect(resumeFreshProviderContext(params)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'pending_action_promotion_failed',
+    });
+
+    expect(mocks.activate).not.toHaveBeenCalled();
     expect(params.spawnSession).not.toHaveBeenCalled();
   });
 

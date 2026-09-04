@@ -628,6 +628,7 @@ describe('SessionHeaderActionMenu handoff', () => {
     expect(completeSessionForkNavigationMock).toHaveBeenCalledWith({
       childSessionId: 'sess_child',
       parentSessionId: 'sess_1',
+      serverId: 'server_a',
       navigate: expect.any(Function),
     });
 
@@ -1248,7 +1249,7 @@ describe('SessionHeaderActionMenu handoff', () => {
     expect(dropdown.props.items.some((item: any) => item?.id === 'session.handoff')).toBe(false);
   });
 
-  it('fails closed when the selected server only offers server-routed handoff transport', async () => {
+  it('offers handoff when the selected server supports server-routed transport', async () => {
     const { FeaturesResponseSchema } = await import('@happier-dev/protocol');
     serverSnapshotState.current = {
       status: 'ready',
@@ -1283,7 +1284,7 @@ describe('SessionHeaderActionMenu handoff', () => {
 
     const dropdown = screen.findByType('DropdownMenu' as any);
     expect(Array.isArray(dropdown.props.items)).toBe(true);
-    expect(dropdown.props.items.some((item: any) => item?.id === 'session.handoff')).toBe(false);
+    expect(dropdown.props.items.some((item: any) => item?.id === 'session.handoff')).toBe(true);
   });
 
   it('reacts when machine-rpc direct-peer viability becomes available after mount', async () => {

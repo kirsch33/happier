@@ -82,6 +82,7 @@ async function setupUseCreateNewSessionHarness(params: Readonly<{
             ensureSessionVisibleForMessageRoute: vi.fn(async () => {}),
             refreshMachines: vi.fn(async () => {}),
             sendMessage: syncSendMessageSpy,
+            acquireUserRequestLease: () => () => {},
             publishSessionModelsSeedToMetadata: publishModelsSeedSpy,
         },
     }));
@@ -208,6 +209,7 @@ async function runCreateSession(
 
     function Test() {
         const hook = harness.useCreateNewSession({
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'm1',

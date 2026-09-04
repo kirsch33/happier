@@ -11,7 +11,10 @@ import { startServerLight, type StartedServer } from '../../src/testkit/process/
 import { resolveUiWebBeforeAllTimeoutMs, startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
 import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
 import { approveTerminalConnect } from '../../src/testkit/uiE2e/approveTerminalConnect';
-import { createSessionFromNewSessionComposer } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
+import {
+  createSessionFromNewSessionComposer,
+  reloadCreatedSessionFromNewSessionComposer,
+} from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
 import { gotoDomContentLoadedWithPathFallback, gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { spawnSessionFromDaemon } from '../../src/testkit/uiE2e/spawnSessionFromDaemon';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
@@ -60,18 +63,11 @@ async function waitForMachineIds(params: { cliHomeDir: string; serverBaseUrl: st
 async function waitForSessionInfoMachineTarget(params: {
   page: Page;
   uiBaseUrl: string;
-  serverBaseUrl: string;
-  cliHomeDir: string;
   sessionId: string;
   expectedMachineId: string;
   timeoutMs?: number;
 }): Promise<void> {
   const timeoutMs = params.timeoutMs ?? 180_000;
-  const startedAt = Date.now();
-  let lastUrl = params.page.url();
-  let lastServerMachineId = '';
-  let lastServerPath = '';
-  let lastServerHomeDir = '';
 
   await expect(params.page.getByTestId('session-handoff-modal')).toHaveCount(0, { timeout: 60_000 });
   const progressModal = params.page.getByTestId('session-handoff-progress-modal');
@@ -79,39 +75,11 @@ async function waitForSessionInfoMachineTarget(params: {
     await expect(progressModal).toHaveCount(0, { timeout: timeoutMs });
   }
 
-  const accessKey = await readCliAccessKey(params.cliHomeDir);
-  if (!accessKey?.token) {
-    throw new Error(`Timed out waiting for session ${params.sessionId} to point at machine ${params.expectedMachineId} (missing cli access token)`);
-  }
-
-  while (Date.now() - startedAt < timeoutMs) {
-    try {
-      const res = await fetchJson<any>(`${params.serverBaseUrl}/v2/sessions/${params.sessionId}`, {
-        headers: {
-          Authorization: `Bearer ${accessKey.token}`,
-        },
-        timeoutMs: 5_000,
-      });
-      const metadata = res.status === 200 && res.data && typeof res.data === 'object' ? (res.data as any).session?.metadata : null;
-      lastServerMachineId = typeof metadata?.machineId === 'string' ? metadata.machineId.trim() : '';
-      lastServerPath = typeof metadata?.path === 'string' ? metadata.path.trim() : '';
-      lastServerHomeDir = typeof metadata?.homeDir === 'string' ? metadata.homeDir.trim() : '';
-      const machineOk = lastServerMachineId === params.expectedMachineId;
-      const pathOk = lastServerPath.length > 0 && (!lastServerHomeDir || lastServerPath !== lastServerHomeDir);
-      if (machineOk && pathOk) {
-        await params.page.goto(`${params.uiBaseUrl}/session/${params.sessionId}/info`, { waitUntil: 'domcontentloaded' });
-        await expect(params.page.getByTestId('session-info-screen')).toHaveCount(1, { timeout: 60_000 });
-        return;
-      }
-    } catch {
-      // ignore and retry
-    }
-
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
-  }
-
-  throw new Error(
-    `Timed out waiting for session ${params.sessionId} to point at machine ${params.expectedMachineId} (lastUrl=${lastUrl} serverMachine=${lastServerMachineId || 'unknown'} serverPath=${lastServerPath || 'unknown'} serverHomeDir=${lastServerHomeDir || 'unknown'})`,
+  await params.page.goto(`${params.uiBaseUrl}/session/${params.sessionId}/info`, { waitUntil: 'domcontentloaded' });
+  await expect(params.page.getByTestId('session-info-screen')).toHaveCount(1, { timeout: 60_000 });
+  await expect(params.page.getByTestId('sessionInfo.viewMachineTargetMachineId')).toHaveText(
+    params.expectedMachineId,
+    { timeout: timeoutMs },
   );
 }
 
@@ -285,7 +253,7 @@ test.describe('ui e2e: session handoff from header action menu via direct peer',
       testDir: suiteDir,
       dbProvider: 'sqlite',
       extraEnv: {
-        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys',
+        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,providers.claude.unifiedTerminal',
         HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
         HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: 'plaintext_only',
       },
@@ -434,8 +402,6 @@ test.describe('ui e2e: session handoff from header action menu via direct peer',
     await waitForSessionInfoMachineTarget({
       page,
       uiBaseUrl,
-      serverBaseUrl: server.baseUrl,
-      cliHomeDir: sourceCliHomeDir,
       sessionId,
       expectedMachineId: targetMachineId,
       timeoutMs: 180_000,
@@ -484,7 +450,7 @@ test.describe('ui e2e: session handoff from header action menu via forced server
       testDir: suiteDir,
       dbProvider: 'sqlite',
       extraEnv: {
-        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,machines.transfer.directPeer',
+        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,machines.transfer.directPeer,providers.claude.unifiedTerminal',
         HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
         HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: 'plaintext_only',
       },
@@ -629,8 +595,6 @@ test.describe('ui e2e: session handoff from header action menu via forced server
     await waitForSessionInfoMachineTarget({
       page,
       uiBaseUrl,
-      serverBaseUrl: server.baseUrl,
-      cliHomeDir: sourceCliHomeDir,
       sessionId,
       expectedMachineId: targetMachineId,
       timeoutMs: 180_000,
@@ -643,7 +607,7 @@ test.describe('ui e2e: session handoff from header action menu via forced server
   });
 });
 
-test.describe('ui e2e: session handoff failure recovery from header action menu', () => {
+test.describe('ui e2e: session handoff pre-acceptance failure from header action menu', () => {
   test.describe.configure({ mode: 'serial' });
 
   const suiteDir = run.testDir('session-handoff-from-header-recovery-suite');
@@ -679,7 +643,7 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
       testDir: suiteDir,
       dbProvider: 'sqlite',
       extraEnv: {
-        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,machines.transfer.directPeer',
+        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,machines.transfer.directPeer,providers.claude.unifiedTerminal',
         HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
         HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: 'plaintext_only',
       },
@@ -704,7 +668,7 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
     await server?.stop().catch(() => {});
   });
 
-  test('lands in recovery state after a forced handoff failure and restarts on the source machine', async ({ page }) => {
+  test('fails closed when the target runner is rejected before acceptance', async ({ page }) => {
     test.setTimeout(540_000);
     if (!server || !uiBaseUrl) throw new Error('missing server/ui fixtures');
 
@@ -755,15 +719,16 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
     });
     if (!sourceMachineId) throw new Error('missing source machine id');
 
-    const sessionId = await createSessionFromNewSessionComposer({
+    const session = await createSessionFromNewSessionComposer({
       page,
       uiBaseUrl,
       machineId: sourceMachineId,
       prompt: `handoff-header-parent-recovery ${run.runId}`,
+      readiness: 'first-turn-reload-safe',
     });
+    const { sessionId } = session;
 
-    await page.goto(`${uiBaseUrl}/session/${sessionId}`, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
+    await reloadCreatedSessionFromNewSessionComposer({ page, session });
     await expect(page.getByText('FAKE_CLAUDE_OK_1')).toHaveCount(1, { timeout: 180_000 });
 
     await connectTerminalForHome({
@@ -799,8 +764,7 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
     const targetMachineId = machineIds.find((id) => id !== sourceMachineId) ?? null;
     if (!targetMachineId) throw new Error(`failed to resolve target machine id from ${JSON.stringify(machineIds)}`);
 
-    await page.goto(`${uiBaseUrl}/session/${sessionId}`, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
+    await reloadCreatedSessionFromNewSessionComposer({ page, session });
 
     const sessionActionsTrigger = page.getByLabel('Open session actions');
     await expect(sessionActionsTrigger).toHaveCount(1, { timeout: 60_000 });
@@ -814,22 +778,14 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
     await expect(page.getByTestId('web-modal-confirm')).toHaveCount(1, { timeout: 60_000 });
     await page.getByTestId('web-modal-confirm').click();
 
-    await expect(page.getByTestId('session-handoff-recovery-modal')).toHaveCount(1, { timeout: 180_000 });
-    await expect(page.getByTestId('session-handoff-recovery-restart-on-source')).toHaveCount(1, { timeout: 60_000 });
-    await expect(page.getByTestId('session-handoff-recovery-keep-stopped')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('session-handoff-recovery-restart-on-source').click();
-
-    const composer = page.locator('textarea[data-testid="session-composer-input"]:visible').first();
-    await expect(composer).toHaveCount(1, { timeout: 180_000 });
-    await composer.fill(`handoff recovery follow-up ${run.runId}`);
-    await composer.press('Enter');
-    await expect(page.getByText('FAKE_CLAUDE_OK_1')).toHaveCount(2, { timeout: 180_000 });
+    await expect(page.getByText('Session handoff failed', { exact: true })).toHaveCount(1, { timeout: 180_000 });
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(1, { timeout: 60_000 });
+    await expect(page.getByTestId('session-handoff-recovery-modal')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
 
     await waitForSessionInfoMachineTarget({
       page,
       uiBaseUrl,
-      serverBaseUrl: server.baseUrl,
-      cliHomeDir: sourceCliHomeDir,
       sessionId,
       expectedMachineId: sourceMachineId,
       timeoutMs: 180_000,

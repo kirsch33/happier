@@ -2,12 +2,14 @@ import type { ActionExecutorContext, SessionHandoffWorkspaceTransfer } from '@ha
 
 import { Modal } from '@/modal';
 import { t } from '@/text';
-import { openSessionHandoffProgressModal } from '@/components/sessions/handoff/openSessionHandoffProgressModal';
+import { openObservedSessionHandoffProgressModal } from '@/components/sessions/handoff/openSessionHandoffProgressModal';
 import { openSessionHandoffFailureRecoveryModal } from '@/components/sessions/handoff/openSessionHandoffFailureRecoveryModal';
 
 import { executeSessionHandoffAction } from './executeSessionHandoffAction';
-import { subscribeSessionHandoffProgress } from './sessionHandoffProgressEvents';
 import { performSessionHandoffRecoveryAction } from '../../ops/sessionHandoffs';
+import { sync } from '@/sync/sync';
+import { randomUUID } from '@/platform/randomUUID';
+import { actionOperationReentry } from '@/sync/domains/actionOperations/actionOperationReentry';
 
 type ExecuteAction = (actionId: 'session.handoff', input: unknown, context?: ActionExecutorContext) => Promise<unknown>;
 
@@ -15,6 +17,7 @@ export type RunSessionHandoffUiFlowArgs = Readonly<{
     execute: ExecuteAction;
     sessionId: string;
     targetMachineId: string;
+    targetPath?: string;
     targetSessionStorageMode?: 'direct' | 'persisted';
     workspaceTransfer?: SessionHandoffWorkspaceTransfer;
     context: ActionExecutorContext;
@@ -55,28 +58,48 @@ export async function runSessionHandoffUiFlow(
     args: RunSessionHandoffUiFlowArgs,
 ): Promise<RunSessionHandoffUiFlowResult> {
     while (true) {
-        const modalId = openSessionHandoffProgressModal();
-        const unsubscribeProgress = subscribeSessionHandoffProgress((update) => {
-            if (update.sessionId !== args.sessionId || update.targetMachineId !== args.targetMachineId) {
-                return;
-            }
-            Modal.update(modalId, {
-                status: update.status,
-            });
+        const actionRequestId = randomUUID();
+        const workspaceTransferEnabled = args.workspaceTransfer?.enabled === true;
+        const progressPresentation = openObservedSessionHandoffProgressModal({
+            requestId: actionRequestId,
+            sessionId: args.sessionId,
+            workspaceTransferEnabled,
         });
-        let progressModalClosed = false;
+        actionOperationReentry.registerOrigin({
+            requestId: actionRequestId,
+            origin: {
+                resolve: (snapshot) => (
+                    snapshot.state === 'accepted' || snapshot.state === 'running'
+                        ? () => {
+                            openObservedSessionHandoffProgressModal({
+                                requestId: actionRequestId,
+                                sessionId: args.sessionId,
+                                workspaceTransferEnabled,
+                            });
+                        }
+                        : null
+                ),
+            },
+        });
         const closeProgressModal = () => {
-            if (progressModalClosed) {
-                return;
-            }
-            unsubscribeProgress();
-            Modal.hide(modalId);
-            progressModalClosed = true;
+            progressPresentation.close();
         };
         try {
-            let result = await executeSessionHandoffAction(args as any);
+            const releaseUserRequestLease = sync.acquireUserRequestLease();
+            let result: Awaited<ReturnType<typeof executeSessionHandoffAction>>;
+            try {
+                result = await executeSessionHandoffAction({
+                    ...args,
+                    context: { ...args.context, actionRequestId },
+                } as any);
+            } finally {
+                releaseUserRequestLease();
+            }
             if (result.ok) {
                 return result;
+            }
+            if (!progressPresentation.isAttached()) {
+                return { ok: false, handled: true };
             }
             if (result.recovery) {
                 closeProgressModal();
@@ -128,6 +151,9 @@ export async function runSessionHandoffUiFlow(
                 return { ok: false, handled: true };
             }
         } catch (error) {
+            if (!progressPresentation.isAttached()) {
+                return { ok: false, handled: true };
+            }
             const shouldRetry = await Modal.confirm(
                 t('sessionHandoff.failure.title'),
                 normalizeErrorMessage(error instanceof Error ? error.message : error),

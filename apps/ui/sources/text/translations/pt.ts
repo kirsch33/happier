@@ -791,6 +791,17 @@ export const pt: TranslationStructure = {
     permissions: "Permissões",
     unreadSessions: "Sessões não lidas",
     updates: "Atividade",
+    actionOperations: {
+      sections: { inProgress: "Em andamento", needsAttention: "Requer atenção", recent: "Recentes" },
+      clearRecent: "Limpar recentes",
+      status: { accepted: "Aceita", running: "Em andamento", succeeded: "Concluída", failed: "Falhou", cancelled: "Cancelada", reconnecting: "A reconectar", unavailable: "Estado indisponível", setupNeedsAttention: "Sessão criada; a configuração requer atenção" },
+      empty: "As ações de longa duração aparecerão aqui.",
+      openHint: "Abre os detalhes da ação",
+      stop: "Parar",
+      dismiss: "Ocultar",
+      stopFailed: "Não foi possível parar esta operação. Ela pode ainda estar em execução.",
+      detail: { status: "Estado", progress: "Progresso", error: "Erro", warning: "Aviso", result: "Resultado", recoveryReference: "Referência de recuperação" },
+    },
   },
 
   approvals: {
@@ -1948,13 +1959,14 @@ export const pt: TranslationStructure = {
         backendsSubtitle: "Backends configurados e alvos de inicialização personalizados.",
       },
       enableInjection: {
-        title: "Ativar injeção de orientação",
+        title: "Instruções de execuções do Happier",
+        subtitle: "Desativar remove o roteamento nativo primeiro e a mecânica de execuções do Happier dos prompts de sistema dos agentes de código.",
       },
       characterBudget: {
-        title: "Limite de caracteres",
+        title: "Limite de regras personalizadas",
         subtitle: ({ value }: { value: string }) => `${value} caracteres`,
-        promptTitle: "Limite de caracteres",
-        promptBody: "Máximo de caracteres a injetar no prompt do sistema.",
+        promptTitle: "Limite de regras personalizadas",
+        promptBody: "Máximo de caracteres para regras de execução personalizadas no prompt do sistema.",
       },
       rules: {
         groupTitle: "Regras de orientação",
@@ -4432,9 +4444,9 @@ export const pt: TranslationStructure = {
       "Mostrar números de linha nas visualizações de ferramentas",
     showLineNumbersInToolViewsDescription:
       "Exibir números de linha nos diffs das visualizações de ferramentas",
-    wrapLinesInDiffs: "Quebrar linhas nos diffs",
+    wrapLinesInDiffs: "Quebrar linhas nas visualizações de código",
     wrapLinesInDiffsDescription:
-      "Quebrar linhas longas ao invés de rolagem horizontal nas visualizações de diffs",
+      "Quebrar linhas longas em pré-visualizações de código e editores em vez de rolar horizontalmente",
     alwaysShowContextSize: "Sempre mostrar tamanho do contexto",
     alwaysShowContextSizeDescription:
       "Exibir uso do contexto mesmo quando não estiver próximo do limite",
@@ -4922,6 +4934,8 @@ export const pt: TranslationStructure = {
     daemonRpcUnavailableBody:
       "O Happier não consegue acessar o daemon nesta máquina. Ele pode estar offline, iniciando ou desconectado do servidor.",
     launchStillPendingTitle: "A inicialização ainda está em andamento",
+    createdWithSetupIssueTitle: "Sessão criada",
+    createdWithSetupIssueBody: "A sessão foi criada, mas a configuração inicial não foi concluída. Você pode tentar novamente nesta tela sem criar outra sessão.",
     launchStillPendingBody:
       "O Happier ainda não confirmou a nova sessão. A solicitação de inicialização continua salva. Tente novamente para continuar a mesma inicialização sem criar uma sessão duplicada.",
     connectedServiceSwitchUnavailable: {
@@ -5393,10 +5407,15 @@ export const pt: TranslationStructure = {
 	    },
 	    resuming: "Retomando...",
 	    resumeFailed: "Falha ao retomar a sessão",
-	    pendingQueuedResumeFailedTitle: "Mensagem na fila",
-	    pendingQueuedResumeFailedBody:
-	      "Sua mensagem foi salva na fila de pendentes, mas o Happier não conseguiu retomar esta sessão. Tente novamente para iniciá-la.",
-	    composerBanners: {
+        pendingActivation: {
+            waiting_offline: { title: 'Mensagem na fila para esta máquina', body: 'Ela será processada quando esta máquina e o daemon voltarem a ficar online.' },
+            waiting: { title: 'Aguardando retomada', body: 'Sua mensagem está segura na fila enquanto o daemon retoma esta sessão.' },
+            failed: { title: 'Não foi possível retomar a sessão', body: 'Sua mensagem continua segura na fila. Tente novamente quando quiser.' },
+            queued: { title: 'Mensagem na fila', body: 'Esta sessão inativa tem uma mensagem na fila. Retome-a quando quiser.' },
+            queued_offline: { title: 'Mensagem aguardando retomada manual', body: 'Ela ficará na fila até você retomar esta sessão.' },
+            actions: { retry: 'Tentar novamente', resume: 'Retomar', process_when_online: 'Processar quando online', keepQueued: 'Manter na fila', autoResumeOptions: 'Opções de retomada automática' },
+        },
+        composerBanners: {
             showBannerAction: 'Mostrar aviso',
             hideBannerAction: 'Ocultar aviso',
 	    },
@@ -5416,6 +5435,18 @@ export const pt: TranslationStructure = {
 	      hideBannerAction: "Ocultar aviso de CLI antiga",
 	      errorTitle: "Reinício do runner indisponível",
 	      errorBody: "O daemon não conseguiu reiniciar este runner de sessão. A sessão ainda está disponível.",
+	    },
+	    mcpRestartRequired: {
+	        title: "Reinicie para aplicar as alterações de MCP",
+	        body: "Os servidores MCP são aplicados quando uma sessão inicia. Reinicie este runner para usar a seleção atualizada.",
+	        failureBody: "O Happier não conseguiu reiniciar este runner. Sua seleção de MCP foi salva e será aplicada na próxima inicialização.",
+	        restartAction: "Reiniciar sessão",
+	        restartPendingAction: "Reiniciando…",
+	        badgeLabel: "Alterações de MCP",
+	        showBannerAction: "Mostrar aviso de reinício de MCP",
+	        hideBannerAction: "Ocultar aviso de reinício de MCP",
+	        errorTitle: "Reinício da sessão indisponível",
+	        errorBody: "Não foi possível reiniciar o runner. Sua seleção de MCP foi salva e será aplicada na próxima inicialização da sessão.",
 	    },
 	    invalidLinkTitle: "Link de sessão inválido",
 	    invalidLinkDescription: "O link da sessão está ausente ou é inválido. Verifique a URL e tente novamente.",
@@ -5437,7 +5468,7 @@ export const pt: TranslationStructure = {
       `Esta sessão terminou e não pode ser retomada porque ${provider} não oferece suporte para restaurar o contexto aqui. Inicie uma nova sessão para continuar.`,
     machineOfflineNoticeTitle: "A máquina está offline",
     machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-      `“${machine}” está offline, então o Happier ainda não consegue retomar esta sessão. Traga a máquina de volta online para continuar.`,
+      `“${machine}” está offline. Você pode colocar uma mensagem na fila agora; o Happier continuará quando a máquina voltar a ficar online.`,
       machineOfflineCannotResume:
         "A máquina está offline. Traga-a de volta online para retomar esta sessão.",
         openRuns: "Abrir execuções da sessão",
@@ -6202,6 +6233,12 @@ export const pt: TranslationStructure = {
     newTagConfirm: "Adicionar",
   },
 
+  sessionDrafts: {
+    sectionTitle: 'Rascunhos', badge: 'Rascunho', untitled: 'Rascunho sem título', continueEditing: 'Continuar a editar', startAnother: 'Começar outro',
+    status: { offline: 'Sem ligação', syncing: 'A sincronizar', conflict: 'Conflito', machineUnavailable: 'Máquina indisponível', attachmentNeedsAttention: 'O anexo requer atenção', startInterrupted: 'Início interrompido' },
+    new: { action: 'Novo rascunho' }, delete: { action: 'Eliminar rascunho', confirmTitle: 'Eliminar rascunho?', confirmDescription: 'Este rascunho será removido dos teus dispositivos.' },
+    conflict: { title: 'Conflito de rascunho', description: 'Este campo mudou noutro dispositivo.', mine: 'Neste dispositivo', synced: 'Sincronizado', useSynced: 'Usar sincronizado', keepDevice: 'Manter do dispositivo', copyMine: 'Copiar o meu', copied: 'Copiado', copyFailed: 'Não foi possível copiar', field: { text: 'Texto', mentions: 'Menções', attachments: 'Anexos', recipient: 'Destinatário', agentContinuation: 'Continuação do agente', executionRunDelivery: 'Entrega da execução' } },
+  },
   sessionsList: {
     serverHeader: ({ server }: { server: string }) => `Servidor: ${server}`,
     storagePersistedTab: "Happier",
@@ -6317,6 +6354,7 @@ export const pt: TranslationStructure = {
     browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} connected services`,
     browseSourceClaudeDefault: "Configuração padrão do Claude",
     browseSourceOpenCodeDefault: "Servidor padrão do OpenCode",
+    browseSourcePiDefault: "Diretório padrão do agente Pi",
     browseCandidates: "Sessões disponíveis",
     browseNoMachines: "Ainda não há máquinas disponíveis para sessões diretas.",
     browseNoCandidates: "Nenhuma sessão do provedor foi encontrada para esta máquina e este provedor.",
@@ -6439,7 +6477,8 @@ export const pt: TranslationStructure = {
     viewSessionLogTitle: "Ver log da sessão",
     viewSessionLogSubtitle: "Abrir a cauda do log ao vivo para esta sessão",
     pinSession: "Fixar sessão",
-    unpinSession: "Desafixar sessão",
+        unpinSession: "Desafixar sessão",
+        pinLimitExceeded: ({ count }: { count: number }) => `Pode fixar até ${count.toLocaleString()} sessões. Desafixe outra sessão e tente novamente.`,
     copyResumeCommand: "Copiar comando de retomada",
     resumeCommand: ({ sessionId }: { sessionId: string }) =>
       `happier resume ${sessionId}`,
@@ -7708,6 +7747,14 @@ export const pt: TranslationStructure = {
         runClass: "Classe de execução",
         ioMode: "Modo de E/S",
       },
+      launchOrigin: {
+        crossSession: ({ sessionId }: { sessionId: string }) => `Iniciado da sessão ${sessionId}`,
+        externalCli: "Iniciado externamente pela CLI",
+        externalMcp: "Iniciado externamente via MCP",
+        externalAction: "Iniciado externamente por uma ação do Happier",
+        externalUnknown: "Iniciado externamente (origem desconhecida)",
+        legacyUnknown: "Origem de início desconhecida",
+      },
       timestamps: {
         started: "Iniciado",
         finished: "Finalizado",
@@ -7879,6 +7926,14 @@ export const pt: TranslationStructure = {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: 'Rascunhos de nova sessão',
+        footer: 'Escolha se Nova sessão continua o rascunho deste dispositivo ou abre um novo.',
+        resumeTitle: 'Retomar o rascunho anterior',
+        resumeSubtitle: 'Continue o rascunho iniciado em Nova sessão neste dispositivo.',
+        freshTitle: 'Começar sempre do zero',
+        freshSubtitle: 'Abra um novo rascunho sempre que escolher Nova sessão.',
+    },
 	      sessionList: {
 	          title: 'Lista de sessões',
 	          footer: 'Personalize o que aparece em cada linha de sessão.',
@@ -8049,6 +8104,16 @@ settingsSession: {
           title: 'Avançado',
       },
       messageSending: {
+        inactiveResumePolicyTitle: "Retomada automática após o envio",
+        inactiveResumePolicySubtitle: "Escolha o que o Happier deve fazer após enviar para uma sessão inativa.",
+        inactiveResumePolicy: {
+          whenAvailableTitle: "Agora ou quando a máquina voltar",
+          whenAvailableSubtitle: "Retomar imediatamente se estiver acessível; caso contrário, processar quando o daemon se reconectar.",
+          onlineOnlyTitle: "Somente se a máquina estiver online",
+          onlineOnlySubtitle: "Tentar uma vez ao enviar. Se indisponível, manter a mensagem na fila.",
+          manualTitle: "Nunca automaticamente",
+          manualSubtitle: "Sempre manter as mensagens na fila até você retomar a sessão.",
+        },
         title: "Envio de mensagens",
         footer:
           "Controla o que acontece quando você envia uma mensagem enquanto o agente está em execução.",
@@ -8476,6 +8541,9 @@ settingsSession: {
         wizardColumnsTitle: "Layout em duas colunas",
         wizardColumnsEnabledSubtitle: "Coloca seletores relacionados lado a lado em telas largas.",
         wizardColumnsDisabledSubtitle: "Empilha todos os seletores do assistente em uma coluna.",
+        defaultWorktreeTitle: "Criar um worktree para novas sessões",
+        defaultWorktreeEnabledSubtitle: "Inicie cada nova sessão Git em um novo worktree.",
+        defaultWorktreeDisabledSubtitle: "Inicie novas sessões Git na pasta selecionada.",
         wizardPresentationTitle: "Layout dos seletores do assistente",
         wizardPresentationFooter:
           "Auto mantém seções curtas como listas e muda seções longas para menus suspensos pesquisáveis.",

@@ -1,5 +1,6 @@
 import { buildCodexAgentRuntimeDescriptor, resolvePersistedCodexRuntimeIdentity, resolveVendorResumeIdFromSessionMetadata, readSessionMetadataRuntimeDescriptor } from '@happier-dev/agents';
 import {
+  ProviderNativeForkFailedBeforeDispatchError,
   ProviderNativeForkIndeterminateError,
   type ProviderNativeForkHandler,
 } from '@/backends/forking/providerNativeForkHandler';
@@ -7,6 +8,7 @@ import { logger } from '@/utils/logger';
 
 import { forkCodexAppServerConversationNative } from './nativeFork';
 import { sanitizeCodexAppServerRpcDiagnosticString } from './client/codexAppServerRpcLogSanitizer';
+import { resolveCodexAppServerProcessEnv } from './resolveCodexAppServerProcessEnv';
 
 function readErrorDiagnostic(error: unknown, redactedValues: readonly string[]): Readonly<{
   errorName: string;
@@ -73,9 +75,10 @@ export const codexAppServerProviderNativeForkHandler: ProviderNativeForkHandler 
     return null;
   }
 
-  const processEnv = runtimeIdentity?.homePath
-    ? { ...process.env, CODEX_HOME: runtimeIdentity.homePath }
-    : process.env;
+  const processEnv = await resolveCodexAppServerProcessEnv({
+    processEnv: process.env,
+    affinity: runtimeIdentity,
+  });
 
   logCodexNativeForkDiagnostic('[CodexAppServerFork] attempting native latest fork', {
     ...baseDiagnostic,
@@ -87,8 +90,12 @@ export const codexAppServerProviderNativeForkHandler: ProviderNativeForkHandler 
       directory: params.directory,
       parentCodexSessionId: vendorSessionIdRaw,
       processEnv,
+      ...(params.signal ? { signal: params.signal } : {}),
     });
   } catch (error) {
+    if (params.signal?.aborted && error instanceof Error && error.name === 'AbortError') {
+      throw error;
+    }
     logCodexNativeForkDiagnostic('[CodexAppServerFork] native latest fork outcome is indeterminate', {
       ...baseDiagnostic,
       ...readErrorDiagnostic(error, [vendorSessionIdRaw]),
@@ -111,7 +118,7 @@ export const codexAppServerProviderNativeForkHandler: ProviderNativeForkHandler 
       ...readErrorDiagnostic(outcome.error, [vendorSessionIdRaw]),
       fallbackResult: 'failed_before_dispatch',
     });
-    throw outcome.error;
+    throw new ProviderNativeForkFailedBeforeDispatchError(outcome.error);
   }
 
   if (outcome.type === 'indeterminate_after_dispatch') {
@@ -140,6 +147,9 @@ export const codexAppServerProviderNativeForkHandler: ProviderNativeForkHandler 
   const childMetadataHomePath = runtimeIdentity?.home === 'connectedService'
     ? null
     : runtimeIdentity?.homePath ?? null;
+  const childMetadataSqliteHomePath = runtimeIdentity?.home === 'connectedService'
+    ? null
+    : runtimeIdentity?.sqliteHomePath ?? null;
 
   logCodexNativeForkDiagnostic('[CodexAppServerFork] native latest fork succeeded', {
     ...baseDiagnostic,
@@ -152,7 +162,14 @@ export const codexAppServerProviderNativeForkHandler: ProviderNativeForkHandler 
     spawn: {
       resume: vendorSessionId,
       codexBackendMode: 'appServer',
-      ...(runtimeIdentity?.homePath ? { environmentVariables: { CODEX_HOME: runtimeIdentity.homePath } } : {}),
+      ...(runtimeIdentity?.homePath
+        ? {
+            environmentVariables: {
+              CODEX_HOME: runtimeIdentity.homePath,
+              CODEX_SQLITE_HOME: processEnv.CODEX_SQLITE_HOME ?? runtimeIdentity.homePath,
+            },
+          }
+        : {}),
     },
     metadata: {
       codexSessionId: vendorSessionId,
@@ -167,6 +184,7 @@ export const codexAppServerProviderNativeForkHandler: ProviderNativeForkHandler 
               connectedServiceProfileId: runtimeIdentity.connectedServiceProfileId,
               connectedServiceGroupId: runtimeIdentity.connectedServiceGroupId,
               homePath: childMetadataHomePath,
+              sqliteHomePath: childMetadataSqliteHomePath,
             }),
           }
         : {}),

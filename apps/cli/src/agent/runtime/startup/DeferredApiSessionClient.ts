@@ -8,9 +8,10 @@ import { RPC_ERROR_CODES, RPC_ERROR_MESSAGES } from '@happier-dev/protocol/rpc';
 import type { RpcHandler, RpcHandlerManagerLike } from '@/api/rpc/types';
 import type { AgentState, Metadata } from '@/api/types';
 import type {
+  MaterializeNextPendingOptions,
   MaterializeNextPendingResult,
 } from '@/api/session/sessionClientPort';
-import type { PendingQueueReadOptions, PendingQueueReconcileWhenEmpty } from '@/api/session/pendingQueueReadPolicy';
+import type { PendingQueueReadOptions } from '@/api/session/pendingQueueReadPolicy';
 import type { ProviderOwnedUserMessageEchoClassifier } from '@/api/session/providerOwnedUserMessageEcho';
 import type { SessionRuntimeActivitySnapshotPublisher } from '@/session/runtimeActivity/types';
 import type { SessionUserMessageEnqueueResult } from '@/rpc/handlers/sessionUserMessageSend';
@@ -63,9 +64,7 @@ export type DeferredApiSessionTarget = Readonly<{
   waitForPendingEligibilityUpdateSince?: (sequence: number, abortSignal?: AbortSignal) => Promise<boolean>;
   shouldAttemptPendingMaterialization?: () => boolean;
   reconcilePendingQueueState?: (opts?: { force?: boolean }) => Promise<boolean>;
-  materializeNextPendingMessageSafely?: (opts?: {
-    reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
-  }) => Promise<MaterializeNextPendingResult>;
+  materializeNextPendingMessageSafely?: (opts?: MaterializeNextPendingOptions) => Promise<MaterializeNextPendingResult>;
   wakePendingMaterialization?: () => void;
   popPendingMessage: () => Promise<boolean>;
   peekPendingMessageQueueV2Count: (opts?: PendingQueueReadOptions) => Promise<number>;
@@ -526,9 +525,7 @@ export class DeferredApiSessionClient {
     return await this.withAttachedTarget((t) => t.reconcilePendingQueueState?.(opts) ?? Promise.resolve(false), false);
   }
 
-  async materializeNextPendingMessageSafely(opts?: {
-    reconcileWhenEmpty?: PendingQueueReconcileWhenEmpty;
-  }): Promise<MaterializeNextPendingResult> {
+  async materializeNextPendingMessageSafely(opts?: MaterializeNextPendingOptions): Promise<MaterializeNextPendingResult> {
     return await this.withAttachedTarget(
       (t): Promise<MaterializeNextPendingResult> => t.materializeNextPendingMessageSafely?.(opts)
         ?? Promise.resolve({ type: 'retryable_transport' as const }),

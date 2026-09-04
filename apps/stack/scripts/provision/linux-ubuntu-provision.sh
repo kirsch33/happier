@@ -106,16 +106,63 @@ if [[ "${PROFILE}" == "installer" ]]; then
   exit 0
 fi
 
+provision_happier_user_resource_slices() {
+  local unit_dir="${HOME}/.config/systemd/user"
+  mkdir -p "${unit_dir}"
+
+  # Slice names establish the hierarchy: happier-jobs.slice is a child of
+  # happier.slice. Keep session work lower priority without imposing a memory
+  # ceiling or an OOM policy on the agent process tree.
+  cat > "${unit_dir}/happier.slice" <<'EOF'
+[Unit]
+Description=Happier user workload
+EOF
+  chmod 0644 "${unit_dir}/happier.slice"
+
+  cat > "${unit_dir}/happier-critical.slice" <<'EOF'
+[Unit]
+Description=Happier control plane
+
+[Slice]
+MemoryLow=4G
+EOF
+  chmod 0644 "${unit_dir}/happier-critical.slice"
+
+  cat > "${unit_dir}/happier-jobs.slice" <<'EOF'
+[Unit]
+Description=Happier session jobs
+
+[Slice]
+CPUWeight=50
+IOWeight=50
+# Reclaim and throttle disposable session work before it can starve the guest
+# OS and the protected Happier control plane. This is deliberately soft: jobs
+# can exceed it under pressure and are never OOM-killed by this policy.
+MemoryHigh=80%
+EOF
+  chmod 0644 "${unit_dir}/happier-jobs.slice"
+
+  # A non-interactive provision may not have a user bus yet. The unit files
+  # remain durable and systemd will discover them when the manager is active.
+  if require_cmd systemctl && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+}
+
 say "installing base packages"
 as_root apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
   git \
+  gh \
   gnupg \
   jq \
   xz-utils \
   build-essential \
   python3
+
+say "provisioning user systemd resource slices"
+provision_happier_user_resource_slices
 
 if ! require_cmd node; then
   say "installing Node.js (NodeSource ${NODE_MAJOR}.x)"

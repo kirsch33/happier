@@ -529,6 +529,17 @@ export const de: TranslationStructure = {
         permissions: 'Berechtigungen',
         unreadSessions: 'Ungelesene Sessions',
         updates: 'Aktivität',
+        actionOperations: {
+            sections: { inProgress: 'In Bearbeitung', needsAttention: 'Aufmerksamkeit erforderlich', recent: 'Zuletzt' },
+            clearRecent: 'Letzte löschen',
+            status: { accepted: 'Angenommen', running: 'Wird ausgeführt', succeeded: 'Erfolgreich', failed: 'Fehlgeschlagen', cancelled: 'Abgebrochen', reconnecting: 'Verbindung wird wiederhergestellt', unavailable: 'Status nicht verfügbar', setupNeedsAttention: 'Session erstellt; Einrichtung erfordert Aufmerksamkeit' },
+            empty: 'Länger laufende Aktionen werden hier angezeigt.',
+            openHint: 'Öffnet die Details der Aktion',
+            stop: 'Stoppen',
+            dismiss: 'Ausblenden',
+            stopFailed: 'Dieser Vorgang konnte nicht gestoppt werden. Er läuft möglicherweise weiter.',
+            detail: { status: 'Zustand', progress: 'Fortschritt', error: 'Fehler', warning: 'Warnung', result: 'Ergebnis', recoveryReference: 'Wiederherstellungsreferenz' },
+        },
     },
 
     approvals: {
@@ -1648,13 +1659,14 @@ export const de: TranslationStructure = {
                   backendsSubtitle: 'Konfigurierte Backends und eigene Startziele.',
               },
               enableInjection: {
-                  title: 'Einspielen von Hinweisen aktivieren',
+                  title: 'Anweisungen für Happier-Ausführungen',
+                  subtitle: 'Beim Deaktivieren werden Native-first-Routing und Happier-Ausführungsmechanik aus System-Prompts für Coding-Agenten entfernt.',
               },
               characterBudget: {
-                  title: 'Zeichenbudget',
+                  title: 'Budget für benutzerdefinierte Regeln',
                   subtitle: ({ value }: { value: string }) => `${value} Zeichen`,
-                  promptTitle: 'Zeichenbudget',
-                  promptBody: 'Maximale Zeichenzahl, die in den System-Prompt eingespielt wird.',
+                  promptTitle: 'Budget für benutzerdefinierte Regeln',
+                  promptBody: 'Maximale Zeichenzahl für benutzerdefinierte Ausführungsregeln im System-Prompt.',
               },
               rules: {
                   groupTitle: 'Hinweisregeln',
@@ -4017,8 +4029,8 @@ export const de: TranslationStructure = {
         showLineNumbersInDiffsDescription: 'Zeilennummern in Code-Diffs anzeigen',
         showLineNumbersInToolViews: 'Zeilennummern in Tool-Ansichten zeigen',
         showLineNumbersInToolViewsDescription: 'Zeilennummern in Diffs von Tool-Ansichten anzeigen',
-        wrapLinesInDiffs: 'Zeilen in Diffs umbrechen',
-        wrapLinesInDiffsDescription: 'Lange Zeilen umbrechen statt in Diff-Ansichten horizontal zu scrollen',
+        wrapLinesInDiffs: 'Zeilen in Code-Ansichten umbrechen',
+        wrapLinesInDiffsDescription: 'Lange Zeilen in Code-Vorschauen und Editoren umbrechen statt horizontal zu scrollen',
         alwaysShowContextSize: 'Kontextgröße immer zeigen',
         alwaysShowContextSizeDescription: 'Die Kontextnutzung auch dann anzeigen, wenn das Limit fern ist',
         agentInputActionBarLayout: 'Aktionsleiste über der Eingabe',
@@ -4435,6 +4447,8 @@ export const de: TranslationStructure = {
         daemonRpcUnavailableBody:
             'Happier erreicht den Daemon auf diesem Rechner nicht. Er ist womöglich offline, startet noch oder ist vom Server getrennt.',
         launchStillPendingTitle: 'Start läuft noch',
+        createdWithSetupIssueTitle: 'Session erstellt',
+        createdWithSetupIssueBody: 'Die Session wurde erstellt, aber die Ersteinrichtung wurde nicht abgeschlossen. Du kannst es auf diesem Bildschirm erneut versuchen, ohne eine weitere Session zu erstellen.',
         launchStillPendingBody:
             'Happier hat die neue Session noch nicht bestätigt. Deine Startanfrage ist weiterhin gespeichert. Versuch es erneut, um denselben Start fortzusetzen, ohne eine doppelte Session anzulegen.',
         connectedServiceSwitchUnavailable: {
@@ -4939,9 +4953,14 @@ export const de: TranslationStructure = {
         },
         resuming: 'Wird fortgesetzt…',
         resumeFailed: 'Die Session ließ sich nicht fortsetzen',
-        pendingQueuedResumeFailedTitle: 'Nachricht eingereiht',
-        pendingQueuedResumeFailedBody:
-            'Deine Nachricht wurde in die Warteschlange gelegt, aber Happier konnte diese Session nicht fortsetzen. Versuch es erneut, um sie zu starten.',
+        pendingActivation: {
+            waiting_offline: { title: 'Nachricht für diesen Computer eingereiht', body: 'Sie wird verarbeitet, sobald dieser Computer und sein Daemon wieder online sind.' },
+            waiting: { title: 'Warten auf Fortsetzung', body: 'Deine Nachricht ist sicher eingereiht, während der Daemon diese Session fortsetzt.' },
+            failed: { title: 'Session konnte nicht fortgesetzt werden', body: 'Deine Nachricht ist weiterhin sicher eingereiht. Versuche es erneut, wenn du bereit bist.' },
+            queued: { title: 'Nachricht eingereiht', body: 'Für diese inaktive Session liegt eine Nachricht in der Warteschlange. Setze sie fort, wenn du bereit bist.' },
+            queued_offline: { title: 'Nachricht wartet auf manuelles Fortsetzen', body: 'Sie bleibt eingereiht, bis du diese Session fortsetzt.' },
+            actions: { retry: 'Erneut versuchen', resume: 'Fortsetzen', process_when_online: 'Verarbeiten, sobald online', keepQueued: 'Eingereiht lassen', autoResumeOptions: 'Optionen für automatisches Fortsetzen' },
+        },
         composerBanners: {
             showBannerAction: 'Banner zeigen',
             hideBannerAction: 'Banner ausblenden',
@@ -4963,6 +4982,18 @@ export const de: TranslationStructure = {
             errorTitle: 'Neustart des Runners nicht verfügbar',
             errorBody: 'Der Daemon konnte diesen Session-Runner nicht neu starten. Die Session ist weiterhin verfügbar.',
         },
+        mcpRestartRequired: {
+            title: 'Neu starten, um MCP-Serveränderungen anzuwenden',
+            body: 'MCP-Server werden beim Start einer Sitzung angewendet. Starte diesen Sitzungs-Runner neu, um die aktualisierte Auswahl zu verwenden.',
+            failureBody: 'Happier konnte diesen Sitzungs-Runner nicht neu starten. Deine MCP-Auswahl ist gespeichert und wird beim nächsten Start angewendet.',
+            restartAction: 'Sitzung neu starten',
+            restartPendingAction: 'Wird neu gestartet …',
+            badgeLabel: 'MCP-Änderungen',
+            showBannerAction: 'MCP-Neustarthinweis anzeigen',
+            hideBannerAction: 'MCP-Neustarthinweis ausblenden',
+            errorTitle: 'Sitzungsneustart nicht verfügbar',
+            errorBody: 'Der Runner konnte nicht neu gestartet werden. Deine MCP-Auswahl ist gespeichert und wird beim nächsten Sitzungsstart angewendet.',
+        },
         invalidLinkTitle: 'Ungültiger Session-Link',
         invalidLinkDescription: 'Der Session-Link fehlt oder ist ungültig. Prüf die URL und versuch es noch einmal.',
         resumeSupportNoteChecking: 'Hinweis: Happier prüft noch, ob dieser Rechner die Provider-Session fortsetzen kann.',
@@ -4981,7 +5012,7 @@ export const de: TranslationStructure = {
             `Diese Session ist beendet und lässt sich nicht fortsetzen, weil ${provider} das Wiederherstellen des Kontexts hier nicht unterstützt. Starte eine neue Session, um weiterzumachen.`,
         machineOfflineNoticeTitle: 'Rechner ist offline',
         machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-            `“${machine}“ ist offline, deshalb kann Happier diese Session noch nicht fortsetzen. Bring ihn online, um weiterzumachen.`,
+            `“${machine}“ ist offline. Du kannst jetzt eine Nachricht einreihen; Happier macht weiter, sobald der Rechner wieder online ist.`,
         machineOfflineCannotResume: 'Der Rechner ist offline. Bring ihn online, um diese Session fortzusetzen.',
         openRuns: 'Session-Runs öffnen',
         openAutomations: 'Session-Automationen öffnen',
@@ -5723,6 +5754,12 @@ export const de: TranslationStructure = {
         newTagConfirm: 'Hinzufügen',
     },
 
+    sessionDrafts: {
+        sectionTitle: 'Entwürfe', badge: 'Entwurf', untitled: 'Unbenannter Entwurf', continueEditing: 'Weiterbearbeiten', startAnother: 'Neuen Entwurf beginnen',
+        status: { offline: 'Nicht verbunden', syncing: 'Wird synchronisiert', conflict: 'Konflikt', machineUnavailable: 'Computer nicht verfügbar', attachmentNeedsAttention: 'Anhang prüfen', startInterrupted: 'Start unterbrochen' },
+        new: { action: 'Neuer Entwurf' }, delete: { action: 'Entwurf löschen', confirmTitle: 'Entwurf löschen?', confirmDescription: 'Dieser Entwurf wird von deinen Geräten entfernt.' },
+        conflict: { title: 'Entwurfskonflikt', description: 'Dieses Feld wurde auf einem anderen Gerät geändert.', mine: 'Auf diesem Gerät', synced: 'Synchronisiert', useSynced: 'Synchronisierte Version verwenden', keepDevice: 'Geräteversion behalten', copyMine: 'Meine Version kopieren', copied: 'Kopiert', copyFailed: 'Kopieren fehlgeschlagen', field: { text: 'Textinhalt', mentions: 'Erwähnungen', attachments: 'Anhänge', recipient: 'Empfänger', agentContinuation: 'Agentenfortsetzung', executionRunDelivery: 'Laufzustellung' } },
+    },
     sessionsList: {
         serverHeader: ({ server }: { server: string }) => `Server: ${server}`,
         storagePersistedTab: 'Happier',
@@ -5838,6 +5875,7 @@ export const de: TranslationStructure = {
         browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} verbundene Dienste`,
         browseSourceClaudeDefault: 'Standard-Claude-Konfiguration',
         browseSourceOpenCodeDefault: 'Standard-OpenCode-Server',
+        browseSourcePiDefault: 'Standard-Pi-Agent-Verzeichnis',
         browseCandidates: 'Verfügbare Sessions',
         browseNoMachines: 'Für direkte Sessions sind noch keine Rechner verfügbar.',
         browseNoCandidates: 'Für diesen Rechner und Provider wurden keine Provider-Sessions gefunden.',
@@ -5933,6 +5971,7 @@ export const de: TranslationStructure = {
         viewSessionLogSubtitle: 'Das laufende Log-Ende dieser Session öffnen',
         pinSession: 'Session anheften',
         unpinSession: 'Session lösen',
+        pinLimitExceeded: ({ count }: { count: number }) => `Du kannst bis zu ${count.toLocaleString()} Sitzungen anheften. Löse eine andere und versuche es erneut.`,
         copyResumeCommand: 'Befehl zum Fortsetzen kopieren',
         resumeCommand: ({ sessionId }: { sessionId: string }) => `happier resume ${sessionId}`,
         viewMachine: 'Rechner ansehen',
@@ -7085,6 +7124,14 @@ export const de: TranslationStructure = {
                 runClass: 'Run-Klasse',
                 ioMode: 'I/O-Modus',
             },
+            launchOrigin: {
+                crossSession: ({ sessionId }: { sessionId: string }) => `Von Sitzung ${sessionId} gestartet`,
+                externalCli: 'Extern über die CLI gestartet',
+                externalMcp: 'Extern über MCP gestartet',
+                externalAction: 'Extern über eine Happier-Aktion gestartet',
+                externalUnknown: 'Extern gestartet (Ursprung unbekannt)',
+                legacyUnknown: 'Startursprung unbekannt',
+            },
             timestamps: {
                 started: 'Gestartet',
                 finished: 'Fertig',
@@ -7316,6 +7363,14 @@ export const de: TranslationStructure = {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: 'Entwürfe für neue Sitzungen',
+        footer: 'Wähle, ob „Neue Sitzung“ den Entwurf dieses Geräts fortsetzt oder einen neuen öffnet.',
+        resumeTitle: 'Vorherigen Entwurf fortsetzen',
+        resumeSubtitle: 'Setze den auf diesem Gerät über „Neue Sitzung“ begonnenen Entwurf fort.',
+        freshTitle: 'Immer neu beginnen',
+        freshSubtitle: 'Öffne bei jeder Auswahl von „Neue Sitzung“ einen neuen Entwurf.',
+    },
 	          sessionList: {
 	              title: 'Session-Liste',
 	              footer: 'Aussehen und Verhalten der Session-Liste in der Seitenleiste.',
@@ -7497,6 +7552,16 @@ settingsSession: {
               title: 'Erweitert',
           },
           messageSending: {
+              inactiveResumePolicyTitle: 'Automatisch fortsetzen nach dem Senden',
+              inactiveResumePolicySubtitle: 'Lege fest, was Happier nach dem Senden an eine inaktive Session tun soll.',
+              inactiveResumePolicy: {
+                  whenAvailableTitle: 'Jetzt oder wenn der Computer zurückkehrt',
+                  whenAvailableSubtitle: 'Sofort fortsetzen, wenn erreichbar; andernfalls beim erneuten Verbinden des Daemons verarbeiten.',
+                  onlineOnlyTitle: 'Nur wenn der Computer online ist',
+                  onlineOnlySubtitle: 'Beim Senden einmal versuchen. Falls nicht erreichbar, bleibt die Nachricht eingereiht.',
+                  manualTitle: 'Nie automatisch',
+                  manualSubtitle: 'Nachrichten bleiben immer eingereiht, bis du die Session fortsetzt.',
+              },
               title: 'Nachrichten senden',
               footer: 'Steuert, was passiert, wenn du eine Nachricht sendest, während der Agent läuft.',
               queueInAgentTitle: 'Im Agent einreihen (aktuell)',
@@ -7898,6 +7963,9 @@ settingsSession: {
               wizardColumnsTitle: 'Zweispaltiges Layout',
               wizardColumnsEnabledSubtitle: 'Zusammengehörige Auswahlen auf breiten Bildschirmen nebeneinander setzen.',
               wizardColumnsDisabledSubtitle: 'Jede Auswahl des Assistenten in einer Spalte stapeln.',
+              defaultWorktreeTitle: 'Worktree für neue Sessions erstellen',
+              defaultWorktreeEnabledSubtitle: 'Jede neue Git-Session in einem neuen Worktree starten.',
+              defaultWorktreeDisabledSubtitle: 'Neue Git-Sessions im ausgewählten Ordner starten.',
               wizardPresentationTitle: 'Layout der Auswahlen im Assistenten',
               wizardPresentationFooter: '„Automatisch“ lässt kurze Bereiche als Listen und wechselt bei langen Bereichen zu durchsuchbaren Dropdowns.',
               wizardPresentationAutoTitle: 'Auto',

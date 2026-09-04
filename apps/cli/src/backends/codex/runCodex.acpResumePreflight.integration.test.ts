@@ -13,6 +13,7 @@ import {
 } from '@/agent/runtime/sessionInitialGoal';
 import { HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE } from '@/agent/runtime/freshProviderContext';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import { CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import { createCodexPermissionHandler } from './utils/createCodexPermissionHandler';
 import { applyPermissionModeToCodexPermissionHandler } from './utils/applyPermissionModeToHandler';
 import { createCodexAppServerSteerTargetEndedError } from './appServer/appServerCompatibility';
@@ -93,6 +94,13 @@ function createDefaultCodexAppServerRuntimeMock(): any {
     flushTurn: vi.fn(),
     rollbackConversation: vi.fn(async () => ({ ok: true, target: { type: 'latest_turn' }, threadId: 'thread_1' })),
   };
+}
+
+function resolvePromptLocalIds(options?: Readonly<{
+  localId?: string | null;
+  localIds?: readonly string[] | null;
+}>): readonly string[] | null {
+  return options?.localIds ?? (typeof options?.localId === 'string' ? [options.localId] : null);
 }
 
 const createCodexAppServerRuntimeSpy = vi.fn<(...args: any[]) => any>((..._args) => createDefaultCodexAppServerRuntimeMock());
@@ -566,7 +574,10 @@ describe('runCodex CodexACP resume behavior', () => {
 
     expect(probeCodexAcpLoadSessionSupportSpy).not.toHaveBeenCalled();
     expect(resolveRunnerMcpServersSpy.mock.calls[0]?.[0]).toMatchObject({
-      accountSettings: null,
+      accountSettings: {
+        codexBackendMode: 'acp',
+        mcpServers: { shouldNotLoadOnResume: true },
+      },
     });
     expect(createCodexPermissionHandler).toHaveBeenCalledWith(expect.objectContaining({
       getAccountSettingsSecretsReadKeys: expect.any(Function),
@@ -1006,6 +1017,7 @@ describe('runCodex CodexACP resume behavior', () => {
     expect(createCodexAppServerRuntimeSpy).toHaveBeenCalledTimes(1);
     expect(createCodexAppServerRuntimeSpy).toHaveBeenCalledWith(expect.objectContaining({
       configOverrides: [
+        'shell_environment_policy.set.HAPPIER_SESSION_ID="sess_1"',
         'mcp_servers.happier.command="/tmp/happier-mcp-bridge"',
         'mcp_servers.happier.args=["--url","http://127.0.0.1:0"]',
         'mcp_servers.happier.enabled=true',
@@ -1018,9 +1030,12 @@ describe('runCodex CodexACP resume behavior', () => {
         sendAgentMessageEphemeral?: unknown;
       };
     } | undefined;
-    expect(runtimeArgs?.processEnv).toBe(process.env);
+    expect(runtimeArgs?.processEnv).toEqual(expect.objectContaining({
+      HAPPIER_SESSION_ID: 'sess_1',
+    }));
     expect(runtimeArgs?.transcriptSession?.sendAgentMessageEphemeral).toBeTypeOf('function');
     expect(runtimeArgs?.configOverrides).toEqual([
+      'shell_environment_policy.set.HAPPIER_SESSION_ID="sess_1"',
       'mcp_servers.happier.command="/tmp/happier-mcp-bridge"',
       'mcp_servers.happier.args=["--url","http://127.0.0.1:0"]',
       'mcp_servers.happier.enabled=true',
@@ -1035,6 +1050,176 @@ describe('runCodex CodexACP resume behavior', () => {
     if (outcome.ok) throw new Error('expected runCodex to fail in test');
     const failedOutcome = outcome;
     await expect(failedOutcome.error).toEqual(expect.objectContaining({ message: expect.stringMatching(/appServer-startOrLoad-called/) }));
+  });
+
+  it('does not report a resumed app-server session ready when provider resume fails', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    let daemonReadinessResolved = false;
+    initializeBackendRunSessionSpy.mockImplementationOnce(async (opts: any) => {
+      const initialized = await initializeDefaultBackendRunSession(opts);
+      void Promise.resolve()
+        .then(async () => await opts.waitForDaemonReportReadiness?.())
+        .then(() => {
+          daemonReadinessResolved = true;
+        });
+      return initialized;
+    });
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      resume: 'resume-123',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+      codexBackendMode: 'appServer',
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    await Promise.resolve();
+    expect(outcome).toMatchObject({ ok: false });
+    expect(daemonReadinessResolved).toBe(false);
+  });
+
+  it('does not report an ordinary metadata-driven app-server resume ready when provider resume fails', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    let daemonReadinessResolved = false;
+    initializeBackendRunSessionSpy.mockImplementationOnce(async (opts: any) => {
+      const session = opts.api.sessionSyncClient({ id: 'sess_1', metadataVersion: 1 });
+      Object.assign(session, {
+        fetchLatestUserPermissionIntentFromTranscript: vi.fn(async () => null),
+        sendCodexMessage: vi.fn(),
+        sendAgentMessage: vi.fn(),
+        getLastObservedMessageSeq: vi.fn(() => 0),
+        bindProviderInputOutcomeProducer: vi.fn(() => providerInputOutcomeObserverMock),
+        blockPendingMessageDelivery: vi.fn(async () => false),
+        beginTurnAssistantTextSnapshot: vi.fn(() => ({ id: 'turn-token' })),
+        getMetadataSnapshot: vi.fn(() => ({
+          codexSessionId: 'vendor-thread-existing-123',
+          codexBackendMode: 'appServer',
+        })),
+      });
+      opts.configureSessionClient?.(session);
+      void Promise.resolve()
+        .then(async () => await opts.waitForDaemonReportReadiness?.())
+        .then(() => {
+          daemonReadinessResolved = true;
+        });
+      return {
+        session,
+        reconnectionHandle: null,
+        reportedSessionId: 'sess_1',
+        attachedToExistingSession: true,
+      };
+    });
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      existingSessionId: 'existing-123',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+      codexBackendMode: 'appServer',
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    await Promise.resolve();
+    expect(outcome).toMatchObject({ ok: false });
+    expect(daemonReadinessResolved).toBe(false);
+  });
+
+  it('reports app-server readiness after provider resume succeeds', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    const runtime = {
+      ...createDefaultCodexAppServerRuntimeMock(),
+      startOrLoad: vi.fn(async () => undefined),
+    };
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => runtime);
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      throw new Error('stop-after-resume-ready');
+    };
+    let daemonReadinessResolved = false;
+    initializeBackendRunSessionSpy.mockImplementationOnce(async (opts: any) => {
+      const initialized = await initializeDefaultBackendRunSession(opts);
+      void Promise.resolve()
+        .then(async () => await opts.waitForDaemonReportReadiness?.())
+        .then(() => {
+          daemonReadinessResolved = true;
+        });
+      return initialized;
+    });
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      resume: 'resume-123',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+      codexBackendMode: 'appServer',
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    await vi.waitFor(() => {
+      expect(daemonReadinessResolved).toBe(true);
+    });
+    expect(runtime.startOrLoad).toHaveBeenCalledWith(expect.objectContaining({ resumeId: 'resume-123' }));
+    expect(outcome).toMatchObject({ ok: false });
+  });
+
+  it('keeps fresh app-server session registration lazy without opening a provider thread', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      throw new Error('stop-after-fresh-ready');
+    };
+    let daemonReadinessResolved = false;
+    initializeBackendRunSessionSpy.mockImplementationOnce(async (opts: any) => {
+      const initialized = await initializeDefaultBackendRunSession(opts);
+      void Promise.resolve()
+        .then(async () => await opts.waitForDaemonReportReadiness?.())
+        .then(() => {
+          daemonReadinessResolved = true;
+        });
+      return initialized;
+    });
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+      codexBackendMode: 'appServer',
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    await vi.waitFor(() => {
+      expect(daemonReadinessResolved).toBe(true);
+    });
+    const createdRuntime = createCodexAppServerRuntimeSpy.mock.results[0]?.value as any;
+    expect(createdRuntime.startOrLoad).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ ok: false });
   });
 
   it('routes Codex ChatGPT refresh bridge requests for connected-service profile selections to the daemon', async () => {
@@ -1412,7 +1597,7 @@ describe('runCodex CodexACP resume behavior', () => {
           groupId: 'main',
         }),
       }),
-      expect.objectContaining({ timeoutMs: 120_000 }),
+      expect.objectContaining({ timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS }),
     );
     const emittedMessages = (lastSessionClient?.sendSessionEvent as ReturnType<typeof vi.fn> | undefined)?.mock.calls
       .map((call) => call[0]?.message)
@@ -1460,7 +1645,7 @@ describe('runCodex CodexACP resume behavior', () => {
         sessionId: 'sess_1',
         classification: expect.objectContaining({ kind: 'usage_limit', groupId: 'main' }),
       }),
-      expect.objectContaining({ timeoutMs: 120_000 }),
+      expect.objectContaining({ timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS }),
     );
   });
 
@@ -1535,7 +1720,7 @@ describe('runCodex CodexACP resume behavior', () => {
           groupId: 'main',
         }),
       }),
-      expect.objectContaining({ timeoutMs: 120_000 }),
+      expect.objectContaining({ timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS }),
     );
   });
 
@@ -2582,6 +2767,7 @@ describe('runCodex CodexACP resume behavior', () => {
     const steerPrompt = vi.fn(async (_prompt: string, options?: {
       localId?: string | null;
       localIds?: readonly string[] | null;
+      onProviderPromptAccepted?: () => void;
       userMessageSeq?: number | null;
     }) => {
       const localIds = options?.localIds ?? (typeof options?.localId === 'string' ? [options.localId] : null);
@@ -3162,6 +3348,7 @@ describe('runCodex CodexACP resume behavior', () => {
     expect(lastSessionClient?.blockPendingMessageDelivery).toHaveBeenCalledWith({
       localIds: ['local-stale-steer'],
       reason: 'steering_unavailable',
+      providerEffect: 'none',
     });
     const emittedMessages = (lastSessionClient?.sendSessionEvent as ReturnType<typeof vi.fn> | undefined)?.mock.calls
       .map((call) => call[0]?.message)
@@ -3481,8 +3668,7 @@ describe('runCodex CodexACP resume behavior', () => {
       | null = null;
     const sendPrompt = vi.fn(async (_prompt: string, options?: { localId?: string | null; localIds?: readonly string[] | null; userMessageSeq?: number | null }) => {
       const userMessageSeq = options?.userMessageSeq ?? null;
-      const localIds = options?.localIds ?? (typeof options?.localId === 'string' ? [options.localId] : null);
-      undeliverableCallback?.([{ localIds, text: 'not-used-for-replay', userMessageSeq }]);
+      undeliverableCallback?.([{ localIds: resolvePromptLocalIds(options), text: 'not-used-for-replay', userMessageSeq }]);
     });
     createCodexAppServerRuntimeSpy.mockImplementationOnce(() => ({
       getSessionId: () => 'thread-app-server',
@@ -3572,7 +3758,7 @@ describe('runCodex CodexACP resume behavior', () => {
       localIds?: readonly string[] | null;
       userMessageSeq?: number | null;
     }) => {
-      const localIds = options?.localIds ?? (typeof options?.localId === 'string' ? [options.localId] : null);
+      const localIds = resolvePromptLocalIds(options);
       const userMessageSeq = options?.userMessageSeq ?? null;
       acceptedCallback?.({
         localIds,
@@ -3663,7 +3849,7 @@ describe('runCodex CodexACP resume behavior', () => {
       userMessageSeq?: number | null;
     }) => {
       undeliverableCallback?.([{
-        localIds: options?.localIds ?? (typeof options?.localId === 'string' ? [options.localId] : null),
+        localIds: resolvePromptLocalIds(options),
         text: 'not-used-for-pending-block',
         userMessageSeq: options?.userMessageSeq ?? null,
       }]);
@@ -3903,8 +4089,7 @@ describe('runCodex CodexACP resume behavior', () => {
       | null = null;
     const sendPrompt = vi.fn(async (_prompt: string, options?: { localId?: string | null; localIds?: readonly string[] | null; userMessageSeq?: number | null }) => {
       const userMessageSeq = options?.userMessageSeq ?? null;
-      const localIds = options?.localIds ?? (typeof options?.localId === 'string' ? [options.localId] : null);
-      undeliverableCallback?.([{ localIds, text: 'not-used-for-replay', userMessageSeq }]);
+      undeliverableCallback?.([{ localIds: resolvePromptLocalIds(options), text: 'not-used-for-replay', userMessageSeq }]);
     });
     createCodexAppServerRuntimeSpy.mockImplementationOnce(() => ({
       getSessionId: () => 'thread-app-server',
@@ -4059,17 +4244,108 @@ describe('runCodex CodexACP resume behavior', () => {
         switchesThisTurn: 0,
         classification: runtimeAuthClassification,
       }),
-      expect.objectContaining({ timeoutMs: 120_000 }),
+      expect.objectContaining({ timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS }),
     );
     const emittedMessages = (lastSessionClient?.sendSessionEvent as ReturnType<typeof vi.fn> | undefined)?.mock.calls
       .map((call) => call[0]?.message)
       .filter((message): message is string => typeof message === 'string') ?? [];
-    expect(emittedMessages.some((message) => message.includes('credential refreshed'))).toBe(true);
+    expect(emittedMessages.map((message) => message.toLowerCase())).toEqual(expect.arrayContaining([
+      expect.stringContaining('credential refreshed'),
+    ]));
     expect(emittedMessages.some((message) => message.startsWith('Codex process error:'))).toBe(false);
     const { logger } = await import('@/ui/logger');
     const warnCalls = (logger.warn as ReturnType<typeof vi.fn>).mock.calls;
     expect(warnCalls.some((call) => call.includes(providerError))).toBe(false);
     expect(warnCalls.some((call) => call.some((value) => value instanceof Error && value.message.includes('secret-test-token')))).toBe(false);
+  });
+
+  it('does not report a group usage limit again after the app-server terminal owner requests recovery', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    const runtimeAuthClassification = {
+      kind: 'usage_limit',
+      serviceId: 'openai-codex',
+      profileId: 'limited',
+      groupId: 'main',
+      resetsAtMs: 2_000,
+      retryAfterMs: null,
+      planType: null,
+      rateLimits: null,
+      source: 'provider_runtime_marker',
+    };
+    const providerError = Object.assign(new Error('usage limit reached'), {
+      runtimeAuthClassification,
+    });
+    const flushTurn = vi.fn(async () => {});
+    createCodexAppServerRuntimeSpy.mockImplementationOnce((runtimeParams: {
+      onUsageLimitGroupRecovery: (input: { classification: typeof runtimeAuthClassification }) => Promise<unknown>;
+    }) => ({
+      getSessionId: () => 'thread-usage-limit',
+      supportsInFlightSteer: () => false,
+      isTurnInFlight: () => false,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {}),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt: vi.fn(async () => {}),
+      sendPrompt: vi.fn(async () => {
+        await runtimeParams.onUsageLimitGroupRecovery({ classification: runtimeAuthClassification });
+        throw providerError;
+      }),
+      compactContext: vi.fn(async () => {}),
+      flushTurn,
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-usage-limit' })),
+    }));
+    notifyDaemonConnectedServiceRuntimeAuthFailureSpy.mockResolvedValue({
+      ok: true,
+      result: { status: 'switch_attempted', result: { status: 'switched', activeProfileId: 'backup' } },
+    });
+
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      waitCallCount += 1;
+      if (waitCallCount === 1) {
+        return {
+          message: 'continue after usage limit',
+          mode: {
+            permissionMode: 'default',
+            permissionModeUpdatedAt: 1,
+          },
+          isolate: false,
+          hash: 'hash-usage-limit',
+        };
+      }
+      return null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'terminal',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    expect(outcome).toMatchObject({ ok: true });
+    expect(notifyDaemonConnectedServiceRuntimeAuthFailureSpy).toHaveBeenCalledTimes(1);
+    expect(notifyDaemonConnectedServiceRuntimeAuthFailureSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'sess_1',
+        switchesThisTurn: 0,
+        classification: runtimeAuthClassification,
+      }),
+      expect.objectContaining({ timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS }),
+    );
+    expect(flushTurn).not.toHaveBeenCalled();
   });
 
   it('admits a connected-service initial-goal resume without a generation transition and starts it once', async () => {

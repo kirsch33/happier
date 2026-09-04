@@ -49,7 +49,25 @@ describe('forkCodexAppServerConversationNative', () => {
         expect(createClient).toHaveBeenCalledTimes(1);
     });
 
-    it('creates a fresh fork client with an initialize request that has no local hard timeout', async () => {
+    it('lets operation-owned initialization run until Codex settles or the operation is cancelled', async () => {
+        const client = createClientDouble(vi.fn(async () => ({ threadId: 'forked-thread' })));
+        const createClient = vi.fn(async () => client);
+        const controller = new AbortController();
+
+        await forkCodexAppServerConversationNative({
+            directory: '/repo',
+            parentCodexSessionId: 'parent-thread',
+            signal: controller.signal,
+        }, { createClient });
+
+        expect(createClient).toHaveBeenCalledWith({
+            cwd: '/repo',
+            processEnv: undefined,
+            initializeRequestOptions: { signal: controller.signal, timeoutMs: null },
+        });
+    });
+
+    it('retains the shared startup timeout when no operation cancellation signal owns the lifecycle', async () => {
         const client = createClientDouble(vi.fn(async () => ({ threadId: 'forked-thread' })));
         const createClient = vi.fn(async () => client);
 
@@ -61,7 +79,6 @@ describe('forkCodexAppServerConversationNative', () => {
         expect(createClient).toHaveBeenCalledWith({
             cwd: '/repo',
             processEnv: undefined,
-            initializeRequestOptions: { timeoutMs: null },
         });
     });
 
@@ -81,7 +98,7 @@ describe('forkCodexAppServerConversationNative', () => {
         expect(request).toHaveBeenCalledTimes(1);
         expect(request).toHaveBeenCalledWith(
             'thread/fork',
-            { threadId: 'parent-thread', persistExtendedHistory: true },
+            { threadId: 'parent-thread', persistExtendedHistory: true, excludeTurns: true },
             { timeoutMs: null },
         );
         expect(client.dispose).toHaveBeenCalledTimes(1);
@@ -109,7 +126,7 @@ describe('forkCodexAppServerConversationNative', () => {
         expect(request).toHaveBeenNthCalledWith(
             1,
             'thread/fork',
-            { threadId: 'parent-thread', persistExtendedHistory: true },
+            { threadId: 'parent-thread', persistExtendedHistory: true, excludeTurns: true },
             { timeoutMs: null },
         );
         expect(request).toHaveBeenNthCalledWith(
@@ -173,7 +190,7 @@ describe('forkCodexAppServerConversationNative', () => {
         expect(request).toHaveBeenCalledTimes(1);
         expect(request).toHaveBeenCalledWith(
             'thread/fork',
-            { threadId: 'parent-thread', persistExtendedHistory: true },
+            { threadId: 'parent-thread', persistExtendedHistory: true, excludeTurns: true },
             { timeoutMs: null },
         );
         expect(client.dispose).toHaveBeenCalledTimes(1);
@@ -228,8 +245,37 @@ describe('forkCodexAppServerConversationNative', () => {
         expect(request).toHaveBeenCalledTimes(1);
         expect(request).toHaveBeenCalledWith(
             'thread/fork',
-            { threadId: 'parent-thread', persistExtendedHistory: true },
+            { threadId: 'parent-thread', persistExtendedHistory: true, excludeTurns: true },
             { timeoutMs: null },
+        );
+        expect(client.dispose).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates an operation-owned abort instead of classifying it as an indeterminate provider outcome', async () => {
+        const controller = new AbortController();
+        const abortError = Object.assign(new Error('Action operation cancelled'), { name: 'AbortError' });
+        const request = vi.fn<DisposableCodexAppServerClient['request']>()
+            .mockImplementationOnce(async (_method, _params, options) => await new Promise<unknown>((_resolve, reject) => {
+                options?.signal?.addEventListener('abort', () => reject(abortError), { once: true });
+            }));
+        const client = createClientDouble(request);
+
+        const nativeFork = forkCodexAppServerConversationNative({
+            directory: '/repo',
+            parentCodexSessionId: 'parent-thread',
+            signal: controller.signal,
+        }, {
+            createClient: async () => client,
+        });
+        await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+        controller.abort();
+
+        await expect(nativeFork).rejects.toBe(abortError);
+
+        expect(request).toHaveBeenCalledWith(
+            'thread/fork',
+            { threadId: 'parent-thread', persistExtendedHistory: true, excludeTurns: true },
+            { timeoutMs: null, signal: controller.signal },
         );
         expect(client.dispose).toHaveBeenCalledTimes(1);
     });

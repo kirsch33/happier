@@ -751,7 +751,7 @@ export function buildSpawnSessionOptionsFromAuthoringDraft(params: Readonly<{
             ? { approvedNewDirectoryCreation: params.approvedNewDirectoryCreation }
             : {}),
         backendTarget,
-        ...(normalizedProfileId.length > 0 || params.draft.profileId === '' ? { profileId: normalizedProfileId } : {}),
+        ...(normalizedProfileId.length > 0 ? { profileId: normalizedProfileId } : {}),
         ...(params.draft.environmentVariables ? { environmentVariables: params.draft.environmentVariables } : {}),
         ...(normalizeOptionalString(params.draft.resumeSessionId) ? { resume: params.draft.resumeSessionId!.trim() } : {}),
         ...(normalizeOptionalString(params.draft.permissionMode) ? { permissionMode: params.draft.permissionMode!.trim() as SpawnSessionOptions['permissionMode'] } : {}),
@@ -841,6 +841,7 @@ export function buildNewSessionTempDataFromAuthoringDraft(params: Readonly<{
 
 export function buildPersistedNewSessionDraftFromAuthoringDraft(params: Readonly<{
     draft: SessionAuthoringDraft;
+    checkoutSelectionExplicit?: boolean;
     machineId: string | null;
     entryIntent?: NewSessionDraft['entryIntent'];
     selectedSecretId: string | null;
@@ -872,7 +873,9 @@ export function buildPersistedNewSessionDraftFromAuthoringDraft(params: Readonly
         ...(targetServerId ? { targetServerId } : {}),
         ...(windowsRemoteSessionLaunchModeOverride ? { windowsRemoteSessionLaunchModeOverride } : {}),
         ...(params.entryIntent ? { entryIntent: params.entryIntent } : {}),
-        ...(params.draft.checkoutCreationDraft ? { checkoutCreationDraft: params.draft.checkoutCreationDraft } : {}),
+        ...(params.draft.checkoutCreationDraft || params.checkoutSelectionExplicit
+            ? { checkoutCreationDraft: params.draft.checkoutCreationDraft }
+            : {}),
         selectedProfileId: params.draft.profileId ?? null,
         selectedSecretId: params.selectedSecretId,
         ...(params.selectedSecretIdByProfileIdByEnvVarName ? {

@@ -1,9 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { expandHome } from './utils/paths/canonical_home.mjs';
+import { loadDevTargetsConfig } from './utils/dev_targets/config.mjs';
+import { resolveRepoStackIdentity, resolveStacksStorageRoot } from './utils/stack/repo_stack_identity.mjs';
 import { deleteKeychainBundle } from '../../../scripts/pipeline/secrets/delete-keychain-bundle.mjs';
 import { readKeychainBundle } from '../../../scripts/pipeline/secrets/read-keychain-bundle.mjs';
 import { writeKeychainBundle } from '../../../scripts/pipeline/secrets/write-keychain-bundle.mjs';
@@ -15,24 +18,29 @@ const KEYCHAIN_ACCOUNT = BOT_LOGIN;
 
 function printHelp() {
   process.stdout.write(`
-ghops: run GitHub CLI as the Happier bot
+ghops: run GitHub operations as the Happier bot
 
 Usage:
   yarn ghops <gh-subcommand> [...args]
+  yarn ghops git push --repo OWNER/REPO --source REVISION --target refs/heads/BRANCH [--force-with-lease EXPECTED_SHA]
 
 Required:
   Bot token from HAPPIER_GITHUB_BOT_TOKEN, or macOS Keychain after auth store.
   Issue mutations require repository permission: Issues (read and write).
+  Explicit bot Git pushes require repository permission: Contents (read and write) and write access to the target branch.
 
 Optional:
   HAPPIER_GHOPS_GH_PATH      Path to the 'gh' executable (default: "gh")
+  HAPPIER_GHOPS_GIT_PATH     Path to the 'git' executable (default: "git")
   HAPPIER_GHOPS_CONFIG_DIR   Override GH_CONFIG_DIR (default: <repo>/.happier/local/ghops/gh)
 
 Behavior:
-  - Prefers HAPPIER_GITHUB_BOT_TOKEN, then macOS Keychain service '${KEYCHAIN_SERVICE}'
+  - Prefers HAPPIER_GITHUB_BOT_TOKEN, then macOS Keychain service '${KEYCHAIN_SERVICE}' locally or through the active execution-host broker
   - Forces GH_TOKEN from the resolved bot token (no fallback to stored gh auth)
   - Disables interactive prompts (GH_PROMPT_DISABLED=1)
   - Uses an isolated GH_CONFIG_DIR by default
+  - Supports an explicitly selected bot-authenticated branch push without changing persistent Git identity or credentials
+  - Disables repository hooks for bot-authenticated pushes so they cannot inherit the temporary credential header
 
 Authentication:
   yarn ghops auth store      Validate and store the happier-bot token in macOS Keychain
@@ -44,6 +52,7 @@ Examples:
   yarn ghops api repos/happier-dev/happier/issues -f title="Bug" -f body="..."
   yarn ghops issue create --repo happier-dev/happier --title "Bug" --body "..."
   yarn ghops project item-add 1 --owner happier-dev --url https://github.com/happier-dev/happier/issues/43
+  yarn ghops git push --repo happier-dev/happier --source HEAD --target refs/heads/my-branch
 `.trimStart());
 }
 
@@ -81,11 +90,77 @@ function readStoredBotToken() {
   }
 }
 
-function resolveBotToken() {
+async function readMacHostBotToken(repoRoot) {
+  if (process.platform !== 'linux') return null;
+  const configuredStackName = String(process.env.HAPPIER_STACK_STACK ?? '').trim();
+  const stackName = configuredStackName || resolveRepoStackIdentity({
+    repoRoot,
+    stacksStorageRoot: resolveStacksStorageRoot(process.env),
+    createIfMissing: false,
+  }).stackName;
+  const { config } = await loadDevTargetsConfig({
+    stackName,
+    env: process.env,
+    allowMissing: true,
+  });
+  const target = config.targets.find((candidate) => (
+    candidate.name === 'mac-host' && candidate.platform === 'posix'
+  ));
+  if (!target) return null;
+
+  const brokerCommand = [
+    'broker_dir="/tmp/happier-ghops-brokers-$(/usr/bin/id -u)"',
+    'for broker_socket in "$broker_dir"/broker-*.sock',
+    'do [ -S "$broker_socket" ] || continue',
+    '/usr/bin/nc -U "$broker_socket" && exit 0',
+    'done',
+    'exit 1',
+  ].join('; ');
+
+  const result = spawnSync('ssh', [
+    '-T',
+    ...(target.sshConfigFile ? ['-F', target.sshConfigFile] : []),
+    '-o', 'ControlMaster=no',
+    '-o', 'BatchMode=yes',
+    '-o', 'ConnectTimeout=10',
+    target.ssh,
+    brokerCommand,
+  ], {
+    encoding: 'utf8',
+    env: process.env,
+    input: `${JSON.stringify({ version: 1, operation: 'read-ghops-credential' })}\n`,
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `mac-host credential broker is unavailable or failed for stack '${stackName}'; restart the Stack from its Mac execution host.`,
+    );
+  }
+
+  let response;
+  try {
+    response = JSON.parse(String(result.stdout ?? '').trim());
+  } catch {
+    throw new Error('mac-host credential broker response is invalid.');
+  }
+  if (response?.version !== 1 || response?.ok !== true || !response.credential) {
+    throw new Error('mac-host credential broker could not provide the happier-bot credential.');
+  }
+  const token = String(response.credential[BOT_TOKEN_ENV_KEY] ?? '').trim();
+  if (!token) {
+    throw new Error('mac-host credential broker response is missing the happier-bot token.');
+  }
+  return { token, source: 'mac-host credential broker' };
+}
+
+async function resolveBotToken(repoRoot) {
   const environmentToken = String(process.env[BOT_TOKEN_ENV_KEY] ?? '').trim();
   if (environmentToken) return { token: environmentToken, source: 'environment' };
   const keychainToken = readStoredBotToken();
   if (keychainToken) return { token: keychainToken, source: 'keychain' };
+  const macHostToken = await readMacHostBotToken(repoRoot);
+  if (macHostToken) return macHostToken;
   return { token: '', source: 'missing' };
 }
 
@@ -98,6 +173,120 @@ function buildGhEnvironment(token, configDir) {
     GH_PROMPT_DISABLED: '1',
     GH_CONFIG_DIR: configDir,
   };
+}
+
+function parseGitPushArgs(args) {
+  const values = new Map();
+  const allowed = new Set(['--repo', '--source', '--target', '--force-with-lease']);
+  for (let index = 0; index < args.length; index += 2) {
+    const key = args[index];
+    const value = args[index + 1];
+    if (!allowed.has(key) || value === undefined || values.has(key)) {
+      throw new Error('Usage: ghops git push --repo OWNER/REPO --source REVISION --target refs/heads/BRANCH [--force-with-lease EXPECTED_SHA]');
+    }
+    values.set(key, value);
+  }
+
+  const repo = String(values.get('--repo') ?? '');
+  const source = String(values.get('--source') ?? '');
+  const target = String(values.get('--target') ?? '');
+  const expectedLease = values.has('--force-with-lease')
+    ? String(values.get('--force-with-lease'))
+    : null;
+
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]+$/.test(repo)) {
+    throw new Error('Bot Git pushes require an explicit GitHub OWNER/REPO target.');
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(source) || source.includes('..') || source.includes('@{')) {
+    throw new Error('Bot Git pushes require a safe explicit source revision.');
+  }
+  if (!target.startsWith('refs/heads/')) {
+    throw new Error('Bot Git pushes may target only an explicit refs/heads/* branch.');
+  }
+  if (expectedLease !== null && !/^[0-9a-f]{40,64}$/i.test(expectedLease)) {
+    throw new Error('--force-with-lease requires the exact expected remote commit SHA.');
+  }
+
+  return { repo, source, target, expectedLease };
+}
+
+function buildBotGitEnvironment({ token, hooksDir }) {
+  const environment = { ...process.env };
+  delete environment[BOT_TOKEN_ENV_KEY];
+  delete environment.GH_TOKEN;
+  delete environment.GITHUB_TOKEN;
+  delete environment.GIT_TRACE;
+  delete environment.GIT_TRACE_CURL;
+  delete environment.GIT_CURL_VERBOSE;
+  delete environment.GIT_CONFIG;
+  delete environment.GIT_CONFIG_PARAMETERS;
+  for (const key of Object.keys(environment)) {
+    if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(key)) delete environment[key];
+  }
+
+  environment.GIT_TERMINAL_PROMPT = '0';
+  environment.GCM_INTERACTIVE = 'Never';
+  environment.GIT_CONFIG_COUNT = '4';
+  environment.GIT_CONFIG_KEY_0 = 'http.extraHeader';
+  environment.GIT_CONFIG_VALUE_0 = '';
+  environment.GIT_CONFIG_KEY_1 = 'http.https://github.com/.extraHeader';
+  environment.GIT_CONFIG_VALUE_1 = `Authorization: Basic ${Buffer.from(`${BOT_LOGIN}:${token}`, 'utf8').toString('base64')}`;
+  environment.GIT_CONFIG_KEY_2 = 'credential.helper';
+  environment.GIT_CONFIG_VALUE_2 = '';
+  environment.GIT_CONFIG_KEY_3 = 'core.hooksPath';
+  environment.GIT_CONFIG_VALUE_3 = hooksDir;
+  return environment;
+}
+
+function runBotGitPush({ gitPath, token, repo, source, target, expectedLease }) {
+  const hooksDir = mkdtempSync(join(tmpdir(), 'happier-ghops-empty-hooks-'));
+  try {
+    const environment = buildBotGitEnvironment({ token, hooksDir });
+    const refCheck = spawnSync(gitPath, ['check-ref-format', target], { encoding: 'utf8', env: environment });
+    if (refCheck.error || refCheck.status !== 0) {
+      throw new Error(`Invalid target branch ref '${target}'.`);
+    }
+
+    const sourceResult = spawnSync(gitPath, ['rev-parse', '--verify', `${source}^{commit}`], {
+      encoding: 'utf8',
+      env: environment,
+    });
+    const sourceSha = String(sourceResult.stdout ?? '').trim();
+    if (sourceResult.error || sourceResult.status !== 0 || !/^[0-9a-f]{40,64}$/i.test(sourceSha)) {
+      throw new Error(`Unable to resolve source revision '${source}' to a commit.`);
+    }
+
+    const remote = `https://github.com/${repo}.git`;
+    const leaseArgs = expectedLease === null
+      ? []
+      : [`--force-with-lease=${target}:${expectedLease}`];
+    const pushResult = spawnSync(gitPath, [
+      'push',
+      ...leaseArgs,
+      remote,
+      `${sourceSha}:${target}`,
+    ], {
+      stdio: 'inherit',
+      env: environment,
+    });
+    if (pushResult.error || pushResult.status !== 0) {
+      throw new Error(`Bot-authenticated Git push failed for ${repo}:${target}.`);
+    }
+
+    const verifyResult = spawnSync(gitPath, ['ls-remote', '--refs', remote, target], {
+      encoding: 'utf8',
+      env: environment,
+    });
+    const remoteSha = String(verifyResult.stdout ?? '').trim().split(/\s+/, 1)[0] ?? '';
+    if (verifyResult.error || verifyResult.status !== 0 || remoteSha.toLowerCase() !== sourceSha.toLowerCase()) {
+      throw new Error(`Push completed but ${repo}:${target} did not resolve to ${sourceSha}.`);
+    }
+
+    process.stdout.write(`[ghops] pushed ${sourceSha} to ${repo}:${target} as ${BOT_LOGIN}.\n`);
+    return 0;
+  } finally {
+    rmSync(hooksDir, { recursive: true, force: true });
+  }
 }
 
 function validateBotIdentity({ ghPath, token, configDir }) {
@@ -160,6 +349,7 @@ async function main() {
 
   const repoRoot = resolveRepoRoot(process.cwd());
   const ghPath = resolvePath(repoRoot, process.env.HAPPIER_GHOPS_GH_PATH, process.env) || 'gh';
+  const gitPath = resolvePath(repoRoot, process.env.HAPPIER_GHOPS_GIT_PATH, process.env) || 'git';
   const configDir =
     resolvePath(repoRoot, process.env.HAPPIER_GHOPS_CONFIG_DIR, process.env) ?? join(repoRoot, '.happier', 'local', 'ghops', 'gh');
 
@@ -199,7 +389,7 @@ async function main() {
     return 0;
   }
 
-  const resolved = resolveBotToken();
+  const resolved = await resolveBotToken(repoRoot);
   if (!resolved.token) {
     const keychainHint = process.platform === 'darwin' ? ' or run `yarn ghops auth store`' : '';
     process.stderr.write(`[ghops] missing ${BOT_TOKEN_ENV_KEY}; set it${keychainHint}.\n`);
@@ -217,6 +407,17 @@ async function main() {
   }
 
   validateBotIdentity({ ghPath, token: resolved.token, configDir });
+
+  if (args[0] === 'git') {
+    if (args[1] !== 'push') {
+      throw new Error('Only `ghops git push` is supported.');
+    }
+    return runBotGitPush({
+      gitPath,
+      token: resolved.token,
+      ...parseGitPushArgs(args.slice(2)),
+    });
+  }
 
   const res = spawnSync(ghPath, args, {
     stdio: 'inherit',

@@ -1,10 +1,11 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AcpPromptSubmissionEvidence } from '@/agent/acp/AcpBackend';
+import type { AgentMessage } from '@/agent/core';
 
 import { PiRpcBackend } from './PiRpcBackend';
 
@@ -25,10 +26,12 @@ type PiRpcBackendWithPromptAdmission = PiRpcBackend & {
 
 function makeFakePiRpcProcessScript(
   dir: string,
-  scenario: 'ack-before-turn' | 'negative-ack-then-turn' | 'response-loss' | 'turn-before-ack',
+  scenario: 'ack-before-turn' | 'ack-after-timeout-during-compaction' | 'command-without-turn' | 'command-ack-before-turn' | 'command-state-unknown-before-turn' | 'negative-ack-then-turn' | 'response-loss' | 'turn-before-ack',
 ): string {
   const scriptPath = join(dir, `fake-pi-rpc-${scenario}.js`);
+  const observedPromptsPath = join(dir, 'observed-prompts.jsonl');
   const script = `
+const fs = require('node:fs');
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
 const out = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
@@ -55,6 +58,9 @@ rl.on('line', (line) => {
         data: {
           sessionId: 'pi-prompt-admission-test',
           model: { id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5' },
+          ...(scenario === 'command-state-unknown-before-turn'
+            ? {}
+            : { isStreaming: false, isCompacting: false }),
         },
       });
       break;
@@ -68,13 +74,48 @@ rl.on('line', (line) => {
       });
       break;
     case 'get_commands':
-      out({ id: command.id, type: 'response', command: command.type, success: true, data: { commands: [] } });
+      out({
+        id: command.id,
+        type: 'response',
+        command: command.type,
+        success: true,
+        data: {
+          commands: scenario === 'command-without-turn'
+            ? [{ name: 'goal', source: 'extension' }]
+            : scenario === 'command-ack-before-turn' || scenario === 'command-state-unknown-before-turn'
+              ? [{ name: 'goal', source: 'extension' }]
+              : [],
+        },
+      });
       break;
     case 'prompt':
+      fs.appendFileSync(${JSON.stringify(observedPromptsPath)}, JSON.stringify(command.message) + '\\n');
+      if (scenario === 'command-without-turn') {
+        out({ id: command.id, type: 'response', command: command.type, success: true });
+        break;
+      }
+      if (scenario === 'command-ack-before-turn' || scenario === 'command-state-unknown-before-turn') {
+        out({ id: command.id, type: 'response', command: command.type, success: true });
+        const turnDelay = scenario === 'command-state-unknown-before-turn' ? 180 : 100;
+        setTimeout(() => out({ type: 'agent_start' }), turnDelay);
+        setTimeout(() => out({ type: 'agent_end' }), turnDelay + 40);
+        break;
+      }
       if (scenario === 'ack-before-turn') {
         out({ id: command.id, type: 'response', command: command.type, success: true });
         setTimeout(() => out({ type: 'agent_start' }), 100);
         setTimeout(() => out({ type: 'agent_end' }), 140);
+        break;
+      }
+      if (scenario === 'ack-after-timeout-during-compaction') {
+        out({ type: 'compaction_start', reason: 'threshold', compactionId: 'delayed-prompt-compaction' });
+        setTimeout(() => {
+          out({ type: 'compaction_end', reason: 'threshold', compactionId: 'delayed-prompt-compaction' });
+          out({ type: 'agent_start' });
+        }, 100);
+        setTimeout(() => out({ id: command.id, type: 'response', command: command.type, success: true }), 110);
+        setTimeout(() => out({ type: 'agent_end' }), 120);
+        setTimeout(() => out({ type: 'message_update', assistantMessageEvent: { type: 'text_start' } }), 130);
         break;
       }
       if (scenario === 'negative-ack-then-turn') {
@@ -120,6 +161,9 @@ describe('PiRpcBackend prompt admission', () => {
       cwd: dir,
       command: process.execPath,
       args: [makeFakePiRpcProcessScript(dir, scenario)],
+      env: scenario === 'command-state-unknown-before-turn'
+        ? { HAPPIER_PI_RPC_AGENT_END_SETTLE_MS: '25' }
+        : {},
     });
     backends.push(backend);
     const session = await backend.startSession();
@@ -136,6 +180,57 @@ describe('PiRpcBackend prompt admission', () => {
     });
 
     await expect(submission.admission).resolves.toEqual({ status: 'accepted' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(completionSettled).toBe(false);
+    await expect(submission.completion).resolves.toBeUndefined();
+  });
+
+  it('preserves nonblank prompt bytes when sending them to Pi', async () => {
+    const { backend, sessionId } = await startBackend('ack-before-turn');
+
+    const prompt = '  /goal fix authentication  ';
+    const submission = backend.sendPromptWithAdmission(sessionId, prompt);
+
+    await expect(submission.admission).resolves.toEqual({ status: 'accepted' });
+    await expect(submission.completion).resolves.toBeUndefined();
+    expect(readFileSync(join(tempDirs[0]!, 'observed-prompts.jsonl'), 'utf8')).toBe(`${JSON.stringify(prompt)}\n`);
+  });
+
+  it('completes an advertised command that returns without starting an agent turn', async () => {
+    const { backend, sessionId } = await startBackend('command-without-turn');
+
+    const submission = backend.sendPromptWithAdmission(sessionId, '/goal fix authentication');
+
+    await expect(submission.admission).resolves.toEqual({ status: 'accepted' });
+    await expect(submission.completion).resolves.toBeUndefined();
+  });
+
+  it('does not complete an extension command before its delayed agent turn starts', async () => {
+    const { backend, sessionId } = await startBackend('command-ack-before-turn');
+
+    const submission = backend.sendPromptWithAdmission(sessionId, '/goal fix authentication');
+    let completionSettled = false;
+    void submission.completion.finally(() => {
+      completionSettled = true;
+    });
+
+    await expect(submission.admission).resolves.toEqual({ status: 'accepted' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(completionSettled).toBe(false);
+    await expect(submission.completion).resolves.toBeUndefined();
+  });
+
+  it('does not treat incomplete state evidence as idle before a delayed extension-command turn', async () => {
+    const { backend, sessionId } = await startBackend('command-state-unknown-before-turn');
+
+    const submission = backend.sendPromptWithAdmission(sessionId, '/goal fix authentication');
+    let completionSettled = false;
+    void submission.completion.finally(() => {
+      completionSettled = true;
+    });
+
+    await expect(submission.admission).resolves.toEqual({ status: 'accepted' });
+    await new Promise((resolve) => setTimeout(resolve, 120));
     expect(completionSettled).toBe(false);
     await expect(submission.completion).resolves.toBeUndefined();
   });
@@ -154,6 +249,56 @@ describe('PiRpcBackend prompt admission', () => {
     await expect(backend.waitForResponseComplete()).resolves.toBeUndefined();
   });
 
+  it('keeps delayed prompt acceptance uncertain while Pi compacts, then accepts the completed turn', async () => {
+    const { backend, sessionId } = await startBackend('ack-after-timeout-during-compaction');
+    const waitForMessage = (predicate: (message: AgentMessage) => boolean) => (
+      new Promise<void>((resolve) => {
+        const handler = (message: AgentMessage) => {
+          if (!predicate(message)) return;
+          backend.offMessage(handler);
+          resolve();
+        };
+        backend.onMessage(handler);
+      })
+    );
+
+    const nativeSetTimeout = globalThis.setTimeout;
+    let shortenedPromptResponseTimeout = false;
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((handler, timeout, ...args) => {
+      if (!shortenedPromptResponseTimeout && timeout === 30_000) {
+        shortenedPromptResponseTimeout = true;
+        return nativeSetTimeout(handler, 10, ...args);
+      }
+      return nativeSetTimeout(handler, timeout, ...args);
+    });
+    try {
+      const compactionStarted = waitForMessage((message) => (
+        message.type === 'event'
+        && message.name === 'context_compaction'
+        && (message.payload as { phase?: unknown } | undefined)?.phase === 'started'
+      ));
+      const evidencePromise = backend.sendPromptWithEvidence(sessionId, 'hello after compaction');
+
+      await compactionStarted;
+      const evidence = await evidencePromise;
+      expect(shortenedPromptResponseTimeout).toBe(true);
+      expect(evidence.kind).toBe('effect_may_have_occurred');
+      if (evidence.kind !== 'effect_may_have_occurred') return;
+
+      const postTurnActivity = waitForMessage((message) => (
+        message.type === 'event'
+        && message.name === 'thinking_update'
+      ));
+      await postTurnActivity;
+
+      await expect(evidence.finalResponseEvidence).resolves.toEqual({
+        kind: 'accepted_without_exact_final_response',
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it('keeps an exact negative prompt RPC response rejected when later uncorrelated turn events arrive', async () => {
     const { backend, sessionId } = await startBackend('negative-ack-then-turn');
 
@@ -162,9 +307,15 @@ describe('PiRpcBackend prompt admission', () => {
     const admission = await submission.admission;
     expect(admission).toMatchObject({
       status: 'rejected_before_effect',
-      error: { message: 'prompt rejected while busy' },
+      error: {
+        name: 'PiRpcPromptRejectedBeforeEffectError',
+        piProviderFailure: {
+          classification: 'pi_provider_failure',
+          code: 'pi_provider_session_error',
+        },
+      },
     });
-    await expect(submission.completion).rejects.toThrow('prompt rejected while busy');
+    await expect(submission.completion).rejects.toThrow(/prompt rejected while busy/u);
     await new Promise((resolve) => setTimeout(resolve, 50));
     await expect(submission.admission).resolves.toBe(admission);
   });

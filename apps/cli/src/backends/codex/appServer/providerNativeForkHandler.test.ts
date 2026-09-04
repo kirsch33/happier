@@ -31,6 +31,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
         connectedServiceId: 'openai-codex',
         connectedServiceGroupId: 'main',
         homePath: '/tmp/connected-codex-home',
+        sqliteHomePath: '/tmp/shared-codex-state',
       }),
     };
 
@@ -48,7 +49,10 @@ describe('codexAppServerProviderNativeForkHandler', () => {
     expect(forkCodexAppServerConversationNative).toHaveBeenCalledWith({
       directory: '/repo',
       parentCodexSessionId: 'parent-thread',
-      processEnv: expect.objectContaining({ CODEX_HOME: '/tmp/connected-codex-home' }),
+      processEnv: expect.objectContaining({
+        CODEX_HOME: '/tmp/connected-codex-home',
+        CODEX_SQLITE_HOME: '/tmp/shared-codex-state',
+      }),
     });
     expect(logger.debug).toHaveBeenCalledWith(
       '[CodexAppServerFork] attempting native latest fork',
@@ -89,6 +93,11 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       },
     });
     expect(JSON.stringify(result?.metadata.agentRuntimeDescriptorV1)).not.toContain('/tmp/connected-codex-home');
+    expect(JSON.stringify(result?.metadata.agentRuntimeDescriptorV1)).not.toContain('/tmp/shared-codex-state');
+    expect(result?.spawn.environmentVariables).toEqual({
+      CODEX_HOME: '/tmp/connected-codex-home',
+      CODEX_SQLITE_HOME: '/tmp/shared-codex-state',
+    });
   });
 
   it('logs an explicit skip reason for non-latest fork points', async () => {
@@ -140,7 +149,6 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       codexBackendMode: 'appServer',
       codexSessionId: 'parent-thread',
     };
-
     await expect(codexAppServerProviderNativeForkHandler({
       credentials: {} as never,
       agentId: 'codex',
@@ -150,7 +158,10 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 10,
-    })).rejects.toBe(failure);
+    })).rejects.toMatchObject({
+      name: 'ProviderNativeForkFailedBeforeDispatchError',
+      cause: failure,
+    });
     expect(logger.debug).toHaveBeenCalledWith(
       '[CodexAppServerFork] native latest fork failed',
       expect.objectContaining({
@@ -191,6 +202,33 @@ describe('codexAppServerProviderNativeForkHandler', () => {
         fallbackResult: 'do_not_replay_outcome_unknown',
       }),
     );
+  });
+
+  it('preserves an operation-owned abort for the tracked operation terminalizer', async () => {
+    const controller = new AbortController();
+    const abortError = Object.assign(new Error('Action operation cancelled'), { name: 'AbortError' });
+    vi.mocked(forkCodexAppServerConversationNative).mockRejectedValueOnce(abortError);
+    controller.abort();
+    const parentMetadata = {
+      codexBackendMode: 'appServer',
+      codexSessionId: 'parent-thread',
+    };
+
+    await expect(codexAppServerProviderNativeForkHandler({
+      credentials: {} as never,
+      agentId: 'codex',
+      parentSessionId: 'session-parent',
+      parentRawSession: { metadata: parentMetadata },
+      parentMetadata,
+      directory: '/repo',
+      forkPoint: { type: 'latest' },
+      targetSeqInclusive: 10,
+      signal: controller.signal,
+    })).rejects.toBe(abortError);
+
+    expect(forkCodexAppServerConversationNative).toHaveBeenCalledWith(expect.objectContaining({
+      signal: controller.signal,
+    }));
   });
 
   it('redacts sensitive values from provider-level native fork failure diagnostics', async () => {

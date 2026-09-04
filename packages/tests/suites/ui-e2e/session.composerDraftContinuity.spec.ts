@@ -1,13 +1,18 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 
 import { createRunDirs } from '../../src/testkit/runDir';
 import { createTestAuthMtls } from '../../src/testkit/auth';
+import type { StartedDaemon } from '../../src/testkit/daemon/daemon';
 import { fetchJson } from '../../src/testkit/http';
 import { startServerLight, type StartedServer } from '../../src/testkit/process/serverLight';
 import { startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
+import { authenticateAndStartDaemon } from '../../src/testkit/uiE2e/authenticateAndStartDaemon';
 import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
+import { waitForInitialAppUi } from '../../src/testkit/uiE2e/waitForInitialAppUi';
+import { visibleNewSessionComposer } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -30,6 +35,27 @@ type SeededSession = Readonly<{
     title: string;
 }>;
 
+type DraftAddress =
+    | Readonly<{ kind: 'newSession'; draftId: string }>
+    | Readonly<{ kind: 'session'; sessionId: string }>;
+
+type DraftDocument = Readonly<{
+    composer: Readonly<{ text: Readonly<{ value: unknown }> }>;
+    target: Readonly<{
+        kind: string;
+        authoring?: Readonly<Record<string, Readonly<{ value: unknown }>>>;
+    }>;
+}>;
+
+type DraftReadResponse = Readonly<{
+    status?: unknown;
+    record?: Readonly<{
+        revision?: unknown;
+        content?: Readonly<{ t?: unknown; v?: Readonly<{ document?: DraftDocument }> }> | null;
+    }>;
+}>;
+
+const DRAFT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function requireString(value: unknown, context: string): string {
     if (typeof value === 'string' && value.trim().length > 0) return value;
     throw new Error(`Missing ${context}`);
@@ -109,23 +135,179 @@ async function openSession(params: Readonly<{
     uiBaseUrl: string;
     session: SeededSession;
 }>): Promise<ReturnType<Page['locator']>> {
+    await gotoDomContentLoadedWithRetries(params.page, `${params.uiBaseUrl}/?happier_hmr=0`, 180_000);
+    await waitForInitialAppUi({ page: params.page, timeoutMs: 180_000 });
+
     const sessionUrl = `${params.uiBaseUrl}/session/${params.session.id}?happier_hmr=0`;
     await gotoDomContentLoadedWithRetries(params.page, sessionUrl, 180_000);
     const composer = params.page.locator('textarea[data-testid="session-composer-input"]:visible').first();
-    if ((await composer.count()) === 0) {
-        // The first navigation can be consumed by mTLS auto-login. Re-apply the intended session URL
-        // after the account has been provisioned so this helper stays independent of visible session titles.
-        await gotoDomContentLoadedWithRetries(params.page, sessionUrl, 180_000);
-    }
-    if ((await composer.count()) === 0) {
-        const sessionListItem = params.page.getByText(params.session.title, { exact: true }).first();
-        if ((await sessionListItem.count()) > 0) {
-            await sessionListItem.click();
-        }
-    }
     await expect(composer).toHaveCount(1, { timeout: 120_000 });
     await expect(composer).toBeVisible({ timeout: 120_000 });
     return composer;
+}
+
+async function openNewSessionDraft(params: Readonly<{
+    page: Page;
+    uiBaseUrl: string;
+    draftId?: string;
+    expectedText?: string;
+}>): Promise<Readonly<{ draftId: string; composer: ReturnType<Page['getByTestId']> }>> {
+    const draftListHydration = params.draftId
+        ? params.page.waitForResponse(
+            (response) => response.url().endsWith('/v1/account/session-drafts/list')
+                && response.request().method() === 'POST'
+                && response.status() === 200,
+            { timeout: 60_000 },
+        )
+        : null;
+    await gotoDomContentLoadedWithRetries(params.page, `${params.uiBaseUrl}/?happier_hmr=0`, 180_000);
+    await waitForInitialAppUi({ page: params.page, timeoutMs: 180_000 });
+    if (draftListHydration) {
+        const response = await draftListHydration;
+        await response.finished();
+    }
+    if (params.draftId && params.expectedText !== undefined) {
+        const row = params.page.getByTestId(`session-draft-row:new-session:${params.draftId}`);
+        const routedComposer = visibleNewSessionComposer(params.page);
+        await expect.poll(async () => {
+            if (await row.isVisible().catch(() => false)) return true;
+            if (!(await routedComposer.isVisible().catch(() => false))) return false;
+            return await routedComposer.inputValue() === params.expectedText;
+        }, { timeout: 60_000 }).toBe(true);
+    }
+    const target = params.draftId
+        ? `${params.uiBaseUrl}/new?draftId=${encodeURIComponent(params.draftId)}&happier_hmr=0`
+        : `${params.uiBaseUrl}/new?happier_hmr=0`;
+    await gotoDomContentLoadedWithRetries(params.page, target, 180_000);
+    const composer = visibleNewSessionComposer(params.page);
+    await expect(composer).toBeVisible({ timeout: 120_000 });
+    await expect.poll(() => new URL(params.page.url()).searchParams.get('draftId'), { timeout: 60_000 })
+        .toMatch(DRAFT_ID_PATTERN);
+    const draftId = new URL(params.page.url()).searchParams.get('draftId');
+    if (!draftId || !DRAFT_ID_PATTERN.test(draftId)) throw new Error(`Missing canonical draftId in ${params.page.url()}`);
+    if (params.draftId) expect(draftId).toBe(params.draftId);
+    if (params.expectedText !== undefined) {
+        await expect(composer).toHaveValue(params.expectedText, { timeout: 60_000 });
+    }
+    return { draftId, composer };
+}
+
+async function waitForDraftMutation(page: Page, action: () => Promise<void>): Promise<void> {
+    // Match a request that starts after this action is armed. A response matcher can accidentally
+    // consume a still-finishing mutation from the preceding test and return before this edit is durable.
+    const mutation = page.waitForRequest(
+        (request) => request.url().endsWith('/v1/account/session-drafts/mutate')
+            && request.method() === 'POST',
+        { timeout: 60_000 },
+    );
+    await action();
+    const request = await mutation;
+    const response = await request.response();
+    if (!response || response.status() !== 200) {
+        throw new Error(`Session draft mutation failed (status=${response?.status() ?? 'no response'})`);
+    }
+    await response.finished();
+}
+
+async function holdNextDraftMutation(page: Page): Promise<Readonly<{
+    intercepted: Promise<void>;
+    completed: Promise<void>;
+    release: () => void;
+    dispose: () => Promise<void>;
+}>> {
+    const mutationUrl = '**/v1/account/session-drafts/mutate';
+    let markIntercepted!: () => void;
+    const intercepted = new Promise<void>((resolve) => { markIntercepted = resolve; });
+    let markCompleted!: () => void;
+    const completed = new Promise<void>((resolve) => { markCompleted = resolve; });
+    let release!: () => void;
+    const mayContinue = new Promise<void>((resolve) => { release = resolve; });
+    let captured = false;
+    const handler: Parameters<Page['route']>[1] = async (route) => {
+        if (captured || route.request().method() !== 'POST') {
+            await route.fallback();
+            return;
+        }
+        captured = true;
+        markIntercepted();
+        await mayContinue;
+        const response = await route.fetch();
+        await route.fulfill({ response });
+        markCompleted();
+    };
+    await page.route(mutationUrl, handler);
+    return {
+        intercepted,
+        completed,
+        release,
+        dispose: async () => {
+            release();
+            await page.unroute(mutationUrl, handler);
+        },
+    };
+}
+
+async function fillAndFlushDraft(page: Page, composer: ReturnType<Page['getByTestId']>, value: string): Promise<void> {
+    await waitForDraftMutation(page, async () => {
+        await composer.fill(value);
+        await composer.blur();
+    });
+}
+
+async function readDraft(params: Readonly<{
+    baseUrl: string;
+    token: string;
+    address: DraftAddress;
+}>): Promise<DraftReadResponse> {
+    const response = await fetchJson<DraftReadResponse>(`${params.baseUrl}/v1/account/session-drafts/read`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${params.token}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ address: params.address }),
+        timeoutMs: 20_000,
+    });
+    if (response.status !== 200 || !response.data) {
+        throw new Error(`Failed to read session draft (status=${response.status})`);
+    }
+    return response.data;
+}
+
+function requirePlainDraftDocument(response: DraftReadResponse): DraftDocument {
+    expect(response.status).toBe('present');
+    expect(response.record?.content?.t).toBe('plain');
+    const document = response.record?.content?.v?.document;
+    if (!document) throw new Error('Missing plain draft document');
+    return document;
+}
+
+async function openSecondContext(params: Readonly<{
+    browser: Browser;
+    sourcePage: Page;
+    uiBaseUrl: string;
+    draftId: string;
+    expectedText: string;
+}>): Promise<Readonly<{ context: BrowserContext; page: Page; composer: ReturnType<Page['getByTestId']> }>> {
+    // Copy authenticated localStorage, but deliberately leave IndexedDB behind so
+    // this context discovers the draft from the Account snapshot rather than a
+    // cloned device-local repository cache.
+    const storageState = await params.sourcePage.context().storageState();
+    const context = await params.browser.newContext({ storageState });
+    const page = await context.newPage();
+    const opened = await openNewSessionDraft({ page, uiBaseUrl: params.uiBaseUrl, draftId: params.draftId, expectedText: params.expectedText });
+    return { context, page, composer: opened.composer };
+}
+
+async function selectPermissionMode(page: Page, mode: 'default' | 'yolo'): Promise<void> {
+    const compactTrigger = page.getByTestId('agent-input-permission-chip');
+    const wizardTrigger = page.getByTestId('new-session-permission-dropdown-trigger');
+    const trigger = (await compactTrigger.count()) > 0 ? compactTrigger : wizardTrigger;
+    await expect(trigger).toBeVisible({ timeout: 30_000 });
+    await trigger.click();
+    const option = page.getByTestId(`permission-mode-${mode}`);
+    await expect(option).toBeVisible({ timeout: 30_000 });
+    await option.click();
 }
 
 async function setTextareaScrollTopToEnd(locator: ReturnType<Page['locator']>): Promise<number> {
@@ -158,9 +340,11 @@ async function getTextareaMeasurements(locator: ReturnType<Page['locator']>): Pr
 
 test.describe('ui e2e: session composer draft continuity', () => {
     const suiteDir = run.testDir('session-composer-draft-continuity-suite');
+    const cliHomeDir = resolve(join(suiteDir, 'cli-home'));
 
     let server: StartedServer | null = null;
     let ui: StartedUiWeb | null = null;
+    let daemon: StartedDaemon | null = null;
     let uiBaseUrl: string | null = null;
     let proxyStop: (() => Promise<void>) | null = null;
     let token: string | null = null;
@@ -183,6 +367,7 @@ test.describe('ui e2e: session composer draft continuity', () => {
                 HAPPIER_FEATURE_E2EE__KEYLESS_ACCOUNTS_ENABLED: '1',
                 HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: 'optional',
                 HAPPIER_FEATURE_ENCRYPTION__DEFAULT_ACCOUNT_MODE: 'plain',
+                HAPPIER_FEATURE_SESSIONS_DRAFTS__ENABLED: '1',
 
                 HAPPIER_FEATURE_AUTH_MTLS__ENABLED: '1',
                 HAPPIER_FEATURE_AUTH_MTLS__MODE: 'forwarded',
@@ -217,7 +402,6 @@ test.describe('ui e2e: session composer draft continuity', () => {
             fingerprint: IDENTITY_HEADERS.fingerprint,
         });
         token = auth.token;
-
         sessionA = await createPlainSession({ baseUrl: server.baseUrl, token, title: 'Composer draft continuity A' });
         sessionB = await createPlainSession({ baseUrl: server.baseUrl, token, title: 'Composer draft continuity B' });
 
@@ -238,8 +422,25 @@ test.describe('ui e2e: session composer draft continuity', () => {
         uiBaseUrl = normalizeLoopbackBaseUrl(ui.baseUrl);
     });
 
+    test.beforeEach(async ({ page }) => {
+        test.setTimeout(420_000);
+        if (daemon) return;
+        if (!server || !uiBaseUrl) throw new Error('missing composer continuity server/UI');
+        daemon = await authenticateAndStartDaemon({
+            page,
+            testDir: suiteDir,
+            cliHomeDir,
+            serverUrl: server.baseUrl,
+            uiBaseUrl,
+            createAccount: false,
+            accountReadyTimeoutMs: 180_000,
+            daemonStartupTimeoutMs: 180_000,
+        });
+    });
+
     test.afterAll(async () => {
         test.setTimeout(120_000);
+        await daemon?.stop().catch(() => {});
         await ui?.stop().catch(() => {});
         await proxyStop?.().catch(() => {});
         await server?.stop().catch(() => {});
@@ -279,6 +480,169 @@ test.describe('ui e2e: session composer draft continuity', () => {
             async () => (await getTextareaMeasurements(restoredComposerA)).scrollTop,
             { timeout: 30_000 },
         ).toBeGreaterThan(0);
+    });
+
+    test('keeps stable UUID identities across reload/resume and preserves multiple new-session drafts', async ({ page }) => {
+        test.setTimeout(360_000);
+        if (!uiBaseUrl) throw new Error('missing ui base url');
+
+        const draftAText = `new-session draft A ${run.runId}`;
+        const draftBText = `new-session draft B ${run.runId}`;
+        const draftA = await openNewSessionDraft({ page, uiBaseUrl });
+        await fillAndFlushDraft(page, draftA.composer, draftAText);
+
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await expect(page).toHaveURL(new RegExp(`[?&]draftId=${draftA.draftId}(?:&|$)`), { timeout: 60_000 });
+        await expect(visibleNewSessionComposer(page)).toHaveValue(draftAText, { timeout: 60_000 });
+
+        await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 120_000);
+        const rowA = page.getByTestId(`session-draft-row:new-session:${draftA.draftId}`);
+        await expect(page.getByTestId('session-drafts-section')).toBeVisible({ timeout: 60_000 });
+        await expect(rowA).toBeVisible();
+
+        await rowA.click();
+        await expect(page).toHaveURL(new RegExp(`[?&]draftId=${draftA.draftId}(?:&|$)`), { timeout: 60_000 });
+        await page.getByTestId('new-session-draft-start-another').click();
+        await expect(visibleNewSessionComposer(page)).toBeVisible({ timeout: 60_000 });
+        const draftBId = await expect.poll(
+            () => new URL(page.url()).searchParams.get('draftId'),
+            { timeout: 60_000 },
+        ).toMatch(DRAFT_ID_PATTERN).then(() => new URL(page.url()).searchParams.get('draftId'));
+        if (!draftBId) throw new Error('fresh New session action did not establish a draftId');
+        expect(draftBId).not.toBe(draftA.draftId);
+        // The route parameter updates before the newly keyed composer host has finished replacing
+        // the previous draft. Wait for that semantic handoff so the fill cannot target draft A's
+        // still-visible textarea during the router transition.
+        await expect(visibleNewSessionComposer(page)).toHaveValue('', { timeout: 60_000 });
+        await fillAndFlushDraft(page, visibleNewSessionComposer(page), draftBText);
+
+        await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 120_000);
+        await expect(page.getByTestId(`session-draft-row:new-session:${draftA.draftId}`)).toBeVisible({ timeout: 60_000 });
+        await expect(page.getByTestId(`session-draft-row:new-session:${draftBId}`)).toBeVisible();
+
+        await rowA.click();
+        await expect(page).toHaveURL(new RegExp(`[?&]draftId=${draftA.draftId}(?:&|$)`), { timeout: 60_000 });
+        await expect(visibleNewSessionComposer(page)).toHaveValue(draftAText, { timeout: 60_000 });
+    });
+
+    test('projects an existing-session draft and preserves edits made while the captured enqueue is in flight', async ({ page }) => {
+        test.setTimeout(360_000);
+        if (!uiBaseUrl || !sessionA) throw new Error('missing existing-session fixtures');
+
+        const submitted = `captured send ${run.runId}`;
+        const newer = `newer edit during send ${run.runId}`;
+        const composer = await openSession({ page, uiBaseUrl, session: sessionA });
+        await fillAndFlushDraft(page, composer, submitted);
+
+        await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 120_000);
+        await expect(page.getByTestId(`session-list-draft-indicator:${sessionA.id}`)).toBeVisible({ timeout: 60_000 });
+
+        const reopened = await openSession({ page, uiBaseUrl, session: sessionA });
+        await expect(reopened).toHaveValue(submitted);
+        const send = page.getByTestId('session-composer-send');
+        await expect(send).toBeEnabled({ timeout: 30_000 });
+
+        let releaseResponse!: () => void;
+        const mayRespond = new Promise<void>((resolve) => { releaseResponse = resolve; });
+        let didIntercept = false;
+        const pendingEnqueueUrl = `**/v2/sessions/${sessionA.id}/pending`;
+        await page.route(pendingEnqueueUrl, async (route) => {
+            if (route.request().method() !== 'POST') {
+                await route.fallback();
+                return;
+            }
+            didIntercept = true;
+            const response = await route.fetch();
+            await mayRespond;
+            await route.fulfill({ response });
+        });
+        await send.click();
+        await expect.poll(() => didIntercept, { timeout: 30_000 }).toBe(true);
+        await reopened.fill(newer);
+        releaseResponse();
+        await expect(reopened).toHaveValue(newer, { timeout: 60_000 });
+        await page.unroute(pendingEnqueueUrl);
+    });
+
+    test('rebases distinct fields, exposes same-field conflict, and does not resurrect a deleted draft across two contexts', async ({ page, browser }) => {
+        test.setTimeout(420_000);
+        if (!server || !token || !uiBaseUrl) throw new Error('missing synchronized draft fixtures');
+
+        const seed = `two-context base ${run.runId}`;
+        const clientA = await openNewSessionDraft({ page, uiBaseUrl });
+        await fillAndFlushDraft(page, clientA.composer, seed);
+        const clientB = await openSecondContext({ browser, sourcePage: page, uiBaseUrl, draftId: clientA.draftId, expectedText: seed });
+        try {
+            await expect(clientB.composer).toHaveValue(seed, { timeout: 60_000 });
+
+            const distinctMutation = await holdNextDraftMutation(clientB.page);
+            await clientB.composer.fill(`concurrent distinct text ${run.runId}`);
+            await clientB.composer.blur();
+            await distinctMutation.intercepted;
+            await waitForDraftMutation(page, () => selectPermissionMode(page, 'yolo'));
+            distinctMutation.release();
+            await distinctMutation.completed;
+            await distinctMutation.dispose();
+
+            await expect.poll(async () => {
+                const document = requirePlainDraftDocument(await readDraft({
+                    baseUrl: server!.baseUrl,
+                    token: token!,
+                    address: { kind: 'newSession', draftId: clientA.draftId },
+                }));
+                return {
+                    text: document.composer.text.value,
+                    permissionMode: document.target.authoring?.permissionMode?.value,
+                };
+            }, { timeout: 90_000 }).toEqual({
+                text: `concurrent distinct text ${run.runId}`,
+                permissionMode: 'yolo',
+            });
+            await expect(clientA.composer).toHaveValue(`concurrent distinct text ${run.runId}`, { timeout: 60_000 });
+            await expect(clientB.composer).toHaveValue(`concurrent distinct text ${run.runId}`, { timeout: 60_000 });
+
+            const conflictMutation = await holdNextDraftMutation(clientB.page);
+            await clientB.composer.fill(`client B conflict ${run.runId}`);
+            await clientB.composer.blur();
+            await conflictMutation.intercepted;
+            await fillAndFlushDraft(page, clientA.composer, `client A conflict ${run.runId}`);
+            conflictMutation.release();
+            await conflictMutation.completed;
+            await conflictMutation.dispose();
+
+            const conflict = clientB.page.getByTestId('session-draft-conflict:composer.text');
+            await expect(conflict).toBeVisible({ timeout: 90_000 });
+            await clientB.page.getByTestId('session-draft-conflict-action:composer.text:use-synced').click();
+            await expect(clientB.composer).toHaveValue(`client A conflict ${run.runId}`, { timeout: 60_000 });
+
+            const staleMutation = await holdNextDraftMutation(clientB.page);
+            await clientB.composer.fill(`stale edit must not resurrect ${run.runId}`);
+            await clientB.composer.blur();
+            await staleMutation.intercepted;
+            await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 120_000);
+            await page.getByTestId(`session-draft-delete:new-session:${clientA.draftId}`).click();
+            await expect(page.getByTestId('web-modal-confirm')).toBeVisible({ timeout: 30_000 });
+            await page.getByTestId('web-modal-confirm').click();
+            await expect(page.getByTestId(`session-draft-row:new-session:${clientA.draftId}`)).toHaveCount(0, { timeout: 60_000 });
+            const deleted = await readDraft({
+                baseUrl: server.baseUrl,
+                token,
+                address: { kind: 'newSession', draftId: clientA.draftId },
+            });
+            expect(deleted.status).toBe('deleted');
+            const tombstoneRevision = deleted.record?.revision;
+
+            staleMutation.release();
+            await staleMutation.completed;
+            await staleMutation.dispose();
+            await expect.poll(async () => (await readDraft({
+                baseUrl: server!.baseUrl,
+                token: token!,
+                address: { kind: 'newSession', draftId: clientA.draftId },
+            })).record?.revision, { timeout: 60_000 }).toBe(tombstoneRevision);
+        } finally {
+            await clientB.context.close();
+        }
     });
 
     test('cycles only current-session user messages with repeated ArrowUp in per-session history scope', async ({ page }) => {

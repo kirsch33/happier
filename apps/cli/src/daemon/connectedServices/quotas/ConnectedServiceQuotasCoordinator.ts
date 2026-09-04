@@ -225,6 +225,7 @@ export type ConnectedServiceGroupQuotaProbeResult = Readonly<{
 }>;
 
 export const DEFAULT_CONNECTED_SERVICE_QUOTA_FETCH_TIMEOUT_MS = 15_000;
+const CONNECTED_SERVICE_GROUP_QUOTA_PROBE_MAX_CONCURRENCY = 4;
 
 export class ConnectedServiceQuotasCoordinator {
   private static readonly MAX_STARTUP_CURRENT_SOURCE_REFRESHES = 256;
@@ -285,6 +286,7 @@ export class ConnectedServiceQuotasCoordinator {
   private readonly recoveryCreditConsumeResultsByKey = new Map<string, ConnectedServiceQuotaRecoveryCreditConsumeResult>();
   private readonly recoveryCreditConsumeInFlightByKey = new Map<string, Promise<ConnectedServiceQuotaRecoveryCreditConsumeResult>>();
   private readonly startupCurrentSourceRefreshByKey = new Map<string, ConnectedServiceUsageSourceV1>();
+  private readonly discoveredProfileIdsByServiceId = new Map<ConnectedServiceId, ReadonlySet<string>>();
   private lastDiscoveryAt = 0;
 
   public constructor(params: Readonly<{
@@ -2845,7 +2847,7 @@ export class ConnectedServiceQuotasCoordinator {
     const profileIds = Array.from(new Set(input.profileIds
       .map((profileId) => String(profileId ?? '').trim())
       .filter((profileId) => profileId.length > 0)));
-    const completedProfileIds: string[] = [];
+    const completedProfileIdSet = new Set<string>();
     const deadlineAtMs = typeof input.deadlineAtMs === 'number' && Number.isFinite(input.deadlineAtMs)
       ? Math.max(0, Math.trunc(input.deadlineAtMs))
       : null;
@@ -2867,14 +2869,16 @@ export class ConnectedServiceQuotasCoordinator {
     ): ConnectedServiceGroupQuotaProbeResult => ({
       status,
       requestedProfileCount: profileIds.length,
-      completedProfileCount: completedProfileIds.length,
-      completedProfileIds: [...completedProfileIds],
+      completedProfileCount: completedProfileIdSet.size,
+      completedProfileIds: profileIds.filter((profileId) => completedProfileIdSet.has(profileId)),
       ...(reason ? { reason } : {}),
     });
     let outcome: ConnectedServiceGroupQuotaProbeResult = result('complete');
+    let activeProfileId: string | null = null;
+    const runtimeQuotaSnapshots = this.runtimeQuotaSnapshots;
     try {
       if (!groupId || profileIds.length === 0) return outcome;
-      if (this.checkQuotaWorkGate('probe_group').status !== 'open' || !this.runtimeQuotaSnapshots) {
+      if (this.checkQuotaWorkGate('probe_group').status !== 'open' || !runtimeQuotaSnapshots) {
         outcome = result('incomplete', 'probe_unavailable');
         return outcome;
       }
@@ -2909,16 +2913,14 @@ export class ConnectedServiceQuotasCoordinator {
         groupId,
         signal: deadlineAtMs === null ? undefined : deadlineController.signal,
       });
+      activeProfileId = group?.activeProfileId?.trim() || null;
       if (deadlineExceeded()) {
         outcome = result('incomplete', 'deadline_exceeded');
         return outcome;
       }
 
-      for (const profileId of profileIds) {
-        if (deadlineExceeded()) {
-          outcome = result('incomplete', 'deadline_exceeded');
-          return outcome;
-        }
+      const probeProfile = async (profileId: string): Promise<void> => {
+        if (deadlineExceeded()) return;
         let expectedCredentialRevision: ConnectedServiceCredentialRevisionV1 | null = null;
         try {
           // Lease acquisition is a mutation. Do not start it after expiry and always await it once started.
@@ -2927,10 +2929,7 @@ export class ConnectedServiceQuotasCoordinator {
             profileId,
             signal: deadlineAtMs === null ? undefined : deadlineController.signal,
           });
-          if (deadlineExceeded()) {
-            outcome = result('incomplete', 'deadline_exceeded');
-            return outcome;
-          }
+          if (deadlineExceeded()) return;
           if (lease.type === 'contended') {
             const observedSnapshot = await this.waitForContendedQuotaFetch({
               accountMode,
@@ -2942,22 +2941,16 @@ export class ConnectedServiceQuotasCoordinator {
               leaseUntil: lease.leaseUntil,
               signal: deadlineAtMs === null ? undefined : deadlineController.signal,
             });
-            if (deadlineExceeded()) {
-              outcome = result('incomplete', 'deadline_exceeded');
-              return outcome;
-            }
+            if (deadlineExceeded()) return;
             if (observedSnapshot) {
-              this.runtimeQuotaSnapshots.recordSnapshot({
+              runtimeQuotaSnapshots.recordSnapshot({
                 serviceId,
                 groupId,
                 profileId,
                 groupGeneration: group?.generation ?? null,
                 snapshot: observedSnapshot,
               });
-              if (deadlineExceeded()) {
-                outcome = result('incomplete', 'deadline_exceeded');
-                return outcome;
-              }
+              if (deadlineExceeded()) return;
               await this.recordFetchedQuotaSnapshotAsAccountUsage({
                 serviceId,
                 profileId,
@@ -2967,10 +2960,7 @@ export class ConnectedServiceQuotasCoordinator {
                 snapshot: observedSnapshot,
                 now,
               });
-              if (deadlineExceeded()) {
-                outcome = result('incomplete', 'deadline_exceeded');
-                return outcome;
-              }
+              if (deadlineExceeded()) return;
               await this.maybeClearStaleMemberLimitersForGroupQuotaSnapshot({
                 serviceId,
                 groupId,
@@ -2978,13 +2968,10 @@ export class ConnectedServiceQuotasCoordinator {
                 now,
                 signal: deadlineAtMs === null ? undefined : deadlineController.signal,
               });
-              if (deadlineExceeded()) {
-                outcome = result('incomplete', 'deadline_exceeded');
-                return outcome;
-              }
+              if (deadlineExceeded()) return;
             }
-            completedProfileIds.push(profileId);
-            continue;
+            completedProfileIdSet.add(profileId);
+            return;
           }
 
           const credential = await this.readCredentialForQuota({
@@ -2995,13 +2982,10 @@ export class ConnectedServiceQuotasCoordinator {
             signal: deadlineAtMs === null ? undefined : deadlineController.signal,
           });
           expectedCredentialRevision = credential.credentialRevision;
-          if (deadlineExceeded()) {
-            outcome = result('incomplete', 'deadline_exceeded');
-            return outcome;
-          }
+          if (deadlineExceeded()) return;
           if (!credential.record) {
-            completedProfileIds.push(profileId);
-            continue;
+            completedProfileIdSet.add(profileId);
+            return;
           }
           const raced = await this.fetchQuotaSnapshot({
             fetcher,
@@ -3011,26 +2995,20 @@ export class ConnectedServiceQuotasCoordinator {
             now,
             signal: deadlineAtMs === null ? undefined : deadlineController.signal,
           });
-          if (deadlineExceeded()) {
-            outcome = result('incomplete', 'deadline_exceeded');
-            return outcome;
-          }
+          if (deadlineExceeded()) return;
           if (raced.type === 'timeout' || !raced.snapshot) {
-            completedProfileIds.push(profileId);
-            continue;
+            completedProfileIdSet.add(profileId);
+            return;
           }
           const snapshot = raced.snapshot;
-          this.runtimeQuotaSnapshots.recordSnapshot({
+          runtimeQuotaSnapshots.recordSnapshot({
             serviceId,
             groupId,
             profileId,
             groupGeneration: group?.generation ?? null,
             snapshot,
           });
-          if (deadlineExceeded()) {
-            outcome = result('incomplete', 'deadline_exceeded');
-            return outcome;
-          }
+          if (deadlineExceeded()) return;
           await this.recordFetchedQuotaSnapshotAsAccountUsage({
             serviceId,
             profileId,
@@ -3041,10 +3019,7 @@ export class ConnectedServiceQuotasCoordinator {
             snapshot,
             now,
           });
-          if (deadlineExceeded()) {
-            outcome = result('incomplete', 'deadline_exceeded');
-            return outcome;
-          }
+          if (deadlineExceeded()) return;
           await this.maybeClearStaleMemberLimitersForGroupQuotaSnapshot({
             serviceId,
             groupId,
@@ -3052,16 +3027,10 @@ export class ConnectedServiceQuotasCoordinator {
             now,
             signal: deadlineAtMs === null ? undefined : deadlineController.signal,
           });
-          if (deadlineExceeded()) {
-            outcome = result('incomplete', 'deadline_exceeded');
-            return outcome;
-          }
-          completedProfileIds.push(profileId);
+          if (deadlineExceeded()) return;
+          completedProfileIdSet.add(profileId);
         } catch (error) {
-          if (deadlineExceeded()) {
-            outcome = result('incomplete', 'deadline_exceeded');
-            return outcome;
-          }
+          if (deadlineExceeded()) return;
           await this.persistCredentialHealthForQuotaFailure({
             serviceId,
             profileId,
@@ -3076,21 +3045,55 @@ export class ConnectedServiceQuotasCoordinator {
             retryAfterMs: readQuotaRetryAfterMs(error),
             retryAfterBackoffMinMs: fetcher.pollPolicy?.retryAfterBackoffMinMs,
           });
-          completedProfileIds.push(profileId);
+          completedProfileIdSet.add(profileId);
         }
+      };
+
+      let nextProfileIndex = 0;
+      const worker = async (): Promise<void> => {
+        while (!deadlineExceeded()) {
+          const profileIndex = nextProfileIndex;
+          nextProfileIndex += 1;
+          const profileId = profileIds[profileIndex];
+          if (!profileId) return;
+          await probeProfile(profileId);
+        }
+      };
+      const workerCount = Math.min(
+        CONNECTED_SERVICE_GROUP_QUOTA_PROBE_MAX_CONCURRENCY,
+        profileIds.length,
+      );
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+      if (deadlineExceeded() || completedProfileIdSet.size !== profileIds.length) {
+        outcome = result('incomplete', 'deadline_exceeded');
+        return outcome;
       }
       outcome = result('complete');
       return outcome;
     } finally {
       if (deadlineTimer) clearTimeout(deadlineTimer);
+      const activeQuotaSnapshot = activeProfileId && runtimeQuotaSnapshots
+        ? runtimeQuotaSnapshots.buildMemberStates({
+            serviceId,
+            groupId,
+            capturedAtMs: Math.max(0, Math.trunc(this.now())),
+          }).get(activeProfileId)?.quotaSnapshot ?? null
+        : null;
       this.recordDiagnostic?.({
         event: 'quota_work_requested',
         phase: 'probe_group',
         reason: outcome.status === 'complete' ? 'complete' : outcome.reason ?? 'incomplete',
         serviceId,
         groupId,
+        ...(activeProfileId ? { activeProfileId, sourceProfileId: activeProfileId } : {}),
+        ...(typeof activeQuotaSnapshot?.effectiveRemainingPercent === 'number'
+          ? { sourceRemainingPercent: activeQuotaSnapshot.effectiveRemainingPercent }
+          : {}),
         targetCount: profileIds.length,
         completedTargetCount: outcome.completedProfileCount,
+        ...(outcome.status === 'incomplete'
+          ? { incompleteProfileIds: profileIds.filter((profileId) => !completedProfileIdSet.has(profileId)) }
+          : {}),
         durationMs: Math.max(0, Date.now() - startedAtMs),
         probeOutcome: outcome.status,
       });
@@ -3725,6 +3728,7 @@ export class ConnectedServiceQuotasCoordinator {
     const activeGroupTargetsByServiceId = new Map<ConnectedServiceId, ActiveGroupQuotaSwitchTarget[]>();
     const pendingSoftSwitchTargets: ActiveGroupQuotaSwitchTarget[] = [];
     const profileHealthByServiceId: ProfileHealthByServiceId = new Map();
+    const profileHealthLoadFailures = new Set<ConnectedServiceId>();
     const authGroupByKey = new Map<string, Promise<ConnectedServiceAuthGroupV1 | null>>();
     const loadProfileHealth = async (serviceId: ConnectedServiceId): Promise<Map<string, ConnectedServiceCredentialHealthStatusV1>> => {
       const existing = profileHealthByServiceId.get(serviceId);
@@ -3747,6 +3751,7 @@ export class ConnectedServiceQuotasCoordinator {
         profileHealthByServiceId.set(serviceId, byProfileId);
         return byProfileId;
       } catch {
+        profileHealthLoadFailures.add(serviceId);
         const empty = new Map<string, ConnectedServiceCredentialHealthStatusV1>();
         profileHealthByServiceId.set(serviceId, empty);
         return empty;
@@ -3887,24 +3892,30 @@ export class ConnectedServiceQuotasCoordinator {
     if (this.discoveryEnabled && typeof this.api.listConnectedServiceProfiles === 'function') {
       const discoveryDue = this.lastDiscoveryAt <= 0 || now - this.lastDiscoveryAt >= this.discoveryIntervalMs;
       if (discoveryDue) {
-        this.lastDiscoveryAt = now;
+        let discoverySucceeded = true;
         for (const serviceId of this.quotaFetchersByServiceId.keys()) {
-          try {
-            const profiles = await loadProfileHealth(serviceId);
-            for (const [profileId, status] of profiles.entries()) {
-              if (!isConnectedServiceCredentialHealthStatusUsable(status)) continue;
-              if (!profileId) continue;
-              const existing = bindingsByServiceId.get(serviceId);
-              if (existing) {
-                existing.add(profileId);
-              } else {
-                bindingsByServiceId.set(serviceId, new Set([profileId]));
-              }
-            }
-          } catch {
-            // Best-effort only.
+          const profiles = await loadProfileHealth(serviceId);
+          if (profileHealthLoadFailures.has(serviceId)) {
+            discoverySucceeded = false;
             continue;
           }
+          const usableProfileIds = new Set<string>();
+          for (const [profileId, status] of profiles.entries()) {
+            if (!isConnectedServiceCredentialHealthStatusUsable(status)) continue;
+            if (!profileId) continue;
+            usableProfileIds.add(profileId);
+          }
+          this.discoveredProfileIdsByServiceId.set(serviceId, usableProfileIds);
+        }
+        if (discoverySucceeded) this.lastDiscoveryAt = now;
+      }
+
+      for (const [serviceId, profileIds] of this.discoveredProfileIdsByServiceId.entries()) {
+        const existing = bindingsByServiceId.get(serviceId);
+        if (existing) {
+          for (const profileId of profileIds) existing.add(profileId);
+        } else if (profileIds.size > 0) {
+          bindingsByServiceId.set(serviceId, new Set(profileIds));
         }
       }
     }

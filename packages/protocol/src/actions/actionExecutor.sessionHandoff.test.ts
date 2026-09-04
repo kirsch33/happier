@@ -71,7 +71,7 @@ describe('createActionExecutor (session.handoff)', () => {
     const result = await executor.execute(
       'session.handoff',
       { targetMachineId: 'machine_2' },
-      { defaultSessionId: 'sess_1' },
+      { defaultSessionId: 'sess_1', actionRequestId: 'handoff-request-1' },
     );
 
     expect(result.ok).toBe(true);
@@ -79,6 +79,7 @@ describe('createActionExecutor (session.handoff)', () => {
       sessionId: 'sess_1',
       targetMachineId: 'machine_2',
       serverId: 'server_a',
+      requestId: 'handoff-request-1',
     });
   });
 
@@ -94,6 +95,7 @@ describe('createActionExecutor (session.handoff)', () => {
       'session.handoff',
       {
         targetMachineId: 'machine_2',
+        targetPath: '/home/guest/workspace',
         targetSessionStorageMode: 'persisted',
         workspaceTransfer: {
           enabled: true,
@@ -109,6 +111,7 @@ describe('createActionExecutor (session.handoff)', () => {
     expect(sessionHandoffStart).toHaveBeenCalledWith({
       sessionId: 'sess_1',
       targetMachineId: 'machine_2',
+      targetPath: '/home/guest/workspace',
       targetSessionStorageMode: 'persisted',
       workspaceTransfer: {
         enabled: true,

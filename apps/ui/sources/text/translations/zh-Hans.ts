@@ -740,6 +740,17 @@ export const zhHans: TranslationStructure = {
     permissions: "权限",
     unreadSessions: "未读会话",
     updates: "动态",
+    actionOperations: {
+      sections: { inProgress: "进行中", needsAttention: "需要处理", recent: "最近" },
+      clearRecent: "清除最近记录",
+      status: { accepted: "已接受", running: "运行中", succeeded: "已成功", failed: "失败", cancelled: "已取消", reconnecting: "正在重新连接", unavailable: "状态不可用", setupNeedsAttention: "会话已创建；设置需要处理" },
+      empty: "长时间运行的操作会显示在这里。",
+      openHint: "打开操作详情",
+      stop: "停止",
+      dismiss: "隐藏",
+      stopFailed: "无法停止此操作。它可能仍在运行。",
+      detail: { status: "状态", progress: "进度", error: "错误", warning: "警告", result: "结果", recoveryReference: "恢复引用" },
+    },
   },
 
   approvals: {
@@ -1773,13 +1784,14 @@ export const zhHans: TranslationStructure = {
         backendsSubtitle: "已配置后端和自定义启动目标。",
       },
       enableInjection: {
-        title: "启用指引注入",
+        title: "Happier 运行指令",
+        subtitle: "关闭后，编码代理的系统提示词中将移除原生优先路由说明和 Happier 运行机制。",
       },
       characterBudget: {
-        title: "字符上限",
+        title: "自定义规则字符上限",
         subtitle: ({ value }: { value: string }) => `${value} 个字符`,
-        promptTitle: "字符上限",
-        promptBody: "注入到系统提示词中的最大字符数。",
+        promptTitle: "自定义规则字符上限",
+        promptBody: "系统提示词中自定义运行规则的最大字符数。",
       },
       rules: {
         groupTitle: "指引规则",
@@ -4187,8 +4199,8 @@ export const zhHans: TranslationStructure = {
     showLineNumbersInDiffsDescription: "在代码差异中显示行号",
     showLineNumbersInToolViews: "在工具视图中显示行号",
     showLineNumbersInToolViewsDescription: "在工具视图差异中显示行号",
-    wrapLinesInDiffs: "在差异中换行",
-    wrapLinesInDiffsDescription: "在差异视图中换行显示长行而不是水平滚动",
+    wrapLinesInDiffs: "在代码视图中自动换行",
+    wrapLinesInDiffsDescription: "在代码预览和编辑器中自动换行显示长行，而不是水平滚动",
     alwaysShowContextSize: "始终显示上下文大小",
     alwaysShowContextSizeDescription: "即使未接近限制时也显示上下文使用情况",
     agentInputActionBarLayout: "输入操作栏",
@@ -4635,6 +4647,8 @@ export const zhHans: TranslationStructure = {
     daemonRpcUnavailableBody:
       "Happier 无法连接到此设备上的守护进程。它可能离线、仍在启动，或与服务器断开连接。",
     launchStillPendingTitle: "会话仍在启动",
+    createdWithSetupIssueTitle: "会话已创建",
+    createdWithSetupIssueBody: "会话已创建，但初始设置未完成。你可以在此屏幕重试，而不会创建另一个会话。",
     launchStillPendingBody:
       "Happier 尚未确认新会话。启动请求仍已保存。请重试以继续同一次启动，不会创建重复会话。",
     connectedServiceSwitchUnavailable: {
@@ -5092,10 +5106,15 @@ export const zhHans: TranslationStructure = {
 	    },
 	    resuming: "正在恢复...",
 	    resumeFailed: "恢复会话失败",
-	    pendingQueuedResumeFailedTitle: "消息已排队",
-	    pendingQueuedResumeFailedBody:
-	      "你的消息已保存到待处理队列，但 Happier 无法恢复此会话。请重试以启动它。",
-	    composerBanners: {
+        pendingActivation: {
+            waiting_offline: { title: '消息已加入此机器的队列', body: '这台机器及其守护进程恢复在线后，消息将被处理。' },
+            waiting: { title: '等待恢复', body: '守护进程恢复此会话时，你的消息会安全地保留在队列中。' },
+            failed: { title: '无法恢复会话', body: '你的消息仍安全地保留在队列中。准备好后请重试。' },
+            queued: { title: '消息已加入队列', body: '此非活动会话有一条排队消息。准备好后请恢复会话。' },
+            queued_offline: { title: '消息等待手动恢复', body: '在你恢复此会话之前，消息会一直留在队列中。' },
+            actions: { retry: '重试', resume: '恢复', process_when_online: '在线后处理', keepQueued: '保留在队列中', autoResumeOptions: '自动恢复选项' },
+        },
+        composerBanners: {
             showBannerAction: '显示横幅',
             hideBannerAction: '隐藏横幅',
 	    },
@@ -5116,6 +5135,18 @@ export const zhHans: TranslationStructure = {
 	      errorTitle: "运行器重启不可用",
 	      errorBody: "守护进程无法重启此会话运行器。此会话仍可使用。",
 	    },
+	    mcpRestartRequired: {
+	        title: "重启以应用 MCP 服务器更改",
+	        body: "MCP 服务器会在会话启动时应用。请重启此运行器以使用更新后的选择。",
+	        failureBody: "Happier 无法重启此运行器。你的 MCP 选择已保存，并会在下次启动时应用。",
+	        restartAction: "重启会话",
+	        restartPendingAction: "正在重启…",
+	        badgeLabel: "MCP 更改",
+	        showBannerAction: "显示 MCP 重启提示",
+	        hideBannerAction: "隐藏 MCP 重启提示",
+	        errorTitle: "无法重启会话",
+	        errorBody: "无法重启运行器。你的 MCP 选择已保存，并会在下次会话启动时应用。",
+	    },
 	    invalidLinkTitle: "无效的会话链接",
 	    invalidLinkDescription: "会话链接缺失或无效。请检查 URL 并重试。",
 	    resumeSupportNoteChecking:
@@ -5135,7 +5166,7 @@ export const zhHans: TranslationStructure = {
       `此会话已结束，且由于 ${provider} 不支持在此处恢复其上下文，因此无法恢复。请开始新会话以继续。`,
     machineOfflineNoticeTitle: "机器离线",
       machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-        `“${machine}” 处于离线状态，因此 Happier 目前无法恢复此会话。请将机器恢复在线后继续。`,
+        `“${machine}” 处于离线状态。你现在可以将消息加入队列；机器恢复在线后，Happier 将继续处理。`,
     machineOfflineCannotResume: "机器离线。请将其恢复在线后再恢复此会话。",
       openRuns: "打开会话运行",
       openAutomations: "打开会话自动化",
@@ -5881,6 +5912,12 @@ export const zhHans: TranslationStructure = {
     newTagConfirm: "添加",
   },
 
+  sessionDrafts: {
+    sectionTitle: '草稿', badge: '草稿', untitled: '未命名草稿', continueEditing: '继续编辑', startAnother: '开始另一份',
+    status: { offline: '离线', syncing: '同步中', conflict: '冲突', machineUnavailable: '机器不可用', attachmentNeedsAttention: '附件需要处理', startInterrupted: '启动中断' },
+    new: { action: '新建草稿' }, delete: { action: '删除草稿', confirmTitle: '删除草稿？', confirmDescription: '此草稿将从你的设备中移除。' },
+    conflict: { title: '草稿冲突', description: '此字段已在另一台设备上更改。', mine: '此设备', synced: '已同步', useSynced: '使用同步版本', keepDevice: '保留设备版本', copyMine: '复制我的版本', copied: '已复制', copyFailed: '无法复制', field: { text: '文本', mentions: '提及', attachments: '附件', recipient: '接收者', agentContinuation: '代理延续', executionRunDelivery: '运行交付' } },
+  },
   sessionsList: {
     serverHeader: ({ server }: { server: string }) => `服务器：${server}`,
     storagePersistedTab: "Happier",
@@ -5996,6 +6033,7 @@ export const zhHans: TranslationStructure = {
     browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} connected services`,
     browseSourceClaudeDefault: "默认 Claude 配置",
     browseSourceOpenCodeDefault: "默认 OpenCode 服务器",
+    browseSourcePiDefault: "默认 Pi 代理目录",
     browseCandidates: "可用会话",
     browseNoMachines: "尚无可用于直连会话的机器。",
     browseNoCandidates: "未找到此机器和提供方对应的会话。",
@@ -6105,7 +6143,8 @@ export const zhHans: TranslationStructure = {
     viewSessionLogTitle: "查看会话日志",
     viewSessionLogSubtitle: "打开此会话的实时日志尾部",
     pinSession: "置顶会话",
-    unpinSession: "取消置顶",
+        unpinSession: "取消置顶",
+        pinLimitExceeded: ({ count }: { count: number }) => `最多可置顶 ${count.toLocaleString()} 个会话。请取消置顶另一个会话后重试。`,
     copyResumeCommand: "复制恢复命令",
     resumeCommand: ({ sessionId }: { sessionId: string }) => `happier resume ${sessionId}`,
     viewMachine: "查看设备",
@@ -7339,6 +7378,14 @@ export const zhHans: TranslationStructure = {
         runClass: "运行类别",
         ioMode: "I/O 模式",
       },
+      launchOrigin: {
+        crossSession: ({ sessionId }: { sessionId: string }) => `由会话 ${sessionId} 启动`,
+        externalCli: "由 CLI 从外部启动",
+        externalMcp: "通过 MCP 从外部启动",
+        externalAction: "通过 Happier 操作从外部启动",
+        externalUnknown: "从外部启动（来源未知）",
+        legacyUnknown: "启动来源未知",
+      },
       timestamps: {
         started: "开始",
         finished: "完成",
@@ -7510,6 +7557,14 @@ export const zhHans: TranslationStructure = {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: '新会话草稿',
+        footer: '选择“新会话”是继续此设备上的草稿，还是打开新草稿。',
+        resumeTitle: '继续上一个草稿',
+        resumeSubtitle: '继续在此设备上通过“新会话”开始的草稿。',
+        freshTitle: '始终重新开始',
+        freshSubtitle: '每次选择“新会话”时都打开一个新草稿。',
+    },
 	    sessionList: {
 	        title: '会话列表',
 	        footer: '自定义会话列表每行显示的内容。',
@@ -7698,6 +7753,16 @@ settingsSession: {
         title: '高级',
     },
     messageSending: {
+      inactiveResumePolicyTitle: "发送后自动恢复",
+      inactiveResumePolicySubtitle: "选择向非活动会话发送消息后 Happier 应执行的操作。",
+      inactiveResumePolicy: {
+        whenAvailableTitle: "立即或机器恢复时",
+        whenAvailableSubtitle: "可连接时立即恢复；否则在守护进程重新连接后处理。",
+        onlineOnlyTitle: "仅当机器在线时",
+        onlineOnlySubtitle: "发送时只尝试一次。若不可用，则将消息保留在队列中。",
+        manualTitle: "永不自动恢复",
+        manualSubtitle: "始终将消息保留在队列中，直到你恢复会话。",
+      },
       title: "消息发送",
       footer:
         "控制在代理运行时你发送消息会发生什么。",
@@ -8083,6 +8148,9 @@ settingsSession: {
       wizardColumnsTitle: "双列布局",
       wizardColumnsEnabledSubtitle: "在宽屏上并排显示相关选择器。",
       wizardColumnsDisabledSubtitle: "将所有向导选择器堆叠在一列中。",
+      defaultWorktreeTitle: "为新会话创建 worktree",
+      defaultWorktreeEnabledSubtitle: "在新的 worktree 中启动每个新的 Git 会话。",
+      defaultWorktreeDisabledSubtitle: "在所选文件夹中启动新的 Git 会话。",
       wizardPresentationTitle: "向导选择器布局",
       wizardPresentationFooter:
         "Auto 会将短区段保留为列表，并将长区段切换为可搜索下拉菜单。",

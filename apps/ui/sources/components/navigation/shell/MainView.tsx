@@ -32,6 +32,7 @@ import { t } from '@/text';
 import { isUsingCustomServer } from '@/sync/domains/server/serverConfig';
 import { trackFriendsSearch } from '@/track';
 import { ConnectionStatusControl } from '@/components/navigation/ConnectionStatusControl';
+import { ActionOperationActivityButton } from '@/components/inbox/actionOperations/ActionOperationActivityButton';
 import { useFriendsEnabled } from '@/hooks/server/useFriendsEnabled';
 import { useFriendsIdentityReadiness } from '@/hooks/server/useFriendsIdentityReadiness';
 import { useAutomationsSupport } from '@/hooks/server/useAutomationsSupport';
@@ -42,6 +43,10 @@ import { Text } from '@/components/ui/text/Text';
 import { getFeatureBuildPolicyDecision } from '@/sync/domains/features/featureBuildPolicy';
 import type { FeatureId } from '@happier-dev/protocol';
 import { Icon } from '@/components/ui/icons/Icon';
+import {
+    shouldForceFreshNewSessionEntryFromPressEvent,
+    useResolveNewSessionOrdinaryEntryRoute,
+} from '@/components/sessions/new/navigation/newSessionOrdinaryEntryRoute';
 
 
 interface MainViewProps {
@@ -198,16 +203,24 @@ const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
 // Header right button - varies by tab
 const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => {
     const router = useRouter();
+    const resolveNewSessionOrdinaryEntryRoute = useResolveNewSessionOrdinaryEntryRoute();
     const { theme } = useUnistyles();
     const isCustomServer = isUsingCustomServer();
     const friendsIdentityReadiness = useFriendsIdentityReadiness();
     const friendsIdentityReady = friendsIdentityReadiness.isReady;
     const automationsSupport = useAutomationsSupport();
     const showAutomations = automationsSupport?.enabled !== false;
+    const handleNewSession = React.useCallback((event?: unknown) => {
+        const { draftId, draftOrigin } = resolveNewSessionOrdinaryEntryRoute({
+            forceFresh: shouldForceFreshNewSessionEntryFromPressEvent(event),
+        });
+        router.push({ pathname: '/new', params: { draftId, draftOrigin } });
+    }, [resolveNewSessionOrdinaryEntryRoute, router]);
 
     if (activeTab === 'sessions') {
         return (
             <View style={styles.headerButtonsRow}>
+                <ActionOperationActivityButton testID="main-header-action-operations" />
                 {showAutomations ? (
                     <Pressable
                         onPress={() => router.push('/automations')}
@@ -219,7 +232,7 @@ const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
                 ) : null}
                 <Pressable
                     testID="main-header-start-new-session"
-                    onPress={() => router.push('/new')}
+                    onPress={handleNewSession}
                     hitSlop={15}
                     style={styles.headerButton}
                 >
@@ -231,38 +244,44 @@ const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
 
     if (activeTab === 'friends') {
         return (
-            <Pressable
-                onPress={() => {
-                    trackFriendsSearch();
-                    router.push('/friends/search');
-                }}
-                hitSlop={15}
-                style={[styles.headerButton, { opacity: friendsIdentityReady ? 1 : 0.5 }]}
-                disabled={!friendsIdentityReady}
-                accessibilityState={{ disabled: !friendsIdentityReady }}
-            >
-                <Icon name="user-plus" size={24} color={theme.colors.chrome.header.foreground} />
-            </Pressable>
+            <View style={styles.headerButtonsRow}>
+                <ActionOperationActivityButton testID="main-header-action-operations" />
+                <Pressable
+                    onPress={() => {
+                        trackFriendsSearch();
+                        router.push('/friends/search');
+                    }}
+                    hitSlop={15}
+                    style={[styles.headerButton, { opacity: friendsIdentityReady ? 1 : 0.5 }]}
+                    disabled={!friendsIdentityReady}
+                    accessibilityState={{ disabled: !friendsIdentityReady }}
+                >
+                    <Icon name="user-plus" size={24} color={theme.colors.chrome.header.foreground} />
+                </Pressable>
+            </View>
         );
     }
 
     if (activeTab === 'inbox') {
-        return <View style={styles.headerButton} />;
+        return <ActionOperationActivityButton testID="main-header-action-operations" />;
     }
 
     if (activeTab === 'settings') {
         if (!isCustomServer) {
             // Empty view to maintain header centering
-            return <View style={styles.headerButton} />;
+            return <ActionOperationActivityButton testID="main-header-action-operations" />;
         }
         return (
-            <Pressable
-                onPress={() => router.push('/settings/server')}
-                hitSlop={15}
-                style={styles.headerButton}
-            >
-                <Icon name="hard-drives" size={24} color={theme.colors.chrome.header.foreground} />
-            </Pressable>
+            <View style={styles.headerButtonsRow}>
+                <ActionOperationActivityButton testID="main-header-action-operations" />
+                <Pressable
+                    onPress={() => router.push('/settings/server')}
+                    hitSlop={15}
+                    style={styles.headerButton}
+                >
+                    <Icon name="hard-drives" size={24} color={theme.colors.chrome.header.foreground} />
+                </Pressable>
+            </View>
         );
     }
 
@@ -279,6 +298,7 @@ const SidebarMainViewContent = React.memo(function SidebarMainViewContent({
     const { theme } = useUnistyles();
     const { directSessionsEnabled, storageKind, setStorageKind } = useSessionListStorageKind();
     const router = useRouter();
+    const resolveNewSessionOrdinaryEntryRoute = useResolveNewSessionOrdinaryEntryRoute();
     const activeSessionId = React.useMemo(() => readSessionIdFromPathname(pathname), [pathname]);
     const surfaceOwnership = React.useMemo(
         () => resolveSessionListSurfaceOwnership({
@@ -298,9 +318,12 @@ const SidebarMainViewContent = React.memo(function SidebarMainViewContent({
         sessionListSurfaceDataActive: surfaceOwnership.dataActive,
     });
 
-    const handleNewSession = React.useCallback(() => {
-        router.push('/new');
-    }, [router]);
+    const handleNewSession = React.useCallback((event?: unknown) => {
+        const { draftId, draftOrigin } = resolveNewSessionOrdinaryEntryRoute({
+            forceFresh: shouldForceFreshNewSessionEntryFromPressEvent(event),
+        });
+        router.push({ pathname: '/new', params: { draftId, draftOrigin } });
+    }, [resolveNewSessionOrdinaryEntryRoute, router]);
 
     const storageChrome = (
         <SessionsListStorageChrome

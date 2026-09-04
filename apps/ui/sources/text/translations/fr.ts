@@ -529,6 +529,17 @@ export const fr: TranslationStructure = {
         permissions: 'Permissions',
         unreadSessions: 'Sessions non lues',
         updates: 'Activité',
+        actionOperations: {
+            sections: { inProgress: 'En cours', needsAttention: 'À vérifier', recent: 'Récentes' },
+            clearRecent: 'Effacer les récentes',
+            status: { accepted: 'Acceptée', running: 'En cours', succeeded: 'Réussie', failed: 'Échec', cancelled: 'Annulée', reconnecting: 'Reconnexion', unavailable: 'État indisponible', setupNeedsAttention: 'Session créée ; la configuration requiert votre attention' },
+            empty: 'Les actions de longue durée apparaîtront ici.',
+            openHint: 'Ouvre les détails de l’action',
+            stop: 'Arrêter',
+            dismiss: 'Masquer',
+            stopFailed: 'Impossible d’arrêter cette opération. Elle est peut-être toujours en cours.',
+            detail: { status: 'État', progress: 'Progression', error: 'Erreur', warning: 'Avertissement', result: 'Résultat', recoveryReference: 'Référence de récupération' },
+        },
     },
 
     approvals: {
@@ -1648,13 +1659,14 @@ export const fr: TranslationStructure = {
                   backendsSubtitle: 'Backends configurés et cibles de lancement personnalisées.',
               },
               enableInjection: {
-                  title: 'Activer l’injection des règles',
+                  title: 'Instructions des exécutions Happier',
+                  subtitle: 'La désactivation retire le routage natif prioritaire et les mécanismes d’exécution Happier des prompts système des agents de code.',
               },
               characterBudget: {
-                  title: 'Budget de caractères',
+                  title: 'Budget des règles personnalisées',
                   subtitle: ({ value }: { value: string }) => `${value} caractères`,
-                  promptTitle: 'Budget de caractères',
-                  promptBody: 'Nombre max de caractères à injecter dans le system prompt.',
+                  promptTitle: 'Budget des règles personnalisées',
+                  promptBody: 'Nombre maximal de caractères pour les règles d’exécution personnalisées dans le prompt système.',
               },
               rules: {
                   groupTitle: 'Règles de délégation',
@@ -4017,8 +4029,8 @@ export const fr: TranslationStructure = {
         showLineNumbersInDiffsDescription: 'Afficher les numéros de ligne dans les diffs de code',
         showLineNumbersInToolViews: 'Numéros de ligne dans les vues d’outils',
         showLineNumbersInToolViewsDescription: 'Afficher les numéros de ligne dans les diffs des vues d’outils',
-        wrapLinesInDiffs: 'Retour à la ligne dans les diffs',
-        wrapLinesInDiffsDescription: 'Renvoyer les longues lignes à la ligne au lieu du défilement horizontal dans les diffs',
+        wrapLinesInDiffs: 'Retour à la ligne dans les vues de code',
+        wrapLinesInDiffsDescription: 'Renvoyer les longues lignes à la ligne dans les aperçus de code et les éditeurs au lieu du défilement horizontal',
         alwaysShowContextSize: 'Toujours afficher la taille du contexte',
         alwaysShowContextSizeDescription: 'Afficher l’usage du contexte même loin de la limite',
         agentInputActionBarLayout: 'Barre d’actions de la saisie',
@@ -4435,6 +4447,8 @@ export const fr: TranslationStructure = {
         daemonRpcUnavailableBody:
             'Happier n’arrive pas à joindre le daemon sur cette machine. Il est peut-être hors ligne, en cours de démarrage, ou déconnecté du serveur.',
         launchStillPendingTitle: 'Lancement toujours en cours',
+        createdWithSetupIssueTitle: 'Session créée',
+        createdWithSetupIssueBody: 'La session a été créée, mais sa configuration initiale ne s’est pas terminée. Vous pouvez réessayer depuis cet écran sans créer une autre session.',
         launchStillPendingBody:
             'Happier n’a pas encore confirmé la nouvelle session. Ta demande de lancement est toujours enregistrée. Réessaie pour continuer le même lancement sans créer de session en double.',
         connectedServiceSwitchUnavailable: {
@@ -4926,9 +4940,14 @@ export const fr: TranslationStructure = {
         },
         resuming: 'Reprise…',
         resumeFailed: 'Échec de la reprise de la session',
-        pendingQueuedResumeFailedTitle: 'Message mis en file',
-        pendingQueuedResumeFailedBody:
-            'Ton message a été enregistré dans la file d’attente, mais Happier n’a pas pu reprendre cette session. Réessaie pour la démarrer.',
+        pendingActivation: {
+            waiting_offline: { title: 'Message en attente pour cette machine', body: 'Il sera traité lorsque cette machine et son daemon seront de nouveau en ligne.' },
+            waiting: { title: 'En attente de reprise', body: 'Ton message est bien en attente pendant que le daemon reprend cette session.' },
+            failed: { title: 'Impossible de reprendre la session', body: 'Ton message est toujours en attente. Réessaie quand tu le souhaites.' },
+            queued: { title: 'Message en attente', body: 'Cette session inactive contient un message en attente. Reprends-la quand tu le souhaites.' },
+            queued_offline: { title: 'Message en attente d’une reprise manuelle', body: 'Il restera en attente jusqu’à ce que tu reprennes cette session.' },
+            actions: { retry: 'Réessayer', resume: 'Reprendre', process_when_online: 'Traiter une fois en ligne', keepQueued: 'Garder en attente', autoResumeOptions: 'Options de reprise automatique' },
+        },
         composerBanners: {
             showBannerAction: 'Afficher la bannière',
             hideBannerAction: 'Masquer la bannière',
@@ -4950,6 +4969,18 @@ export const fr: TranslationStructure = {
             errorTitle: 'Redémarrage du runner indisponible',
             errorBody: 'Le daemon n’a pas pu redémarrer ce runner de session. La session reste disponible.',
         },
+        mcpRestartRequired: {
+            title: 'Redémarrer pour appliquer les changements MCP',
+            body: 'Les serveurs MCP sont appliqués au démarrage d’une session. Redémarrez ce runner pour utiliser votre nouvelle sélection.',
+            failureBody: 'Happier n’a pas pu redémarrer ce runner. Votre sélection MCP est enregistrée et sera appliquée au prochain démarrage.',
+            restartAction: 'Redémarrer la session',
+            restartPendingAction: 'Redémarrage…',
+            badgeLabel: 'Changements MCP',
+            showBannerAction: 'Afficher l’avis de redémarrage MCP',
+            hideBannerAction: 'Masquer l’avis de redémarrage MCP',
+            errorTitle: 'Redémarrage de session indisponible',
+            errorBody: 'Le runner n’a pas pu redémarrer. Votre sélection MCP est enregistrée et sera appliquée au prochain démarrage de la session.',
+        },
         invalidLinkTitle: 'Lien de session invalide',
         invalidLinkDescription: 'Le lien de session est manquant ou invalide. Vérifie l’URL et réessaie.',
         resumeSupportNoteChecking: 'Note : Happier vérifie encore si cette machine peut reprendre la session du provider.',
@@ -4968,7 +4999,7 @@ export const fr: TranslationStructure = {
             `Cette session est terminée et ne peut pas être reprise, car ${provider} ne prend pas en charge la restauration de son contexte ici. Démarre une nouvelle session pour continuer.`,
         machineOfflineNoticeTitle: 'La machine est hors ligne',
         machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-            `“${machine}” est hors ligne, Happier ne peut donc pas encore reprendre cette session. Remets-la en ligne pour continuer.`,
+            `“${machine}” est hors ligne. Tu peux mettre un message en attente maintenant ; Happier continuera quand la machine sera de nouveau en ligne.`,
         machineOfflineCannotResume: 'La machine est hors ligne. Remets-la en ligne pour reprendre cette session.',
         openRuns: 'Ouvrir les runs de la session',
         openAutomations: 'Ouvrir les automatisations de la session',
@@ -5710,6 +5741,12 @@ export const fr: TranslationStructure = {
         newTagConfirm: 'Ajouter',
     },
 
+    sessionDrafts: {
+        sectionTitle: 'Brouillons', badge: 'Brouillon', untitled: 'Brouillon sans titre', continueEditing: 'Continuer la modification', startAnother: 'En commencer un autre',
+        status: { offline: 'Hors ligne', syncing: 'Synchronisation', conflict: 'Conflit', machineUnavailable: 'Machine indisponible', attachmentNeedsAttention: 'Pièce jointe à vérifier', startInterrupted: 'Démarrage interrompu' },
+        new: { action: 'Nouveau brouillon' }, delete: { action: 'Supprimer le brouillon', confirmTitle: 'Supprimer le brouillon ?', confirmDescription: 'Ce brouillon sera supprimé de vos appareils.' },
+        conflict: { title: 'Conflit de brouillon', description: 'Ce champ a changé sur un autre appareil.', mine: 'Sur cet appareil', synced: 'Synchronisé', useSynced: 'Utiliser la version synchronisée', keepDevice: 'Garder cette version', copyMine: 'Copier ma version', copied: 'Copié', copyFailed: 'Copie impossible', field: { text: 'Texte', mentions: 'Références', attachments: 'Pièces jointes', recipient: 'Destinataire', agentContinuation: 'Suite de l’agent', executionRunDelivery: 'Livraison de l’exécution' } },
+    },
     sessionsList: {
         serverHeader: ({ server }: { server: string }) => `Serveur : ${server}`,
         storagePersistedTab: 'Happier',
@@ -5825,6 +5862,7 @@ export const fr: TranslationStructure = {
         browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} services connectés`,
         browseSourceClaudeDefault: 'Config Claude par défaut',
         browseSourceOpenCodeDefault: 'Serveur OpenCode par défaut',
+        browseSourcePiDefault: 'Répertoire de l’agent Pi par défaut',
         browseCandidates: 'Sessions disponibles',
         browseNoMachines: 'Aucune machine n’est disponible pour les sessions directes.',
         browseNoCandidates: 'Aucune session provider trouvée pour cette machine et ce provider.',
@@ -5920,6 +5958,7 @@ export const fr: TranslationStructure = {
         viewSessionLogSubtitle: 'Ouvrir le suivi du log en direct pour cette session',
         pinSession: 'Épingler la session',
         unpinSession: 'Désépingler la session',
+        pinLimitExceeded: ({ count }: { count: number }) => `Vous pouvez épingler jusqu’à ${count.toLocaleString()} sessions. Désépinglez-en une autre, puis réessayez.`,
         copyResumeCommand: 'Copier la commande de reprise',
         resumeCommand: ({ sessionId }: { sessionId: string }) => `happier resume ${sessionId}`,
         viewMachine: 'Voir la machine',
@@ -7072,6 +7111,14 @@ export const fr: TranslationStructure = {
                 runClass: 'Classe de run',
                 ioMode: 'Mode E/S',
             },
+            launchOrigin: {
+                crossSession: ({ sessionId }: { sessionId: string }) => `Démarré depuis la session ${sessionId}`,
+                externalCli: 'Démarré depuis la CLI',
+                externalMcp: 'Démarré via MCP',
+                externalAction: 'Démarré via une action Happier',
+                externalUnknown: 'Démarré de l’extérieur (origine inconnue)',
+                legacyUnknown: 'Origine du démarrage inconnue',
+            },
             timestamps: {
                 started: 'Démarré',
                 finished: 'Terminé',
@@ -7303,6 +7350,14 @@ export const fr: TranslationStructure = {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: 'Brouillons de nouvelle session',
+        footer: 'Choisissez si Nouvelle session reprend le brouillon de cet appareil ou en ouvre un nouveau.',
+        resumeTitle: 'Reprendre le brouillon précédent',
+        resumeSubtitle: 'Continuez le brouillon commencé depuis Nouvelle session sur cet appareil.',
+        freshTitle: 'Toujours repartir de zéro',
+        freshSubtitle: 'Ouvrez un nouveau brouillon à chaque sélection de Nouvelle session.',
+    },
 	          sessionList: {
 	              title: 'Liste des sessions',
 	              footer: 'Apparence et comportement de la liste des sessions dans la barre latérale.',
@@ -7484,6 +7539,16 @@ settingsSession: {
               title: 'Avancé',
           },
           messageSending: {
+              inactiveResumePolicyTitle: 'Reprise automatique après l’envoi',
+              inactiveResumePolicySubtitle: 'Choisis ce que Happier doit faire après un envoi à une session inactive.',
+              inactiveResumePolicy: {
+                  whenAvailableTitle: 'Maintenant ou au retour de la machine',
+                  whenAvailableSubtitle: 'Reprendre immédiatement si elle est joignable, sinon traiter au retour du daemon.',
+                  onlineOnlyTitle: 'Seulement si la machine est en ligne',
+                  onlineOnlySubtitle: 'Essayer une fois à l’envoi. Si elle est indisponible, garder le message en attente.',
+                  manualTitle: 'Jamais automatiquement',
+                  manualSubtitle: 'Toujours garder les messages en attente jusqu’à la reprise de la session.',
+              },
               title: 'Envoi des messages',
               footer: 'Contrôle ce qui se passe quand tu envoies un message pendant que l’agent tourne.',
               queueInAgentTitle: 'Mettre en file dans l’agent (actuel)',
@@ -7885,6 +7950,9 @@ settingsSession: {
               wizardColumnsTitle: 'Mise en page sur deux colonnes',
               wizardColumnsEnabledSubtitle: 'Place les sélecteurs liés côte à côte sur les écrans larges.',
               wizardColumnsDisabledSubtitle: 'Empile tous les sélecteurs de l’assistant sur une seule colonne.',
+              defaultWorktreeTitle: 'Créer un worktree pour les nouvelles sessions',
+              defaultWorktreeEnabledSubtitle: 'Démarrer chaque nouvelle session Git dans un nouveau worktree.',
+              defaultWorktreeDisabledSubtitle: 'Démarrer les nouvelles sessions Git dans le dossier sélectionné.',
               wizardPresentationTitle: 'Disposition des sélecteurs de l’assistant',
               wizardPresentationFooter: 'Le mode auto garde les sections courtes en listes et bascule les sections longues en menus déroulants avec recherche.',
               wizardPresentationAutoTitle: 'Auto',

@@ -1,4 +1,5 @@
 export { ACTION_IDS, ActionIdSchema, type ActionId } from './actionIds.js';
+export * from './operations/index.js';
 export { ACTION_UI_PLACEMENTS, ActionUiPlacementSchema, type ActionUiPlacement } from './actionUiPlacements.js';
 export {
   ACTION_SETTINGS_OPT_IN_PLACEMENTS,
@@ -24,6 +25,8 @@ export {
 } from './actionApprovalMetadata.js';
 export {
   ACTION_SPECS,
+  ActionContextualDefaultSourceSchema,
+  ActionContextualDefaultsSchema,
   ActionSafetySchema,
   ActionSpecSchema,
   ActionSurfaceSchema,
@@ -31,6 +34,8 @@ export {
   ActionToolExposureSchema,
   ActionToolExposureSurfaceSchema,
   SessionEventsGetInputSchema,
+  SessionForkActionInputSchema,
+  SessionSpawnNewInputSchema,
   SessionTranscriptGetInputSchema,
   ActionInputFieldHintSchema,
   ActionInputHintsSchema,
@@ -46,6 +51,8 @@ export {
   listVoicePromptHotPathSpecs,
   listVoiceToolActionSpecs,
   type ActionSafety,
+  type ActionContextualDefaultSource,
+  type ActionContextualDefaults,
   type ActionInputFieldHint,
   type ActionInputHints,
   type ActionInputOption,
@@ -58,6 +65,8 @@ export {
   type SessionEventsGetInput,
   type SessionEventsGetItem,
   type SessionEventsGetOutput,
+  type SessionForkActionInput,
+  type SessionSpawnNewInput,
   type SessionTranscriptGetInput,
   type SessionTranscriptGetItem,
   type SessionTranscriptGetOutput,
@@ -93,6 +102,10 @@ export {
   type ActionExecuteResult,
   type ActionExecutorContext,
   type ActionExecutorDeps,
+  type ActionPreparedInvocation,
+  type ActionPrepareResult,
+  type SessionForkActionExecutionInput,
+  type SessionSpawnNewActionExecutionInput,
 } from './actionExecutor.js';
 
 export { resolveEffectiveActionInputFields, type EffectiveActionInputField } from './actionInputHintsRuntime.js';

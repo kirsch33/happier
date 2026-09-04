@@ -1,6 +1,8 @@
 import Constants from 'expo-constants';
 import { apiSocket } from '@/sync/api/session/apiSocket';
 import { ensureSessionRuntimeForPendingInput } from '@/sync/ops';
+import { shouldDelegatePendingActivationToDaemon } from '@/sync/domains/session/input/pendingActivationWakeDecision';
+import { isMachineOnline } from '@/utils/sessions/machineUtils';
 import { type AuthCredentials } from '@/auth/storage/tokenStorage';
 import {
     ClientVersionCheckRequestV1Schema,
@@ -90,6 +92,7 @@ import { ActivityUpdateAccumulator, type ActivityUpdateAccumulatorFlushOptions }
 import { MachineActivityAccumulator, type MachineActivityUpdate } from './reducer/machineActivityAccumulator';
 import { randomUUID } from '@/platform/randomUUID';
 import { Platform, AppState } from 'react-native';
+import { buildOutgoingUserTextRecord } from './domains/messages/outgoingUserMessage';
 import { resolveSentFrom } from './domains/messages/sentFrom';
 import { NormalizedMessage, normalizeRawMessage, RawRecord, RawRecordSchema } from './typesRaw';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './domains/settings/settings';
@@ -251,7 +254,6 @@ import {
 import { kvBulkGet } from './api/account/apiKv';
 import { FeedItem } from './domains/social/feedTypes';
 import { UserProfile } from './domains/social/friendTypes';
-import { buildSendMessageMeta } from './domains/messages/buildSendMessageMeta';
 import { HappyError } from '@/utils/errors/errors';
 import {
     createAccountSettingsFailedStatus,
@@ -387,6 +389,12 @@ import { applyTodoSocketUpdates as applyTodoSocketUpdatesEngine, fetchTodos as f
 import { planSyncActionsFromChanges } from './runtime/orchestration/changesPlanner';
 import { applyPlannedChangeActions } from './runtime/orchestration/changesApplier';
 import { runSocketReconnectCatchUpViaChanges } from './runtime/orchestration/socketReconnectViaChanges';
+import {
+    SessionDraftRuntimeHydrationGate,
+    materializeVisibleExistingSessionDraft,
+    materializeSessionDraftSocketWake,
+    parseSessionDraftSocketWake,
+} from './runtime/orchestration/sessionDraftSyncRuntime';
 import { verifyChangesCursorMaterializationProofs } from './runtime/orchestration/cursorMaterializationDetector';
 import { fetchAndApplySessionFolderAssignments } from '@/sync/ops/sessionOrganization';
 import { readMachineControlTargetForSession, readMachineTargetForSession } from './ops/sessionMachineTarget';
@@ -403,6 +411,17 @@ import { RPC_ERROR_CODES, SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc'
 import { isRpcMethodNotAvailableError, readRpcErrorCode } from '@/sync/runtime/rpcErrors';
 import { MessageAckResponseSchema, type MessageAckResponse } from '@happier-dev/protocol/updates';
 import { resolveAccountScopedCryptoMaterialFromCredentials } from '@/sync/domains/connectedServices/resolveAccountScopedCryptoMaterialFromCredentials';
+import { getRandomBytes } from '@/platform/cryptoRandom';
+import { isRuntimeFeatureEnabled } from '@/sync/domains/features/featureDecisionInputs';
+import { fetchAccountEncryptionMode } from '@/sync/api/account/apiAccountEncryptionMode';
+import { createApiSessionDraftsTransport } from '@/sync/api/account/apiSessionDrafts';
+import { createSessionDraftCipher } from '@/sync/encryption/sessionDraftEncryption';
+import {
+    configureSessionDraftRepository,
+    ensureSessionDraftRepositoryHydrated,
+    materializeExactSessionDraft,
+} from '@/sync/ops/sessionDrafts/sessionDraftRepository';
+import { migrateLegacySessionDrafts } from '@/sync/domains/input/drafts/sessionDraftLegacyMigration';
 import { serverFetch } from './http/client';
 import { logNativeUpdateFetchFailure } from '@/sync/runtime/nativeUpdate/logNativeUpdateFetchFailure';
 import {
@@ -469,8 +488,11 @@ import {
     handleSocketUpdate,
     parseUpdateContainer,
 } from './engine/socket/socket';
+import { actionOperationStore } from './domains/actionOperations/actionOperationStore';
+import { openActionOperationRevisionEphemeral } from './domains/actionOperations/actionOperationEphemeral';
 
 const SESSION_LIST_BACKGROUND_HYDRATION_SCROLL_SETTLE_MS = 180;
+const WEB_INITIAL_SESSION_MESSAGES_PAGE_SIZE = 12;
 
 /**
  * How long a successful `/v1/version` answer stays fresh.
@@ -931,6 +953,7 @@ class Sync {
         private syncTuning: SyncTuning = loadSyncTuning();
         private sessionTranscriptRetention!: SessionTranscriptRetentionController;
       private resumeInFlight: Promise<void> | null = null;
+      private changesCatchUpQueuedAfterResume = false;
       private pendingOutboxRearmInFlightByScope = new Map<string, Promise<void>>();
       private readonly usesPersistentDesktopSync = isTauriDesktop();
       private isForeground = this.usesPersistentDesktopSync || AppState.currentState === 'active';
@@ -1019,14 +1042,22 @@ class Sync {
         private webSyncClientIdentityHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
         private webLifecycleHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
         private webLifecycleHeartbeatLastNowMs: number | null = null;
+        private userRequestLeases = new Set<symbol>();
+        private deferredWebVisibilityTeardown: (() => void) | null = null;
 		      private lastSocketDisconnectedAtMs: number | null = null;
 		      private lastSocketOfflineDurationMs: number | null = null;
               private socketOfflineCatchUpConsumedSessionIds = new Set<string>();
+              private socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
+              private postSubscriptionChangesCatchUpPending = false;
 	      revenueCatInitialized = false;
 	    private settingsSecretsKey: Uint8Array | null = null;
 	    private settingsSecretsReadKeys: readonly Uint8Array[] = [];
 	    private messageTransport: SyncMessageTransport = createDefaultMessageTransport();
     private updatesSubscribed = false;
+    private sessionDraftSyncEnabled = false;
+    private sessionDraftOfflineCatchUpPending = false;
+    private sessionDraftRepositoryConfiguredScope: ServerAccountScope | null = null;
+    private readonly sessionDraftRuntimeHydrationGate = new SessionDraftRuntimeHydrationGate();
 
     // Generic locking mechanism
     private recalculationLockCount = 0;
@@ -1057,6 +1088,51 @@ class Sync {
     private markSocketOfflineCatchUpConsumedForSession(sessionId: string, offlineForMs: number): void {
         if (!sessionId || offlineForMs <= 0 || this.lastSocketDisconnectedAtMs != null) return;
         this.socketOfflineCatchUpConsumedSessionIds.add(sessionId);
+    }
+
+    private connectSocketWithPostSubscriptionCatchUp(): void {
+        if (this.socketStatus !== 'connected') {
+            this.postSubscriptionChangesCatchUpPending = true;
+        }
+        apiSocket.connect();
+    }
+
+    private disconnectSocketIntentionally(): void {
+        this.postSubscriptionChangesCatchUpPending = false;
+        this.socketStatus = 'disconnected';
+        apiSocket.disconnect();
+    }
+
+    private resumeAfterForegroundTransition(tag: string): void {
+        const resume = this.resumeSync('app-foreground');
+        fireAndForget(resume, { tag });
+        try {
+            this.connectSocketWithPostSubscriptionCatchUp();
+        } catch {
+            // The foreground resume still repairs the HTTP snapshot. A later successful connect
+            // consumes the armed post-subscription catch-up demand.
+        }
+    }
+
+    private requestChangesCatchUp(): void {
+        if (!this.isForeground) return;
+        const activeResume = this.resumeInFlight;
+        if (!activeResume) {
+            fireAndForget(this.resumeSync('changes-catch-up'), { tag: 'Sync.resumeSync.changes-catch-up' });
+            return;
+        }
+        if (this.changesCatchUpQueuedAfterResume) return;
+        this.changesCatchUpQueuedAfterResume = true;
+        void activeResume.then(
+            () => this.runQueuedChangesCatchUp(),
+            () => this.runQueuedChangesCatchUp(),
+        );
+    }
+
+    private runQueuedChangesCatchUp(): void {
+        if (!this.changesCatchUpQueuedAfterResume) return;
+        this.changesCatchUpQueuedAfterResume = false;
+        this.requestChangesCatchUp();
     }
 
 	        constructor() {
@@ -1228,12 +1304,7 @@ class Sync {
                   log.log('📱 App became active');
                   this.pauseController.resume();
                   fireAndForget(invalidateAllServerReachabilitySupervisors(), { tag: 'Sync.invalidateAllServerReachabilitySupervisors' });
-                  try {
-                      apiSocket.connect();
-                  } catch {
-                      // ignore
-                  }
-                  fireAndForget(this.resumeSync('app-foreground'), { tag: 'Sync.resumeSync.app-foreground' });
+                  this.resumeAfterForegroundTransition('Sync.resumeSync.app-foreground');
               } else {
                   this.isForeground = false;
                   this.markNativeCryptoWorkerBackgroundQuiescent();
@@ -1241,7 +1312,7 @@ class Sync {
                   log.log(`📱 App state changed to: ${nextAppState}`);
                   this.pauseController.pause();
                   try {
-                      apiSocket.disconnect();
+                      this.disconnectSocketIntentionally();
                   } catch {
                       // ignore
                   }
@@ -1260,13 +1331,20 @@ class Sync {
           if (Platform.OS === 'web' && !this.usesPersistentDesktopSync) {
               const doc = (globalThis as unknown as { document?: any }).document;
               if (doc && typeof doc.addEventListener === 'function' && typeof doc.removeEventListener === 'function') {
-                  const pauseForWebBackground = (tag: string) => {
+                  const pauseForWebBackground = (tag: string, hardBoundary = false) => {
+                      if (hardBoundary) {
+                          this.userRequestLeases.clear();
+                          this.deferredWebVisibilityTeardown = null;
+                      } else if (this.userRequestLeases.size > 0) {
+                          this.deferredWebVisibilityTeardown = () => pauseForWebBackground(tag);
+                          return;
+                      }
                       this.isForeground = false;
                       this.markNativeCryptoWorkerBackgroundQuiescent();
                       setServerReachabilityNetworkAllowed(false);
                       this.pauseController.pause();
                       try {
-                          apiSocket.disconnect();
+                          this.disconnectSocketIntentionally();
                       } catch {
                           // ignore
                       }
@@ -1274,20 +1352,19 @@ class Sync {
                       this.flushBackgroundSyncCheckpointsNow();
                   };
                   const resumeForWebForeground = (tag: string) => {
+                      this.deferredWebVisibilityTeardown = null;
                       this.isForeground = true;
                       this.resumeNativeCryptoWorkerDispatchAfterForeground(`${tag}.nativeCryptoWorkerQueue`);
                       setServerReachabilityNetworkAllowed(true);
                       this.pauseController.resume();
                       fireAndForget(invalidateAllServerReachabilitySupervisors(), { tag: `${tag}.reachability` });
-                      try {
-                          apiSocket.connect();
-                      } catch {
-                          // ignore
-                      }
-                      fireAndForget(this.resumeSync('app-foreground'), { tag });
+                      this.resumeAfterForegroundTransition(tag);
                   };
                   const onVisibilityChange = () => {
                       const state = String(doc.visibilityState ?? '').trim().toLowerCase();
+                      if (state === 'visible') {
+                          this.deferredWebVisibilityTeardown = null;
+                      }
                       if (state === 'hidden' || state === 'visible') {
                           const nextIsForeground = state === 'visible';
                           if (this.isForeground === nextIsForeground) {
@@ -1303,7 +1380,7 @@ class Sync {
                       }
                   };
                   const onPageHide = () => {
-                      pauseForWebBackground('Sync.stopServerReachabilitySupervisors.pagehide');
+                      pauseForWebBackground('Sync.stopServerReachabilitySupervisors.pagehide', true);
                   };
                   const onPageShow = (event?: { persisted?: boolean }) => {
                       const state = String(doc.visibilityState ?? '').trim().toLowerCase();
@@ -1312,7 +1389,7 @@ class Sync {
                       }
                   };
                   const onFreeze = () => {
-                      pauseForWebBackground('Sync.stopServerReachabilitySupervisors.freeze');
+                      pauseForWebBackground('Sync.stopServerReachabilitySupervisors.freeze', true);
                   };
                   const onResume = () => {
                       resumeForWebForeground('Sync.resumeSync.page-lifecycle-resume');
@@ -1378,6 +1455,21 @@ class Sync {
 
       public getSyncTuning(): SyncTuning {
           return this.syncTuning;
+      }
+
+      public acquireUserRequestLease(): () => void {
+          const lease = Symbol('user-request');
+          this.userRequestLeases.add(lease);
+          let released = false;
+          return () => {
+              if (released) return;
+              released = true;
+              this.userRequestLeases.delete(lease);
+              if (this.userRequestLeases.size !== 0) return;
+              const teardown = this.deferredWebVisibilityTeardown;
+              this.deferredWebVisibilityTeardown = null;
+              teardown?.();
+          };
       }
 
       private resolveSessionListScrollIdleWaiters(): void {
@@ -1506,6 +1598,100 @@ class Sync {
           });
           if (this.syncTuning.nativeCryptoWorkerMode !== 'off') {
               void encryption.warmNativeCryptoWorkerForDiagnostics();
+          }
+      }
+
+      public reconfigureSessionDraftRepositoryForAccountMode(
+          credentials: AuthCredentials,
+          accountMode: 'plain' | 'e2ee',
+      ): void {
+          const scope = getActiveServerAccountScope();
+          if (!scope || !this.encryption || credentials.token !== this.credentials?.token) {
+              throw new Error('Session draft repository scope is unavailable');
+          }
+          configureSessionDraftRepository({
+              scope,
+              transport: this.sessionDraftSyncEnabled
+                  ? createApiSessionDraftsTransport({ credentials })
+                  : undefined,
+              cipher: createSessionDraftCipher({
+                  accountMode,
+                  accountCryptoMaterial: resolveAccountScopedCryptoMaterialFromCredentials(credentials),
+                  getSessionContext: (sessionId) => {
+                      const session = storage.getState().sessions[sessionId] ?? null;
+                      if (!session) return null;
+                      if (session.encryptionMode === 'plain') return { mode: 'plain' };
+                      return {
+                          mode: 'e2ee',
+                          encryption: this.encryption.getSessionEncryption(sessionId),
+                      };
+                  },
+                  randomBytes: getRandomBytes,
+              }),
+              syncEnabled: this.sessionDraftSyncEnabled,
+          });
+      }
+
+      private ensureSessionDraftRepositoryRuntimeReady(params: Readonly<{
+          forceSnapshotHydration?: boolean;
+      }> = {}): Promise<void> {
+          const scope = getActiveServerAccountScope();
+          const credentials = this.credentials;
+          if (!scope || !credentials || !this.encryption) {
+              return Promise.resolve();
+          }
+          const capturedScope = scope;
+          const capturedGeneration = this.serverScopeGeneration;
+          const shouldContinue = () => (
+              this.serverScopeGeneration === capturedGeneration
+              && areServerAccountScopesEqual(getActiveServerAccountScope(), capturedScope)
+          );
+          return this.sessionDraftRuntimeHydrationGate.run({
+            scope: capturedScope,
+            force: params.forceSnapshotHydration === true,
+            hydrate: async () => {
+              if (
+                  params.forceSnapshotHydration === true
+                  || !areServerAccountScopesEqual(this.sessionDraftRepositoryConfiguredScope, capturedScope)
+              ) {
+                  const serverId = capturedScope.serverId;
+                  const syncEnabled = await isRuntimeFeatureEnabled({
+                      featureId: 'sessions.drafts',
+                      serverId,
+                  });
+                  if (!shouldContinue()) return false;
+                  this.sessionDraftSyncEnabled = syncEnabled;
+                  if (syncEnabled) {
+                      const mode = await fetchAccountEncryptionMode(credentials);
+                      if (!shouldContinue()) return false;
+                      this.reconfigureSessionDraftRepositoryForAccountMode(credentials, mode.mode);
+                  } else {
+                      configureSessionDraftRepository({ syncEnabled: false });
+                  }
+                  this.sessionDraftRepositoryConfiguredScope = capturedScope;
+              }
+              if (!shouldContinue()) return false;
+              await migrateLegacySessionDrafts(capturedScope);
+              if (!shouldContinue()) return false;
+              await ensureSessionDraftRepositoryHydrated(capturedScope);
+              if (!shouldContinue()) return false;
+              if (params.forceSnapshotHydration === true) {
+                  this.sessionDraftOfflineCatchUpPending = false;
+              }
+              return true;
+            },
+          });
+      }
+
+      private async refreshSessionDraftRepositoryForSync(params: Readonly<{
+          forceSnapshotHydration?: boolean;
+      }> = {}): Promise<void> {
+          try {
+              await this.ensureSessionDraftRepositoryRuntimeReady(params);
+          } catch {
+              // Drafts are locally durable and the hydration gate retries after a failed run.
+              // A draft-only outage must not suppress already-loaded account projections.
+              log.log('[session-drafts] Snapshot hydration unavailable; retaining local drafts and retrying on the next sync');
           }
       }
 
@@ -1797,12 +1983,21 @@ class Sync {
     }
 
     private resetServerScopedRuntimeState = () => {
+        this.changesCatchUpQueuedAfterResume = false;
+        this.postSubscriptionChangesCatchUpPending = false;
+        this.sessionDraftSyncEnabled = false;
+        this.sessionDraftOfflineCatchUpPending = false;
+        this.sessionDraftRepositoryConfiguredScope = null;
+        this.sessionDraftRuntimeHydrationGate.reset();
+        configureSessionDraftRepository({ syncEnabled: false });
+        this.userRequestLeases.clear();
+        this.deferredWebVisibilityTeardown = null;
         this.stopJsThreadLagTelemetryRuntime();
         this.serverScopeGeneration += 1;
         this.flushPendingSettingsForCurrentScopeNow();
         this.flushSessionMaterializedMaxSeq();
         this.clearActiveAccountSettingsScope();
-        apiSocket.disconnect();
+        this.disconnectSocketIntentionally();
         this.activityAccumulator.reset();
         this.machineActivityAccumulator.reset();
 
@@ -2015,6 +2210,7 @@ class Sync {
                     tag: 'Sync.onSessionVisible.deferredSessionStateHydration',
                 });
             }
+            this.replayDeferredMessagesFetch(sessionId);
             this.getOrCreateMessagesSync(sessionId).invalidateCoalesced();
 
             // C6/D3: reopening a session is a reactive, list-independent bottom arrival. Drain any
@@ -2028,6 +2224,18 @@ class Sync {
                 voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
     }
+
+        materializeExistingSessionDraft = async (sessionId: string): Promise<void> => {
+            const capturedDraftScope = getActiveServerAccountScope();
+            if (!capturedDraftScope) return;
+            await materializeVisibleExistingSessionDraft({
+                sessionId,
+                capturedScope: capturedDraftScope,
+                readActiveScope: getActiveServerAccountScope,
+                ensureRuntimeReady: () => this.ensureSessionDraftRepositoryRuntimeReady(),
+                materializeExact: materializeExactSessionDraft,
+            });
+        }
 
         refreshSessionMessages = async (sessionId: string): Promise<void> => {
             const normalized = String(sessionId ?? '').trim();
@@ -2234,6 +2442,10 @@ class Sync {
 
             const result = await inFlight;
             if (result.kind === 'available') {
+                // A message invalidation may have observed the session before this route
+                // hydration committed its owner. Replay that deferred attempt now that the
+                // owner is authoritative, instead of leaving the transcript permanently empty.
+                this.replayDeferredMessagesFetch(normalized);
                 this.getOrCreateMessagesSync(normalized).invalidateCoalesced();
             }
             return result;
@@ -2347,25 +2559,17 @@ class Sync {
             };
 
             const sentFrom = resolveSentFrom();
-            const model = agentId && getAgentCore(agentId).model.supportsSelection && modelMode !== 'default' ? modelMode : undefined;
-            // Create user message content with metadata
-            const content: RawRecord = {
-                role: 'user',
-                content: {
-                    type: 'text',
-                    text
-                },
-                meta: buildSendMessageMeta({
-                    sentFrom,
-                    permissionMode: permissionMode || 'default',
-                    model,
-                    displayText,
-                    agentId,
-                    settings: storage.getState().settings,
-                    session,
-                    metaOverrides: metaOverrides as any,
-                })
-            };
+            const content = buildOutgoingUserTextRecord({
+                text,
+                sentFrom,
+                displayText,
+                agentId,
+                modelMode,
+                permissionMode,
+                settings: storage.getState().settings,
+                session,
+                metaOverrides,
+            });
 
             const messagePayload =
                 sessionEncryptionMode === 'plain'
@@ -2602,6 +2806,7 @@ class Sync {
                 localId: pending.localId,
                 configuredMode: state.settings.sessionMessageSendMode,
                 busySteerSendPolicy: state.settings.sessionBusySteerSendPolicy,
+                sessionInactiveResumePolicy: state.settings.sessionInactiveResumePolicy,
                 permissionModeApplyTiming: state.settings.sessionPermissionModeApplyTiming,
                 nonSteerableSendPrompt: state.settings.sessionNonSteerableSendPrompt,
                 resumeCapabilityOptions: buildResumeCapabilityOptionsFromUiState({
@@ -2956,6 +3161,18 @@ class Sync {
             updatePendingRequestedAction: (targetSessionId, localId, requestedAction) =>
                 this.updatePendingRequestedAction(targetSessionId, localId, requestedAction),
             ensureSessionRuntimeForPendingInput: (options) => ensureSessionRuntimeForPendingInput(options),
+            shouldDelegatePendingActivationToDaemon: (session, serverId, machineId) =>
+                shouldDelegatePendingActivationToDaemon({
+                    session,
+                    serverId,
+                    machineId,
+                    getServerFeaturesSnapshot,
+                    getMachine: (machineId) => storage.getState().machines[machineId],
+                }),
+            isMachineReachable: (machineId) => {
+                const machine = storage.getState().machines[machineId];
+                return Boolean(machine && isMachineOnline(machine));
+            },
             refreshSessionForSubmit: (targetSessionId, options) =>
                 this.refreshSessionForSubmit(targetSessionId, options),
             ...(canWakeMachineId ? { canWakeMachineId } : {}),
@@ -2997,6 +3214,7 @@ class Sync {
             metaOverrides,
             configuredMode: state.settings.sessionMessageSendMode,
             busySteerSendPolicy: state.settings.sessionBusySteerSendPolicy,
+            sessionInactiveResumePolicy: state.settings.sessionInactiveResumePolicy,
             permissionModeApplyTiming: state.settings.sessionPermissionModeApplyTiming,
             // Programmatic path: never prompt here; 'ask' still hardens the decision (queue).
             nonSteerableSendPrompt: state.settings.sessionNonSteerableSendPrompt,
@@ -4200,10 +4418,11 @@ class Sync {
     }
 
       public retryNow = () => {
+          let reconnectSocket = false;
           try {
               storage.getState().clearSyncError();
-              apiSocket.disconnect();
-              apiSocket.connect();
+              this.disconnectSocketIntentionally();
+              reconnectSocket = true;
           } catch {
               // ignore
           }
@@ -4219,10 +4438,19 @@ class Sync {
           } catch {
               // ignore
           }
-          fireAndForget(this.resumeSync('manual'), { tag: 'Sync.resumeSync.manual' });
+          const resume = this.resumeSync('manual');
+          fireAndForget(resume, { tag: 'Sync.resumeSync.manual' });
+          if (reconnectSocket) {
+              try {
+                  this.connectSocketWithPostSubscriptionCatchUp();
+              } catch {
+                  // The manual HTTP resume remains active; the next successful connection will
+                  // consume the armed post-subscription catch-up demand.
+              }
+          }
       }
 
-      public resumeSync = (reason: 'app-foreground' | 'socket-reconnect' | 'manual' | 'server-reachable'): Promise<void> => {
+      public resumeSync = (reason: 'app-foreground' | 'socket-reconnect' | 'manual' | 'server-reachable' | 'changes-catch-up'): Promise<void> => {
           return runWithInFlightDedupe(
               {
                   get: () => this.resumeInFlight,
@@ -4232,7 +4460,10 @@ class Sync {
               },
               async () => {
                   const shouldContinue = this.createServerScopeGuard();
-                  if ((reason === 'socket-reconnect' || reason === 'server-reachable') && !this.isForeground) {
+                  if (
+                      (reason === 'socket-reconnect' || reason === 'server-reachable' || reason === 'changes-catch-up')
+                      && !this.isForeground
+                  ) {
                       return;
                   }
                   if (this.pauseController.isPaused()) {
@@ -4256,12 +4487,25 @@ class Sync {
                       return;
                   }
 
-                  await this.rearmPendingOutboxForActiveScope();
-                  if (!shouldContinue()) {
-                      return;
+                  if (reason !== 'changes-catch-up') {
+                      await this.rearmPendingOutboxForActiveScope();
+                      if (!shouldContinue()) {
+                          return;
+                      }
+
+                      await this.refreshSessionDraftRepositoryForSync({
+                          forceSnapshotHydration: reason === 'manual' || this.sessionDraftOfflineCatchUpPending,
+                      });
+                      if (!shouldContinue()) {
+                          return;
+                      }
                   }
 
-                  const { status, refreshedByCatchUp } = await this.resumeViaChanges({ accountId, shouldContinue });
+                  const { status, refreshedByCatchUp } = await this.resumeViaChanges({
+                      accountId,
+                      shouldContinue,
+                      allowOfflineSnapshotRefresh: reason !== 'changes-catch-up',
+                  });
                   if (status === 'aborted') {
                       return;
                   }
@@ -4270,6 +4514,10 @@ class Sync {
                           return;
                       }
                       await this.snapshotRefreshOnResume({ mode: 'fallback', reason: 'changes-fallback' });
+                      return;
+                  }
+
+                  if (reason === 'changes-catch-up') {
                       return;
                   }
 
@@ -4331,11 +4579,14 @@ class Sync {
         };
 
       private bootstrapSync = async (): Promise<void> => {
-          if (this.pauseController.isPaused()) {
+          if (this.isBootstrapSyncRunning) {
               return;
           }
           await this.pauseController.waitUntilResumed();
           if (!this.credentials) {
+              return;
+          }
+          if (this.isBootstrapSyncRunning) {
               return;
           }
           this.isBootstrapSyncRunning = true;
@@ -4350,17 +4601,20 @@ class Sync {
               // Bootstrap concurrency is slightly higher to reduce time-to-first-render.
               const bootstrapConcurrencyLimit = this.syncTuning.bootstrapConcurrencyLimit;
 
-              // Phase 1: load core UI state (settings/profile) while also loading sessions/machines.
+              // Phase 1: load core UI state and every projection consumed immediately after readiness.
               await runTasksWithLimit(
                   [
                       () => invalidateBounded(this.settingsSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                       () => invalidateBounded(this.profileSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                       () => invalidateBounded(this.sessionsSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                       () => invalidateBounded(this.machinesSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
+                      () => invalidateBounded(this.artifactsSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                       () => invalidateBounded(this.purchasesSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                   ],
                   bootstrapConcurrencyLimit
               );
+
+              await this.refreshSessionDraftRepositoryForSync();
 
               await this.rearmPendingOutboxForActiveScope();
 
@@ -4383,7 +4637,6 @@ class Sync {
               // Phase 2: load non-critical lists.
               await runTasksWithLimit(
                   [
-                      () => invalidateBounded(this.artifactsSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                       () => invalidateBounded(this.automationsSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                       () => invalidateBounded(this.todosSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
                       () => invalidateBounded(this.friendsSync, this.syncTuning.invalidateSyncAwaitTimeoutMs),
@@ -4424,6 +4677,8 @@ class Sync {
               ],
               concurrencyLimit
           );
+
+          await this.refreshSessionDraftRepositoryForSync({ forceSnapshotHydration: true });
 
           // Catch up transcripts only for sessions that are already loaded locally AND are live
           // content consumers right now. The catch-up policy already no-ops for hidden
@@ -4493,7 +4748,10 @@ class Sync {
         return this.machinesRefreshInFlight;
     }
 
-    public refreshSessions = async () => {
+    public refreshSessions = async (options?: Readonly<{ awaitSessionListHydration?: boolean }>) => {
+        if (options?.awaitSessionListHydration === true) {
+            return await this.fetchSessions({ awaitSessionListHydration: true });
+        }
         return this.sessionsSync.invalidateAndAwait();
     }
 
@@ -5078,18 +5336,25 @@ class Sync {
 
     private replayDeferredMessagesFetch(sessionId: string): void {
         if (this.deferredMessagesFetchSessionIds.delete(sessionId)) {
-            this.getOrCreateMessagesSync(sessionId).invalidateCoalesced();
+            // A deferred fetch may have been discovered by the currently running
+            // invalidation cycle (for example while route hydration resolves the
+            // session's owner server). `invalidateCoalesced()` intentionally does
+            // nothing while a cycle is already active, so it can strand the deferred
+            // transcript forever. Use the normal invalidation entry point here: it
+            // schedules the required post-run cycle when the first attempt is active,
+            // while retaining coalescing when no attempt has started yet.
+            this.getOrCreateMessagesSync(sessionId).invalidate();
         }
     }
 
     private fetchMessages = async (sessionId: string) => {
         if (this.hasFetchedSessionsSnapshotForActiveServer && !this.isSessionKnownOnResolvedOwnerServer(sessionId)) {
             // Do not fetch messages when we cannot resolve the session to either the active server
-            // or a locally known owner server. This avoids cross-server message fetches while keeping
-            // the UI state non-destructive during server-switch races.
-            if (storage.getState().sessionMessages[sessionId]?.isLoaded !== true) {
-                storage.getState().applyMessagesLoaded(sessionId);
-            }
+            // or a locally known owner server. This avoids cross-server message fetches. The owner
+            // can be transiently unresolved while a deep-link session row is being applied; do not
+            // publish that race as a successful empty transcript. Route hydration / the next
+            // visibility invalidation replays this deferred fetch once ownership is known.
+            this.deferredMessagesFetchSessionIds.add(sessionId);
             return;
         }
 
@@ -5128,16 +5393,26 @@ class Sync {
                   return;
               }
 
-              await this.catchUpDirectSessionMessages(sessionId, directSessionLink);
+              await this.catchUpDirectSessionMessages(sessionId, directSessionLink, {
+                  surfaceCatchUp: hasExplicitTailProbe,
+              });
               this.explicitSessionTailProbeIds.delete(sessionId);
               return;
           }
 
-          if (!hasLoadedMessages) {
+          const loadedTranscript = storage.getState().sessionMessages[sessionId];
+          const hasMaterializedMessages = Object.keys(loadedTranscript?.messagesById ?? {}).length > 0;
+          // A previous empty or interrupted open can leave a non-empty session hint with a loaded,
+          // zero-row cache. Recover with a snapshot so catch-up does not preserve the blank projection.
+          const needsSnapshotLoad = !hasLoadedMessages || (!hasMaterializedMessages && sessionSeqHint > 0);
+          if (needsSnapshotLoad) {
               this.deferredForwardLoadingSessions.delete(sessionId);
-              await fetchAndApplyMessages({
+              const fetchSnapshot = () => fetchAndApplyMessages({
                   sessionId,
                   sessionEncryptionMode,
+                  limit: Platform.OS === 'web'
+                      ? WEB_INITIAL_SESSION_MESSAGES_PAGE_SIZE
+                      : this.getSessionMessagesPageSize(),
                   getSessionEncryption: (id) => this.encryption.getSessionEncryption(id),
                   isSessionKnown: (id) => this.isSessionKnownOnResolvedOwnerServer(id),
                   request: requestMessages,
@@ -5151,6 +5426,15 @@ class Sync {
                   ...this.getMessageDecryptBatchOptions(),
                   log,
               });
+              // A loaded zero-row transcript is warm state, not a first-ever load. When the
+              // session shell now reports durable activity, this snapshot is the on-open catch-up
+              // operation and must share the same canonical signal as every other newer repair.
+              await (hasLoadedMessages
+                  ? this.withSessionCatchUpNewer(sessionId, fetchSnapshot)
+                  : fetchSnapshot());
+              if (hasExplicitTailProbe) {
+                  this.explicitSessionTailProbeIds.delete(sessionId);
+              }
               return;
           }
 
@@ -5188,6 +5472,13 @@ class Sync {
                       sessionId,
                       sessionEncryptionMode,
                       afterSeq: cursor,
+                      // Deliberately the CONFIGURED page size on every platform, not the small
+                      // web first-paint page. This loop is bounded by
+                      // `messageMaxIncrementalPagesOnResume` (3), so the page size decides how
+                      // large a background gap can be absorbed incrementally: 3 x 150 = 450
+                      // messages, versus 3 x 12 = 36. Below that, a session that advanced while
+                      // backgrounded falls to `onIncrementalExhausted` -> `tail_reset_latest_page`,
+                      // which REPLACES transcript content instead of extending it.
                       limit: this.getSessionMessagesPageSize(),
                       getSessionEncryption: (id) => this.encryption.getSessionEncryption(id),
                       isSessionKnown: (id) => this.isSessionKnownOnResolvedOwnerServer(id),
@@ -5215,6 +5506,7 @@ class Sync {
                   await fetchAndApplyMessages({
                       sessionId,
                       sessionEncryptionMode,
+                      limit: this.getSessionMessagesPageSize(),
                       getSessionEncryption: (id) => this.encryption.getSessionEncryption(id),
                       isSessionKnown: (id) => this.isSessionKnownOnResolvedOwnerServer(id),
                       request: requestMessages,
@@ -5480,11 +5772,21 @@ class Sync {
           }
       }
 
+      /**
+       * §13: the catch-up signal describes a DELIBERATE catch-up (resume, recovery), never the
+       * steady-state tail poll. `useDirectSessionRuntime` re-invalidates this path on a
+       * self-rescheduling timer — 250ms while the agent is running, 2s otherwise — so bracketing
+       * the probe itself raised and lowered the UI-observable signal several times a second for
+       * the life of an open direct session, against the overlay's own stated contract ("never
+       * around normal streaming"). The sibling incremental path gates the same signal on
+       * `isCatchUpWork`; `surfaceCatchUp` is its direct-session equivalent.
+       */
       private async catchUpDirectSessionMessages(
           sessionId: string,
           directSessionLink: ReturnType<typeof readDirectSessionLink> extends infer T ? Exclude<T, null> : never,
+          options?: Readonly<{ surfaceCatchUp?: boolean }>,
       ): Promise<void> {
-          await this.withSessionCatchUpNewer(sessionId, async () => {
+          const probeAndApply = async (): Promise<void> => {
               const shouldContinue = this.createServerScopeGuard();
               const cursor = this.getDirectSessionTailCursor(sessionId) ?? 'tail';
               const tail = await machineDirectSessionTranscriptReadAfter({
@@ -5501,9 +5803,14 @@ class Sync {
               }
 
               if (tail.truncated === true) {
-                  this.resetSessionTranscriptState(sessionId);
-                  await this.fetchDirectSessionMessages(sessionId, directSessionLink);
-                  return;
+                  // Real catch-up whatever triggered the probe: the transcript is dropped and
+                  // refetched, which is exactly the window the overlay exists to cover. The
+                  // bracket is ref-counted, so nesting inside `surfaceCatchUp` is safe.
+                  await this.withSessionCatchUpNewer(sessionId, async () => {
+                      this.resetSessionTranscriptState(sessionId);
+                      await this.fetchDirectSessionMessages(sessionId, directSessionLink);
+              });
+              return;
               }
 
               const normalizedMessages = normalizeDirectTranscriptMessages(tail.items);
@@ -5511,7 +5818,13 @@ class Sync {
                   this.applyMessages(sessionId, normalizedMessages, { notifyVoice: false });
               }
               this.setDirectSessionTailCursor(sessionId, tail.nextCursor ?? null);
-          });
+          };
+
+          if (options?.surfaceCatchUp === true) {
+              await this.withSessionCatchUpNewer(sessionId, probeAndApply);
+              return;
+          }
+          await probeAndApply();
       }
 
       private collectLoadedDirectSessionsForResume(): Array<{ sessionId: string; directSessionLink: DirectSessionLink }> {
@@ -5533,7 +5846,9 @@ class Sync {
           await runTasksWithLimit(
               loadedDirectSessions.map(({ sessionId, directSessionLink }) => async () => {
                   try {
-                      await this.catchUpDirectSessionMessages(sessionId, directSessionLink);
+                      // Resume IS the deliberate catch-up the overlay describes: the app was away
+                      // and the transcript may be far behind, unlike the steady-state tail poll.
+                      await this.catchUpDirectSessionMessages(sessionId, directSessionLink, { surfaceCatchUp: true });
                   } catch (error) {
                       syncReliabilityTelemetry.recordCritical('sync.directSession.resumeCatchUpFailed', {
                           sessionId,
@@ -5696,6 +6011,19 @@ class Sync {
 
                       if (!page.ok) {
                           throw new Error(page.error);
+                      }
+
+                      if (page.truncated === true) {
+                          this.resetSessionTranscriptState(params.sessionId);
+                          await this.fetchDirectSessionMessages(params.sessionId, directSessionLink);
+                          return {
+                              loaded: 0,
+                              hasMore:
+                                  this.directSessionHasMoreOlderBySessionId.get(params.sessionId)
+                                  ?? knownHasMore
+                                  ?? true,
+                              status: 'not_ready',
+                          };
                       }
 
                       const normalizedMessages = normalizeDirectTranscriptMessages(page.items);
@@ -6043,6 +6371,10 @@ class Sync {
                   sessionEncryptionMode,
                   scope: 'sidechain',
                   sidechainId: normalizedSidechainId,
+                  // The same configured page size the main initial fetch uses: this is the
+                  // sidechain's initial transcript load, so it must not silently keep the
+                  // server default when an account configures a different page size.
+                  limit: this.getSessionMessagesPageSize(),
                   getSessionEncryption: (id) => this.encryption.getSessionEncryption(id),
                   isSessionKnown: (id) => this.isSessionKnownOnResolvedOwnerServer(id),
                   request: requestMessages,
@@ -6171,39 +6503,66 @@ class Sync {
          * revealing older read-only context before the child transcript's own older pages are loaded.
          */
         public async prefetchForkedTranscriptContext(childSessionId: string): Promise<void> {
-            const fork = getForkedTranscriptSnapshotCached(storage.getState() as any, childSessionId);
-            if (!fork) return;
+            const attemptedSessionIds = new Set<string>();
+            while (true) {
+                const fork = getForkedTranscriptSnapshotCached(storage.getState() as any, childSessionId);
+                if (!fork) return;
 
-            const missingSegments = fork.segments.filter((seg, index) => {
-                if (
-                    seg.isReadOnlyContext !== true ||
-                    typeof seg.cutoffSeqInclusive !== 'number' ||
-                    !Number.isFinite(seg.cutoffSeqInclusive) ||
-                    seg.cutoffSeqInclusive < 0 ||
-                    (seg.messageIdsOldestFirst?.length ?? 0) > 0
-                ) {
-                    return false;
-                }
+                let nextSegment: (typeof fork.segments)[number] | null = null;
+                // Segments are ordered root -> child. Load the nearest missing ancestor first,
+                // then rebuild the snapshot and eligibility after that request settles. A
+                // nearer page can exhaust its segment and make the next ancestor eligible in
+                // this same prefetch call.
+                for (let index = fork.segments.length - 1; index >= 0; index -= 1) {
+                    const seg = fork.segments[index];
+                    if (
+                        !seg ||
+                        attemptedSessionIds.has(seg.sessionId) ||
+                        seg.isReadOnlyContext !== true ||
+                        typeof seg.cutoffSeqInclusive !== 'number' ||
+                        !Number.isFinite(seg.cutoffSeqInclusive) ||
+                        seg.cutoffSeqInclusive < 0 ||
+                        (
+                            (seg.messageIdsOldestFirst?.length ?? 0) > 0
+                            && this.sessionMessagesHasMoreOlderByKey.get(
+                                this.buildSessionMessagesPaginationKey({
+                                    sessionId: seg.sessionId,
+                                    scope: 'main',
+                                }),
+                            ) === false
+                        )
+                    ) {
+                        continue;
+                    }
 
-                for (let i = index + 1; i < fork.segments.length; i += 1) {
-                    const closerSegment = fork.segments[i];
-                    if (!closerSegment) continue;
-                    const key = this.buildSessionMessagesPaginationKey({ sessionId: closerSegment.sessionId, scope: 'main' });
-                    if (this.sessionMessagesHasMoreOlderByKey.get(key) !== false) {
-                        return false;
+                    let allCloserSegmentsExhausted = true;
+                    for (let closerIndex = index + 1; closerIndex < fork.segments.length; closerIndex += 1) {
+                        const closerSegment = fork.segments[closerIndex];
+                        if (!closerSegment) continue;
+                        const key = this.buildSessionMessagesPaginationKey({
+                            sessionId: closerSegment.sessionId,
+                            scope: 'main',
+                        });
+                        if (this.sessionMessagesHasMoreOlderByKey.get(key) !== false) {
+                            allCloserSegmentsExhausted = false;
+                            break;
+                        }
+                    }
+                    if (allCloserSegmentsExhausted) {
+                        nextSegment = seg;
+                        break;
                     }
                 }
+                if (!nextSegment) return;
 
-                return true;
-            });
-            if (missingSegments.length === 0) return;
-
-            for (const seg of missingSegments) {
+                attemptedSessionIds.add(nextSegment.sessionId);
+                const seg = nextSegment;
                 const hydration = await this.ensureSessionVisibleForMessageRoute(seg.sessionId);
-                if (hydration.kind !== 'available') continue;
+                if (hydration.kind !== 'available') return;
 
                 const cutoff = Math.max(0, Math.trunc(seg.cutoffSeqInclusive as number));
-                await this.loadOlderMessagesFromCursor(seg.sessionId, cutoff + 1).catch(() => {});
+                const result = await this.loadOlderMessagesFromCursor(seg.sessionId, cutoff + 1).catch(() => null);
+                if (!result || result.status === 'not_ready' || result.status === 'in_flight') return;
             }
         }
 
@@ -6568,12 +6927,19 @@ class Sync {
         apiSocket.onMessage('session', () => {});
 
 	          apiSocket.onStatusChange((status) => {
+	              this.socketStatus = status;
 	              if (status === 'connected') {
+	                  const shouldClosePostSubscriptionGap = this.postSubscriptionChangesCatchUpPending;
+	                  this.postSubscriptionChangesCatchUpPending = false;
 	                  if (this.lastSocketDisconnectedAtMs != null) {
 	                      this.lastSocketOfflineDurationMs = Date.now() - this.lastSocketDisconnectedAtMs;
+                          this.sessionDraftOfflineCatchUpPending = true;
                           this.socketOfflineCatchUpConsumedSessionIds.clear();
 	                  }
 	                  this.lastSocketDisconnectedAtMs = null;
+	                  if (shouldClosePostSubscriptionGap) {
+	                      this.requestChangesCatchUp();
+	                  }
 	                  return;
 	              }
 	              if (status === 'disconnected' || status === 'error') {
@@ -6740,6 +7106,7 @@ class Sync {
       private async resumeViaChanges(opts: {
           accountId: string;
           shouldContinue?: () => boolean;
+          allowOfflineSnapshotRefresh?: boolean;
       }): Promise<ResumeViaChangesOutcome> {
           const CHANGES_PAGE_LIMIT = this.syncTuning.changesPageLimit;
           const afterCursor = this.changesCursor ?? '0';
@@ -6762,7 +7129,8 @@ class Sync {
           };
 
           const offlineForMs = this.readSocketOfflineDurationMs();
-          const forceSnapshotRefresh = offlineForMs >= this.syncTuning.messageForceSnapshotOfflineMs;
+          const forceSnapshotRefresh = opts.allowOfflineSnapshotRefresh !== false
+              && offlineForMs >= this.syncTuning.messageForceSnapshotOfflineMs;
 
           const catchUp = await runSocketReconnectCatchUpViaChanges({
               credentials: this.credentials,
@@ -6867,6 +7235,8 @@ class Sync {
                         planned,
                         credentials: this.credentials,
                         isSessionMessagesLoaded: (sessionId) => storage.getState().sessionMessages[sessionId]?.isLoaded === true,
+                        shouldCatchUpSessionMessages: (sessionId) =>
+                            resolveSessionLiveConsumption(sessionId).isFullContentConsumer,
                         getSessionMaterializedMaxSeq: (sessionId) => this.sessionMaterializedMaxSeqById[sessionId] ?? 0,
                         invalidate: {
                             settings: () => this.settingsSync.invalidateAndAwait(),
@@ -6945,6 +7315,19 @@ class Sync {
                             });
                         },
                         convergePendingForSession: (sessionId) => this.fetchPendingMessages(sessionId),
+                        materializeSessionDraft: async (address) => {
+                            const scope = getActiveServerAccountScope();
+                            if (!scope || !shouldContinue()) {
+                                throw new Error('Session draft scope changed before materialization');
+                            }
+                            await materializeExactSessionDraft(scope, address);
+                            if (
+                                !shouldContinue()
+                                || !areServerAccountScopesEqual(getActiveServerAccountScope(), scope)
+                            ) {
+                                throw new Error('Session draft scope changed during materialization');
+                            }
+                        },
                         concurrencyLimit: this.syncTuning.resumeConcurrencyLimit,
                     });
                 },
@@ -7111,6 +7494,17 @@ class Sync {
     }
 
     private handleEphemeralUpdate = (update: unknown) => {
+        if (parseSessionDraftSocketWake(update)) {
+            const capturedScope = getActiveServerAccountScope();
+            if (!capturedScope) return;
+            fireAndForget(materializeSessionDraftSocketWake({
+                payload: update,
+                capturedScope,
+                readActiveScope: getActiveServerAccountScope,
+                materializeExact: materializeExactSessionDraft,
+            }), { tag: 'Sync.handleSessionDraftSocketWake' });
+            return;
+        }
         const sourceServerId = String(getActiveServerSnapshot().serverId ?? '').trim() || null;
         const { shouldContinue } = createSyncGenerationGuard({
             getCurrentGeneration: () => this.serverScopeGeneration,
@@ -7133,6 +7527,15 @@ class Sync {
             getSession: (sessionId) => storage.getState().sessions[sessionId],
             applyMessages: (sessionId, messages) => this.applyMessages(sessionId, messages, { notifyVoice: false, notifyActivity: true }),
             updateDirectSessionTranscript: (ephemeralUpdate) => this.handleDirectSessionTranscriptEphemeralUpdate(ephemeralUpdate),
+            applyActionOperationRevision: (ephemeralUpdate) => {
+                if (!this.encryption || !shouldContinue()) return;
+                const snapshot = openActionOperationRevisionEphemeral({
+                    update: ephemeralUpdate,
+                    machineKey: this.encryption.getContentPrivateKey(),
+                });
+                if (!snapshot || !shouldContinue()) return;
+                actionOperationStore.merge(snapshot);
+            },
         }), { tag: 'Sync.handleEphemeralUpdate' });
     }
 

@@ -175,6 +175,7 @@ const harness = vi.hoisted(() => {
   );
 
   const apiMachine = {
+    getActiveRpcHandlerExecutions: vi.fn(() => []),
     recoverDaemonTerminalSessionMutationJournals: vi.fn(async () => {}),
     enqueueDaemonTerminalExactTurnEnd: vi.fn(async () => {}),
     setRPCHandlers: vi.fn(),
@@ -1020,6 +1021,42 @@ describe('startDaemon automation wiring (integration)', () => {
     return { run, spawnSession: handlers.spawnSession };
   }
 
+  it('rejects static-unavailable native selections before daemon spawn effects', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    harness.setAutoShutdownAfterAutomationStart(false);
+    let run: Promise<void> | null = null;
+
+    try {
+      const { SPAWN_SESSION_ERROR_CODES } = await import('@happier-dev/protocol');
+      const { ensureSessionDirectory } = await import('./startup/ensureSessionDirectory');
+      const { resolveSpawnChildEnvironment } = await import('./spawn/resolveSpawnChildEnvironment');
+      const { spawnHappyCLI } = await import('@/utils/spawnHappyCLI');
+      const { resolveCatalogAgentId } = await import('@/backends/catalog');
+      vi.mocked(resolveCatalogAgentId).mockReturnValue('qwen');
+
+      const started = await startDaemonAndGetSpawnSessionHandler();
+      run = started.run;
+      const result = await started.spawnSession({
+        machineId: 'machine-automation',
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'qwen' },
+        modelId: 'not-a-qwen-static-model',
+      });
+
+      expect(result).toEqual(expect.objectContaining({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+      }));
+      expect(ensureSessionDirectory).not.toHaveBeenCalled();
+      expect(resolveSpawnChildEnvironment).not.toHaveBeenCalled();
+      expect(spawnHappyCLI).not.toHaveBeenCalled();
+    } finally {
+      harness.requestShutdown('happier-cli');
+      if (run) await run;
+      exitSpy.mockRestore();
+    }
+  });
+
   it('fails closed before child launch when connected-service resume reachability is unavailable', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     harness.setAutoShutdownAfterAutomationStart(false);
@@ -1255,6 +1292,15 @@ describe('startDaemon automation wiring (integration)', () => {
       );
 
       expect(stopDaemon).toHaveBeenCalledTimes(1);
+      expect(ensureMachineRegistered).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(ensureMachineRegistered).mock.calls[0]?.[0]).not.toHaveProperty('daemonState');
+      expect(vi.mocked(ensureMachineRegistered).mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+        machineId: 'machine-rotated',
+        caller: 'startDaemon',
+        daemonState: expect.objectContaining({
+          daemonPendingSessionActivationSupported: true,
+        }),
+      }));
       expect(writeDaemonState).toHaveBeenCalledWith(expect.objectContaining({
         machineId: 'machine-rotated',
       }));
@@ -1498,6 +1544,11 @@ describe('startDaemon automation wiring (integration)', () => {
       );
 
       expect(writeDaemonState).toHaveBeenCalledTimes(1);
+      expect(ensureMachineRegistered).toHaveBeenCalledWith(expect.objectContaining({
+        daemonState: expect.objectContaining({
+          startedWithCliVersion: '0.2.11',
+        }),
+      }));
 
       harness.requestShutdown('happier-cli');
       await run;
@@ -3754,7 +3805,7 @@ describe('startDaemon automation wiring (integration)', () => {
           credentials: automationCredentials,
           minSettingsVersion: 3,
           mode: 'blocking',
-          refresh: 'auto',
+          refresh: 'force',
         }),
       );
 
@@ -3765,7 +3816,7 @@ describe('startDaemon automation wiring (integration)', () => {
     }
   });
 
-  it('ignores stale or equal daemon account settings live hints', async () => {
+  it('forces an authoritative refresh for equal daemon account settings live hints', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     harness.setAutoShutdownAfterAutomationStart(false);
     harness.setActiveAccountSettingsSnapshot({ settingsVersion: 3 });
@@ -3789,8 +3840,15 @@ describe('startDaemon automation wiring (integration)', () => {
         });
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(harness.bootstrapAccountSettingsContext).not.toHaveBeenCalled();
+      await waitForCondition(
+        () => harness.bootstrapAccountSettingsContext.mock.calls.length >= 1,
+        'Expected equal-version live hint to force an authoritative account settings refresh',
+      );
+      expect(harness.bootstrapAccountSettingsContext).toHaveBeenCalledWith(expect.objectContaining({
+        minSettingsVersion: 3,
+        mode: 'blocking',
+        refresh: 'force',
+      }));
 
       harness.requestShutdown('happier-cli');
       await run;
@@ -3884,7 +3942,7 @@ describe('startDaemon automation wiring (integration)', () => {
     }
   });
 
-  it('skips the pre-spawn account settings refresh when the active snapshot already satisfies the hint', async () => {
+  it('forces the pre-spawn account settings refresh when the active snapshot already satisfies the hint', async () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     harness.setAutoShutdownAfterAutomationStart(false);
 
@@ -3919,8 +3977,16 @@ describe('startDaemon automation wiring (integration)', () => {
         accountSettingsVersionHint: 14,
       });
 
-      expect(refreshAccountSettingsForMinimumVersion).not.toHaveBeenCalled();
-      expect(harness.bootstrapAccountSettingsContext).not.toHaveBeenCalled();
+      expect(refreshAccountSettingsForMinimumVersion).toHaveBeenCalledWith(expect.objectContaining({
+        credentials: automationCredentials,
+        minSettingsVersion: 14,
+        mode: 'blocking',
+        forceRefresh: true,
+      }));
+      expect(harness.bootstrapAccountSettingsContext).toHaveBeenCalledWith(expect.objectContaining({
+        minSettingsVersion: 14,
+        refresh: 'force',
+      }));
 
       harness.requestShutdown('happier-cli');
       await run;

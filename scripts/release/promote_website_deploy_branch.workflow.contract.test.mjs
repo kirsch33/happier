@@ -14,6 +14,10 @@ async function loadWorkflow(name) {
 test('promote-website delegates deploy branch promotion to pipeline script', async () => {
   const raw = await loadWorkflow('promote-website.yml');
   assert.match(raw, /node scripts\/pipeline\/github\/promote-deploy-branch\.mjs/);
+  assert.match(raw, /--github-output "\$GITHUB_OUTPUT"/);
+  assert.match(raw, /steps\.promote_ref\.outputs\.new_sha/);
+  assert.doesNotMatch(raw, /Resolve deploy branch SHA (?:before|after) promotion/);
+  assert.match(raw, /group: deploy-ref-\$\{\{ github\.repository \}\}-\$\{\{ inputs\.environment \}\}-website/);
   assert.doesNotMatch(raw, /Wait for deploy workflow/i);
 });
 
@@ -37,8 +41,7 @@ test('promote-website publishes to Cloudflare and not to the Dokploy webhook', a
   const raw = await loadWorkflow('promote-website.yml');
   assert.doesNotMatch(raw, /node scripts\/pipeline\/deploy\/trigger-webhooks\.mjs/);
   assert.doesNotMatch(raw, /CF_WEBHOOK_DEPLOY_CLIENT_(ID|SECRET)/);
-  assert.match(raw, /wrangler@4 deploy/);
-  assert.match(raw, /wrangler@4 versions upload --preview-alias preview/);
+  assert.match(raw, /scripts\/pipeline\/cloudflare\/publish-worker\.sh/);
 });
 
 // Cloudflare credentials must stay out of the job that builds candidate code,
@@ -53,7 +56,7 @@ test('promote-website builds without deploy secrets and publishes only the built
   assert.doesNotMatch(validate, /CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID/);
   assert.match(validate, /actions\/upload-artifact@/);
 
-  assert.equal(deploy?.environment, 'website-deploy');
+  assert.equal(deploy?.environment, 'cloudflare-deploy');
   assert.match(JSON.stringify(deploy), /actions\/download-artifact@/);
 
   const upload = parsed.jobs.validate_candidate.steps.find(

@@ -4,7 +4,11 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn as spawnChildProcess } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { getReleaseRingCatalogEntry } from '@happier-dev/release-runtime/releaseRings';
-import { AGENT_IDS, resolveAgentIdFromSessionMetadata } from '@happier-dev/agents';
+import {
+  AGENT_IDS,
+  resolveAgentIdFromSessionMetadata,
+  resolveAgentNativeSpawnDefinitiveRejection,
+} from '@happier-dev/agents';
 
 import { ApiClient, isMachineContentPublicKeyMismatchError } from '@/api/api';
 import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLog';
@@ -100,6 +104,10 @@ import { forceStopKnownDaemonPid, isDaemonRunningCurrentlyInstalledHappyVersion,
 import { startDaemonControlServer } from './controlServer';
 import { resolveTrackedSessionCatalogAgentId } from './sessions/resolveTrackedSessionCatalogAgentId';
 import { activatePendingInactiveSession } from './sessions/activatePendingInactiveSession';
+import {
+  recoverPendingSessionActivations,
+  type PendingSessionActivationInput,
+} from './sessions/pendingSessionActivationRecovery';
 import { awaitFreshProviderCompletion, resumeFreshProviderContext } from './sessions/resumeFreshProviderContext';
 import { createFreshProviderRecoveryReservationStore } from './sessions/freshProviderRecoveryReservation';
 import { HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE } from '@/agent/runtime/freshProviderContext';
@@ -176,7 +184,6 @@ import {
 } from './processSupervision/sessionRunnerRespawnDescriptor';
 import { getSessionNotificationTitle } from '@/agent/runtime/readyNotificationContext';
 import { publishShutdownStateBestEffort } from './lifecycle/publishShutdownState';
-import { projectPath } from '@/projectPath';
 import type { SessionHandoffLocalMetadataSource } from '@/session/handoff/metadata/runtimeLocalSessionHandoffMetadata';
 import { selectPreferredTmuxSessionName, TmuxUtilities, isTmuxAvailable } from '@/integrations/tmux';
 import { resolveTerminalRequestFromSpawnOptions } from '@/terminal/runtime/terminalConfig';
@@ -187,7 +194,11 @@ import {
   evaluatePredictiveSoftSwitchTrackedLiveSessionPolicy,
 } from './connectedServices/accountGroups/switching/predictiveSoftSwitchPolicy';
 
-import { getPreferredHostName, initialMachineMetadata } from './machine/metadata';
+import {
+  getPreferredHostName,
+  initialMachineMetadata,
+  refreshMachineMetadataForCurrentDaemon,
+} from './machine/metadata';
 import { createDaemonShutdownController } from './lifecycle/shutdown';
 import { buildTmuxSpawnConfig, buildTmuxWindowEnv } from './platform/tmux/spawnConfig';
 export { buildTmuxSpawnConfig, buildTmuxWindowEnv } from './platform/tmux/spawnConfig';
@@ -197,6 +208,7 @@ import {
 import { removeRuntimeAuthFailureReportOutboxItemsForSession } from './connectedServices/runtimeAuth/reportOutbox/runtimeAuthFailureReportOutbox';
 import { createConnectedServiceRecoverySupersessionCleaner } from './connectedServices/continuation/continuationRecoverySupersession';
 import { buildCgroupSelfMigratingHappyCliLaunchSpec } from './platform/linux/buildCgroupSelfMigratingHappyCliLaunchSpec';
+import { shouldUseSystemdUserSessionResourceGovernor } from './platform/linux/systemdUserResourceGovernor';
 import { applySpawnedChildOomScoreAdjustment } from './platform/linux/applySpawnedChildOomScoreAdjustment';
 import { resolveWindowsRemoteSessionConsoleMode } from './platform/windows/windowsSessionConsoleMode';
 import { startHappySessionInVisibleWindowsConsole } from './platform/windows/spawnHappyCliVisibleConsole';
@@ -420,14 +432,10 @@ import { parseBooleanEnv, resolveConnectedServicesProviderStateSharingPolicyV1, 
 import type { CatalogAgentId, ConnectedServiceSwitchEffectiveBinding } from '@/backends/types';
 import { readTerminalAttachmentInfo, writeTerminalAttachmentInfo } from '@/terminal/attachment/terminalAttachmentInfo';
 import { bindSpawnedTmuxTerminalAttachment } from './sessions/bindSpawnedTmuxTerminalAttachment';
-import {
-  isAccountSettingsVersionAtLeast,
-  normalizeAccountSettingsVersionHint,
-} from '@/settings/accountSettings/accountSettingsVersion';
+import { normalizeAccountSettingsVersionHint } from '@/settings/accountSettings/accountSettingsVersion';
 import { refreshAccountSettingsForMinimumVersion } from '@/settings/accountSettings/refreshAccountSettingsForMinimumVersion';
 import { warmActiveAccountSettingsSnapshotBestEffort } from '@/settings/accountSettings/warmActiveAccountSettingsSnapshot';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
-import { resolveAccountSettingsScopeKey } from '@/settings/accountSettings/accountSettingsScopeKey';
 import { fetchSessionByIdCompat, fetchSessionsPage, type RawSessionRecord } from '@/session/transport/http/sessionsHttp';
 import { updateSessionMetadataWithRetry } from '@/session/metadata/updateSessionMetadataWithRetry';
 import { persistExplicitSessionStopUsageLimitRecoveryCancellation } from '@/session/usageLimitRecoveryControls/persistUsageLimitRecoveryFieldDurably';
@@ -439,7 +447,7 @@ import {
   TemporaryThrottleRecoveryScheduler,
   type TemporaryThrottleRecoveryIntent,
 } from './connectedServices/temporaryThrottle/TemporaryThrottleRecoveryScheduler';
-import { resumeTrackedTemporaryThrottleSession } from './connectedServices/temporaryThrottle/resumeTrackedTemporaryThrottleSession';
+import { continueTrackedTemporaryThrottleSession } from './connectedServices/temporaryThrottle/continueTrackedTemporaryThrottleSession';
 import {
   resolveInactiveTemporaryThrottleResumeSource,
   type TemporaryThrottleResumeSource,
@@ -1522,22 +1530,11 @@ async function refreshDaemonAccountSettingsForHint(params: Readonly<{
   credentials: Credentials;
   settingsVersion: number | null;
 }>): Promise<boolean> {
-  const requiresConservativeRefresh = params.settingsVersion === null;
-  if (!requiresConservativeRefresh) {
-    const active = getActiveAccountSettingsSnapshot();
-    if (
-      active
-      && active.scopeKey === resolveAccountSettingsScopeKey(params.credentials)
-      && isAccountSettingsVersionAtLeast(active.settingsVersion, params.settingsVersion)
-    ) {
-      return true;
-    }
-  }
   await refreshAccountSettingsForMinimumVersion({
     credentials: params.credentials,
     minSettingsVersion: params.settingsVersion,
     mode: 'blocking',
-    ...(requiresConservativeRefresh ? { forceRefresh: true } : {}),
+    forceRefresh: true,
   });
   return true;
 }
@@ -1828,6 +1825,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       if (preflightMachineRegistration.didRotateMachineId) {
         logger.debug('[DAEMON RUN] Same-version daemon matched a stale machine id, restarting daemon with recovered machine identity');
         await stopDaemon();
+        preflightMachineRegistration = null;
       } else {
         logger.debug('[DAEMON RUN] Daemon version and machine identity match, keeping existing daemon');
         console.log('Daemon already running with matching version');
@@ -2360,6 +2358,19 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               terminalMode: attachmentInfo.terminal.mode ?? attachmentInfo.handle.kind,
             });
           },
+          areTrackedRunnersExited: async ({ trackedPids }) => {
+            const exited = await waitForTrackedRunnerProcessesExit({
+              runners: trackedPids.map((pid) => ({ pid })),
+              timeoutMs: 0,
+              pollIntervalMs: 0,
+            });
+            if (!exited) return false;
+
+            for (const pid of trackedPids) {
+              await onChildExited(pid, { reason: 'process-missing', code: null, signal: null });
+            }
+            return true;
+          },
           waitForTrackedRunnersExit: async ({ sessionId, trackedPids }) => {
             await waitForExistingSessionExitIfStopRequested({
               sessionId,
@@ -2769,7 +2780,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           logger.debug('[DAEMON RUN] Connected-service group home startup reconciliation failed (non-fatal)', error);
         });
         connectedServiceMaterializedHomeCleanupLoopHandle?.trigger();
-        if (process.platform === 'linux' && startupSource === 'background-service') {
+        if (shouldUseSystemdUserSessionResourceGovernor({ platform: process.platform, startupSource })) {
           const migratedTrackedSessionProcesses = await migrateTrackedSessionProcessesOutOfDaemonServiceCgroup({
             trackedSessions: pidToTrackedSession.values(),
             daemonPid: process.pid,
@@ -3252,6 +3263,22 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 modelId = normalizedOptions.modelId;
                 modelUpdatedAt = normalizedOptions.modelUpdatedAt;
                 effectiveResume = typeof resume === 'string' ? resume.trim() : '';
+              }
+
+              const nativeSpawnSelection = resolveAgentNativeSpawnDefinitiveRejection({
+                agentId: catalogAgentId,
+                selection: {
+                  modelId: normalizedOptions.modelId,
+                  acpSessionModeId: normalizedOptions.agentModeId,
+                  sessionConfigOptionOverrides: normalizedOptions.sessionConfigOptionOverrides,
+                },
+              });
+              if (!nativeSpawnSelection.ok) {
+                return {
+                  type: 'error',
+                  errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+                  errorMessage: 'Agent-native selection is invalid.',
+                };
               }
 
               if (
@@ -4273,10 +4300,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 env: childProcessEnv,
               };
               const cgroupSelfMigratingLaunchSpec =
-                process.platform === 'linux' && startupSource === 'background-service'
+                shouldUseSystemdUserSessionResourceGovernor({ platform: process.platform, startupSource })
                   ? await buildCgroupSelfMigratingHappyCliLaunchSpec({
                     args,
                     daemonPid: process.pid,
+                    environment: childProcessEnv,
                     launchOptions: runnerLaunchOptions,
                   })
                   : null;
@@ -4560,31 +4588,43 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             }
             return { status: 'ready' };
           },
-          resume: async (_intent, { sessionId }) => {
+          resume: async (intent, { sessionId }) => {
             const tracked = await resolveTemporaryThrottleResumeSource(sessionId);
             if (!tracked) {
               temporaryThrottleResumeSnapshotsBySessionId.delete(sessionId);
               throw new Error('temporary_throttle_session_not_found');
             }
-            const result = await resumeTrackedTemporaryThrottleSession({
+            if (!intent.continuation) {
+              return {
+                status: 'terminal' as const,
+                lastError: 'temporary_throttle_continuation_identity_missing',
+              };
+            }
+            const result = await continueTrackedTemporaryThrottleSession({
               tracked,
               sessionId,
               credentials,
               readCredentials,
               spawnSession,
+              attemptId: intent.issueFingerprint,
+              continuation: intent.continuation,
             });
-            if (result.status === 'resumed') {
+            if (result.status === 'continued') {
               temporaryThrottleResumeSnapshotsBySessionId.delete(sessionId);
-              logger.debug('[DAEMON RUN] Temporary throttle recovery resumed session', {
+              logger.debug('[DAEMON RUN] Temporary throttle recovery handed continuation to Pending', {
                 sessionId,
-                resumedSessionId: result.sessionId,
               });
-              return;
+              return result;
             }
-            if (result.status === 'unavailable') {
-              throw new Error(`temporary_throttle_resume_unavailable:${result.reason}`);
+            if (result.status === 'superseded' || result.status === 'terminal') {
+              temporaryThrottleResumeSnapshotsBySessionId.delete(sessionId);
+              return result;
             }
-            throw new Error(`temporary_throttle_resume_failed:${result.errorCode ?? result.reason}`);
+            const runtimeResult = result.runtimeResult;
+            if (runtimeResult.status === 'unavailable') {
+              throw new Error(`temporary_throttle_resume_unavailable:${runtimeResult.reason}`);
+            }
+            throw new Error(`temporary_throttle_resume_failed:${runtimeResult.errorCode ?? runtimeResult.reason}`);
           },
         });
         temporaryThrottleRecoveryScheduler.hydrate();
@@ -6003,7 +6043,12 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             resolveCurrentRuntimeAuthFailureSource: resolveCurrentRuntimeAuthFailureSourceForSession,
             resolveProviderQualifiedRuntimeAuthFailureSource,
             runtimeAuthApply,
-            temporaryThrottleRecovery,
+            temporaryThrottleRecovery: {
+              enable: async (temporaryThrottleInput) => await temporaryThrottleRecovery.enable({
+                ...temporaryThrottleInput,
+                continuation: interruptedContinuation,
+              }),
+            },
             credentialRefreshService: connectedServiceRefreshCoordinator,
             restartSession: async (tracked) => {
               if (pidToTrackedSession.get(tracked.pid) !== tracked) {
@@ -7197,7 +7242,9 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           status: 'offline',
           pid: process.pid,
           httpPort: controlPort,
-          startedAt: Date.now()
+          startedAt: Date.now(),
+          startedWithCliVersion: daemonStateCliVersion,
+          daemonPendingSessionActivationSupported: true,
         };
 
       const restartOnAuthUpdate = parseBooleanEnv(
@@ -8035,7 +8082,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             activeProfileId: target.profileId,
             generation: target.generation,
             credentialRevision: target.credentialRevision,
-            reason: input.committedGeneration.provenance,
+            reason: input.generationApplyReason,
             fromProfileId: input.fromProfileId,
           });
           const mapped = mapCommittedGenerationApplyResult({
@@ -8354,13 +8401,14 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                             ...(onDemandScope ? { onDemandScope } : {}),
                           }).endpointCandidates;
                         },
-                        requestPayloadFile: async ({ transferId, endpointCandidates, destinationPath, openBody, timeoutMs }) =>
+                        requestPayloadFile: async ({ transferId, endpointCandidates, destinationPath, openBody, timeoutMs, onProgress }) =>
                           await requestDirectPeerTransferToFile({
                             transferId,
                             endpointCandidates,
                             destinationPath,
                             ...(openBody !== undefined ? { openBody } : {}),
                             ...(typeof timeoutMs === 'number' ? { timeoutMs } : {}),
+                            ...(onProgress ? { onProgress } : {}),
                           }),
                         clearPublishedTransfer: (transferId) => directPeerRegistry!.clearPublishedTransfer(transferId),
                       },
@@ -8450,26 +8498,39 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 });
               });
 
-              connectedApiMachine.onPendingSessionActivationHint(async (hint) => {
+              const activateExactPendingSession = async (hint: PendingSessionActivationInput): Promise<void> => {
                 await freshRecoveryReservations.withLifecycle(hint.sessionId, async () => {
                   if (await freshRecoveryReservations.isReserved(hint.sessionId)) return;
-                  const result = await activatePendingInactiveSession({
-                    credentials,
-                    machineId,
-                    sessionId: hint.sessionId,
-                    requestId: hint.requestId,
-                    pendingVersion: hint.pendingVersion,
-                    spawnSession: async (options) => await spawnSession(options),
-                  });
-                  if (result.status === 'rejected') {
-                    logger.warn('[DAEMON RUN] Exact inactive Pending activation was rejected; Pending custody retained', {
+                  try {
+                    const result = await activatePendingInactiveSession({
+                      credentials,
+                      machineId,
+                      sessionId: hint.sessionId,
+                      requestId: hint.requestId,
+                      pendingVersion: hint.pendingVersion,
+                      spawnSession: async (options) => await spawnSession(options),
+                    });
+                    if (result.status === 'rejected') {
+                      logger.warn('[DAEMON RUN] Exact inactive Pending activation was rejected', {
+                        sessionId: hint.sessionId,
+                        requestId: hint.requestId,
+                        source: hint.source,
+                        reason: result.reason,
+                      });
+                    }
+                  } catch (error) {
+                    logger.warn('[DAEMON RUN] Exact inactive Pending activation failed; durable authorization retained', {
                       sessionId: hint.sessionId,
                       requestId: hint.requestId,
                       source: hint.source,
-                      reason: result.reason,
+                      error: serializeAxiosErrorForLog(error),
                     });
                   }
                 });
+              };
+
+              connectedApiMachine.onPendingSessionActivationHint(async (hint) => {
+                await activateExactPendingSession(hint);
               });
 
               daemonConnectivityCoordinator = createDaemonConnectivityCoordinator({
@@ -8516,6 +8577,15 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
                   await reconcileSessionMachineAccessBindings();
 
+                  await recoverPendingSessionActivations({
+                    token: credentials.token,
+                    activate: activateExactPendingSession,
+                  }).catch((error) => {
+                    logger.warn('[DAEMON RUN] Pending session activation reconnect scan failed; durable custody retained', {
+                      error: serializeAxiosErrorForLog(error),
+                    });
+                  });
+
                   // FIX-1a (incident Jun-11 H-A): keep the account-settings snapshot fresh on
                   // (re)connect. Cheap no-op when a scope-matching snapshot is already active;
                   // populates it when the startup warm-up failed (e.g. started offline).
@@ -8531,32 +8601,8 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   didRefreshMachineMetadata = true;
                   // Keep machine metadata fresh without clobbering user-provided fields (e.g. displayName) that may exist.
                   await connectedApiMachine.updateMachineMetadata((metadata) => {
-                    const base = (metadata ?? (machine.metadata as any) ?? {}) as any;
-                    const next: MachineMetadata = {
-                      ...base,
-                      host: preferredHost,
-                      platform: os.platform(),
-                      happyCliVersion: packageJson.version,
-                      homeDir: os.homedir(),
-                      happyHomeDir: configuration.happyHomeDir,
-                      happyLibDir: projectPath(),
-                    } as MachineMetadata;
-
-                    // If nothing changes, skip emitting an update entirely.
-                    const current = base as Partial<MachineMetadata>;
-                    const isSame =
-                      current.host === next.host &&
-                      current.platform === next.platform &&
-                      current.happyCliVersion === next.happyCliVersion &&
-                      current.homeDir === next.homeDir &&
-                      current.happyHomeDir === next.happyHomeDir &&
-                      current.happyLibDir === next.happyLibDir;
-
-                    if (isSame) {
-                      return base as MachineMetadata;
-                    }
-
-                    return next;
+                    const base = (metadata ?? machine.metadata ?? {}) as Partial<MachineMetadata>;
+                    return refreshMachineMetadataForCurrentDaemon(base, preferredHost);
                   }).catch((error) => {
                     didRefreshMachineMetadata = false;
                     logger.warn('[DAEMON RUN] Failed to refresh machine metadata on reconnect', error);

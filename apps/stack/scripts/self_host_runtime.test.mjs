@@ -126,6 +126,38 @@ test('local self-host runtime promotion exposes the server-embedded UI to the po
   assert.equal(observedEmbeddedUi, '<!doctype html><title>embedded</title>');
 });
 
+test('local self-host runtime promotion keeps the complete migration closure beside the installed server', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'happier-self-host-migration-closure-test-'));
+  t.after(async () => {
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  const binaryName = 'happier-server';
+  const payloadRoot = join(tmp, 'payload');
+  const sourceBinaryPath = await createLocalSelfHostRuntimePayloadRoot({ rootDir: payloadRoot, binaryName });
+  await mkdir(join(payloadRoot, 'runtime'), { recursive: true });
+  await mkdir(join(payloadRoot, 'prisma', 'migrations'), { recursive: true });
+  await writeFile(join(payloadRoot, 'runtime', 'prisma-migrate'), 'runner\n', 'utf8');
+  await writeFile(join(payloadRoot, 'prisma', 'migrations', 'migration.sql'), '-- migration\n', 'utf8');
+  await writeFile(join(payloadRoot, 'happier-server-migrate'), '#!/bin/sh\nexit 0\n', 'utf8');
+  await chmod(join(payloadRoot, 'happier-server-migrate'), 0o755);
+
+  const installRoot = join(tmp, 'install');
+  const config = {
+    platform: process.platform,
+    dataDir: join(installRoot, 'data'),
+    versionsDir: join(installRoot, 'versions'),
+    serverBinaryPath: join(installRoot, 'bin', binaryName),
+    serverPreviousBinaryPath: join(installRoot, 'bin', `${binaryName}.previous`),
+  };
+
+  await installSelfHostBinaryFromLocalPath({ sourceBinaryPath, binaryName, config });
+
+  assert.equal(await readFile(join(installRoot, 'bin', 'runtime', 'prisma-migrate'), 'utf8'), 'runner\n');
+  assert.equal(await readFile(join(installRoot, 'bin', 'prisma', 'migrations', 'migration.sql'), 'utf8'), '-- migration\n');
+  assert.match(await readFile(join(installRoot, 'bin', 'happier-server-migrate'), 'utf8'), /exit 0/);
+});
+
 test('managed UI activation fails closed when the server payload has no embedded UI', async () => {
   await assert.rejects(
     installUiWebFromEmbeddedRuntime({
@@ -160,8 +192,8 @@ test('relay-host forwarding maps legacy HStack update onto the canonical idempot
   );
 });
 
-test('self-host install-time SQLite migration delegates to the installed canonical server-light binary', async () => {
-  assert.equal(typeof selfHostRuntimeModule.applySelfHostSqliteMigrationsAtInstallTime, 'function');
+test('self-host install-time migration delegates to the canonical provider plan', async () => {
+  assert.equal(typeof selfHostRuntimeModule.applySelfHostServerMigrationsAtInstallTime, 'function');
   const calls = [];
   const env = {
     HAPPIER_SQLITE_AUTO_MIGRATE: '0',
@@ -173,7 +205,7 @@ test('self-host install-time SQLite migration delegates to the installed canonic
     serverBinaryPath: '/opt/happier/bin/happier-server',
   };
 
-  await selfHostRuntimeModule.applySelfHostSqliteMigrationsAtInstallTime({
+  await selfHostRuntimeModule.applySelfHostServerMigrationsAtInstallTime({
     config,
     env,
     runCommandImpl: (cmd, args, options) => {
@@ -193,12 +225,24 @@ test('self-host install-time SQLite migration delegates to the installed canonic
       },
     },
   ]);
+
+  calls.length = 0;
+  await selfHostRuntimeModule.applySelfHostServerMigrationsAtInstallTime({
+    config,
+    env: { HAPPIER_DB_PROVIDER: 'postgres', DATABASE_URL: 'postgresql://db/happier' },
+    runCommandImpl: (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return { status: 0 };
+    },
+  });
+  assert.equal(calls[0].cmd, '/opt/happier/bin/happier-server-migrate');
+  assert.deepEqual(calls[0].args, []);
 });
 
 test('self-host install-time SQLite migration preserves canonical binary failure', async () => {
   const failure = new Error('canonical migration exit 23');
   await assert.rejects(
-    selfHostRuntimeModule.applySelfHostSqliteMigrationsAtInstallTime({
+    selfHostRuntimeModule.applySelfHostServerMigrationsAtInstallTime({
       config: {
         installRoot: '/opt/happier',
         serverBinaryPath: '/opt/happier/bin/happier-server',
@@ -1929,12 +1973,11 @@ test('buildSelfHostDoctorChecks does not require external minisign and includes 
     },
     {
       state: { uiWeb: { installed: true } },
-      commandExists: (name) => new Set(['tar', 'systemctl']).has(name),
+      commandExists: (name) => name === 'systemctl',
       pathExists: (p) => p.endsWith('happier-server') || p.endsWith('server.env') || p.endsWith('index.html'),
     },
   );
 
-  assert.ok(checks.find((c) => c.name === 'tar')?.ok);
   assert.ok(checks.find((c) => c.name === 'systemctl')?.ok);
   assert.equal(checks.some((c) => c.name === 'minisign'), false);
   assert.ok(checks.find((c) => c.name === 'ui-web')?.ok);
@@ -1957,6 +2000,42 @@ test('buildSelfHostDoctorChecks flags missing ui-web bundle when state expects u
   );
 
   assert.equal(checks.find((c) => c.name === 'ui-web')?.ok, false);
+});
+
+test('buildSelfHostDoctorChecks resolves Windows PATHEXT commands without an external where executable', async (t) => {
+  const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(originalPlatformDescriptor);
+  const originalPath = process.env.PATH;
+  const originalPathExt = process.env.PATHEXT;
+  const root = await mkdtemp(join(tmpdir(), 'happier-self-host-doctor-windows-path-'));
+  t.after(async () => {
+    Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalPathExt === undefined) delete process.env.PATHEXT;
+    else process.env.PATHEXT = originalPathExt;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await writeFile(join(root, 'powershell.exe'), '', 'utf8');
+  await writeFile(join(root, 'schtasks.exe'), '', 'utf8');
+  Object.defineProperty(process, 'platform', { ...originalPlatformDescriptor, value: 'win32' });
+  process.env.PATH = root;
+  process.env.PATHEXT = '.EXE;.CMD';
+
+  const checks = buildSelfHostDoctorChecks({
+    platform: 'win32',
+    mode: 'user',
+    serverBinaryPath: 'C:\\happier\\happier-server.exe',
+    configEnvPath: 'C:\\happier\\server.env',
+    uiWebCurrentDir: 'C:\\happier\\ui-web',
+  }, {
+    state: { uiWeb: { installed: false } },
+    pathExists: () => true,
+  });
+
+  assert.equal(checks.find((check) => check.name === 'powershell')?.ok, true);
+  assert.equal(checks.find((check) => check.name === 'schtasks')?.ok, true);
 });
 
 test('normalizeSelfHostAutoUpdateState upgrades legacy boolean config to structured config', () => {

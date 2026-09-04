@@ -180,6 +180,9 @@ export function createCodexAppServerExecutionRunBackend(args: Readonly<{
     sessionId: 'codex-app-server-execution-run',
     getLastObservedMessageSeq: () => lastObservedMessageSeq,
     updateMetadata: async () => undefined,
+    // Execution runs project transcript output through `emit`; they do not own a canonical
+    // ApiSessionClient event stream. The shared app-server runtime can still emit lifecycle-only
+    // events (for example context compaction), so accept and intentionally ignore them here.
     sendSessionEvent: () => undefined,
     sendAgentMessage: (provider, body) => {
       emitCommittedTranscriptBody(provider, body);

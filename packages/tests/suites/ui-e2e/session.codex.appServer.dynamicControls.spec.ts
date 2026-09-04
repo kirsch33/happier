@@ -10,6 +10,7 @@ import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } f
 import {
     openNewSessionMachineSelection,
     openNewSessionPathSelection,
+    selectCurrentPathCheckoutIfPresent,
 } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
 import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { waitForInitialAppUi } from '../../src/testkit/uiE2e/waitForInitialAppUi';
@@ -112,7 +113,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{ scriptPath: stri
         '  }',
         '  if (msg.method === "model/list") {',
         '    process.stdout.write(JSON.stringify({ id: msg.id, result: [',
-        '      { id: "gpt-5.4", displayName: "GPT-5.4", description: "Latest frontier agentic coding model.", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast responses with lighter reasoning" }, { reasoningEffort: "medium", description: "Balanced reasoning depth" }, { reasoningEffort: "high", description: "Greater reasoning depth for complex problems" }], defaultReasoningEffort: "medium" },',
+        '      { id: "gpt-5.4", displayName: "GPT-5.4", description: "Latest frontier agentic coding model.", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast responses with lighter reasoning" }, { reasoningEffort: "medium", description: "Balanced reasoning depth" }, { reasoningEffort: "high", description: "Greater reasoning depth for complex problems" }], defaultReasoningEffort: "medium", serviceTiers: [{ id: "priority", name: "Fast" }] },',
         '      { id: "gpt-5.4-mini", displayName: "GPT-5.4 mini", description: "Smaller frontier agentic coding model.", supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Balanced reasoning depth" }, { reasoningEffort: "high", description: "Greater reasoning depth for complex problems" }], defaultReasoningEffort: "medium" }',
         '    ] }) + "\\n");',
         '    continue;',
@@ -348,6 +349,7 @@ async function connectDaemonWithFakeCodexAppServer(params: Readonly<{
             HAPPIER_DISABLE_CAFFEINATE: '1',
             HAPPIER_E2E_PROVIDER_USE_CLI_SOURCE_ENTRYPOINT: '1',
             HAPPIER_VARIANT: 'dev',
+            HAPPIER_CODEX_PATH: fakeCodexAppServerPath,
             HAPPIER_CODEX_APP_SERVER_BIN: fakeCodexAppServerPath,
             HAPPIER_CODEX_APP_SERVER_RPC_TIMEOUT_MS: '10000',
         },
@@ -529,6 +531,7 @@ async function selectCodexAgentAndMachine(params: Readonly<{ page: Page; uiBaseU
     await expect(blockingGuidance).toHaveCount(0, { timeout: 60_000 });
 
     await selectNewSessionAgent({ page: params.page, agentId: 'codex' });
+    await selectCurrentPathCheckoutIfPresent(params.page);
 
     const pathChip = params.page.getByTestId('agent-input-path-chip');
     if ((await pathChip.count()) > 0) {

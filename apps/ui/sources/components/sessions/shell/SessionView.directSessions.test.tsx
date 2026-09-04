@@ -13,6 +13,7 @@ import {
 } from '@happier-dev/protocol';
 import type { connectedServiceQuotaRecoveryCreditConsume } from '@/sync/ops/connectedServiceQuotaRecoveryCredits';
 import type { RestartStaleSessionRunnerResult } from '@/sync/ops/sessionRunnerRestart';
+import type { SessionUsageLimitRecoveryOperationResult } from '@/sync/ops/sessionUsageLimitRecovery';
 
 import { AppPaneProvider } from '@/components/appShell/panes/AppPaneProvider';
 import { createDeferred, pressTestInstanceAsync, renderScreen, standardCleanup } from '@/dev/testkit';
@@ -23,9 +24,21 @@ import { connectedServiceProfileKey } from '@/sync/domains/connectedServices/con
 import { __resetConnectedServiceQuotaSnapshotStore } from '@/hooks/server/connectedServices/connectedServiceQuotaSnapshotStore';
 import { sessionRunnerRuntimeStatusRetention } from '@/sync/domains/sessionRunnerRuntime/sessionRunnerRuntimeStatusRetention';
 import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers';
+import { existingSessionDraftSemanticValues } from '@/sync/domains/input/drafts/existingSessionDraftSemanticValues';
+import {
+  captureSessionDraftCurrentness,
+  clearSessionDraftCurrentness,
+  deleteSessionDraft,
+  getSessionDraftSnapshot,
+  subscribeSessionDraft,
+  writeExistingSessionDraft,
+} from '@/sync/ops/sessionDrafts/sessionDraftRepository';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 (globalThis as any).__DEV__ = false;
+
+const TEST_SERVER_ACCOUNT_SCOPE = { serverId: 'server-1', accountId: 'account-1' } as const;
+const TEST_SESSION_DRAFT_ADDRESS = { kind: 'session' as const, sessionId: 's1' };
 
 const machineDirectSessionStatusGetSpy = vi.hoisted(() => vi.fn());
 const machineDirectSessionTakeoverSpy = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
@@ -56,14 +69,7 @@ const sessionUsageLimitCheckNowSpy = vi.hoisted(() =>
     (
       _sessionId: string,
       _opts?: unknown,
-    ) => Promise<{
-      ok: true;
-      status?: 'ready' | 'waiting' | 'resumed' | 'exhausted' | 'inactive';
-    } | {
-      ok: false;
-      error: string;
-      errorCode?: string;
-    }>
+    ) => Promise<SessionUsageLimitRecoveryOperationResult>
   >(async (_sessionId: string, _opts?: unknown) => ({ ok: true })),
 );
 const sessionUsageLimitSwitchAccountNowSpy = vi.hoisted(() =>
@@ -106,6 +112,11 @@ const restartStaleSessionRunnerSpy = vi.hoisted(() =>
     async (_request: unknown) => ({ ok: true, status: 'restarted', sessionId: 's1' }),
   ),
 );
+const restartSessionRunnerForConfigurationSpy = vi.hoisted(() =>
+  vi.fn<(_request: unknown) => Promise<RestartStaleSessionRunnerResult>>(
+    async (_request: unknown) => ({ ok: true, status: 'restarted', sessionId: 's1' }),
+  ),
+);
 const getSessionRunnerRuntimeStatusSpy = vi.hoisted(() =>
   vi.fn<(_request: unknown) => Promise<unknown>>(async () => null),
 );
@@ -118,8 +129,10 @@ const setWorkspaceReviewCommentDraftIncludedSpy = vi.hoisted(() => vi.fn());
 const publishSessionAcpSessionModeOverrideToMetadataSpy = vi.hoisted(() => vi.fn(async () => {}));
 const publishSessionAcpConfigOptionOverrideToMetadataSpy = vi.hoisted(() => vi.fn(async () => {}));
 const modalAlertSpy = vi.hoisted(() => vi.fn());
+const routerPushSpy = vi.hoisted(() => vi.fn());
 const chatListPropsSpy = vi.hoisted(() => vi.fn());
 const chatHeaderPropsSpy = vi.hoisted(() => vi.fn());
+const chatHeaderHarnessState = vi.hoisted(() => ({ renderRightElement: false }));
 const voiceSurfacePropsSpy = vi.hoisted(() => vi.fn());
 const showDirectSessionTakeoverDialogSpy = vi.hoisted(() =>
   vi.fn<() => Promise<{ action: 'direct' | 'persisted' | null; forceStop: boolean }>>(async () => ({ action: null, forceStop: false })),
@@ -276,6 +289,9 @@ const themeColors = vi.hoisted(() => ({
 }));
 
 installSessionShellCommonModuleMocks({
+  featureEnabled: () => ({
+    useFeatureEnabled: (featureId: string) => featureEnabledState[featureId as keyof typeof featureEnabledState] ?? false,
+  }),
   reactNative: async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock({
@@ -294,12 +310,18 @@ installSessionShellCommonModuleMocks({
   },
   router: async () => {
     const { createExpoRouterMock } = await import('@/dev/testkit/mocks/router');
-    return createExpoRouterMock().module;
+    return createExpoRouterMock({ router: { push: routerPushSpy } }).module;
   },
   text: async () => {
     const { createTextModuleMock } = await import('@/dev/testkit/mocks/text');
     return createTextModuleMock({
-      translate: (key: string) => key,
+      translate: (key: string, params?: Record<string, unknown>) => {
+        if (key === 'session.usageLimitRecovery.statusWaitingResetUntil') {
+          const { time } = params as { time: string };
+          return `${key}:${time}`;
+        }
+        return key;
+      },
     });
   },
   modal: async () => {
@@ -337,7 +359,7 @@ installSessionShellCommonModuleMocks({
         useIsDataReady: () => true,
         useRealtimeStatus: () => 'connected',
         useSessionMessages: () => ({ messages: sessionMessagesState.current, isLoaded: true }),
-        useSessionTranscriptIds: () => ({ ids: ['m1'], isLoaded: true }),
+        useSessionTranscriptIds: () => ({ ids: ['m1'], isLoaded: true, hasRetainedContent: false }),
         useSessionPendingMessages: () => ({ messages: [], discarded: [], isLoaded: true }),
         useWorkspaceReviewCommentsDrafts: () => reviewCommentDraftsState.current,
         useSessionReviewCommentsDrafts: () => reviewCommentDraftsState.current,
@@ -426,7 +448,7 @@ vi.mock('@/components/sessions/panes/url/useSessionPaneUrlSync', () => ({
 vi.mock('@/components/sessions/transcript/ChatHeaderView', () => ({
   ChatHeaderView: (props: any) => {
     chatHeaderPropsSpy(props);
-    return null;
+    return chatHeaderHarnessState.renderRightElement ? props.rightElement ?? null : null;
   },
 }));
 vi.mock('@/components/sessions/transcript/ChatList', () => ({
@@ -453,9 +475,6 @@ vi.mock('@/components/voice/surface/VoiceSurface', () => ({
 vi.mock('@/components/sessions/attachments/AttachmentFilePicker', () => ({
   AttachmentFilePicker: () => null,
 }));
-vi.mock('@/hooks/server/useFeatureEnabled', () => ({
-  useFeatureEnabled: (featureId: string) => featureEnabledState[featureId as keyof typeof featureEnabledState] ?? false,
-}));
 vi.mock('@/utils/platform/responsive', () => ({
   getDeviceType: () => 'tablet',
   useDeviceType: () => 'tablet',
@@ -466,6 +485,12 @@ vi.mock('@/utils/platform/responsive', () => ({
 vi.mock('@/hooks/session/useDraft', () => ({
   useDraft: (_sessionId: string, value: string, onChange: (next: string) => void) => {
     draftHookState.valuesBySessionId.set(_sessionId, value);
+    const address = { kind: 'session' as const, sessionId: _sessionId };
+    const draftSnapshot = React.useSyncExternalStore(
+      (listener) => subscribeSessionDraft(TEST_SERVER_ACCOUNT_SCOPE, address, listener),
+      () => getSessionDraftSnapshot(TEST_SERVER_ACCOUNT_SCOPE, address),
+      () => getSessionDraftSnapshot(TEST_SERVER_ACCOUNT_SCOPE, address),
+    );
     return {
     clearDraft: () => {
       draftHookState.valuesBySessionId.set(_sessionId, '');
@@ -518,6 +543,38 @@ vi.mock('@/hooks/session/useDraft', () => ({
         onChange(snapshot.text);
       }
     },
+    captureDraftForOutboundHandoff: () => ({
+      sessionId: _sessionId,
+      text: draftHookState.valuesBySessionId.get(_sessionId) ?? '',
+      scope: TEST_SERVER_ACCOUNT_SCOPE,
+      currentness: captureSessionDraftCurrentness({
+        scope: TEST_SERVER_ACCOUNT_SCOPE,
+        address,
+      }),
+    }),
+    clearDraftCurrentness: (snapshot: Readonly<{ text: string; currentness?: any }>) => {
+      if (!snapshot.currentness) return false;
+      const currentText = draftHookState.valuesBySessionId.get(_sessionId) ?? '';
+      if (currentText !== snapshot.text) {
+        writeExistingSessionDraft({
+          scope: TEST_SERVER_ACCOUNT_SCOPE,
+          sessionId: _sessionId,
+          patch: { text: currentText },
+        });
+      }
+      void clearSessionDraftCurrentness({
+        scope: TEST_SERVER_ACCOUNT_SCOPE,
+        address,
+        currentness: snapshot.currentness,
+      });
+      const remainingText = getSessionDraftSnapshot(TEST_SERVER_ACCOUNT_SCOPE, address)
+        ?.document.composer.text.value ?? '';
+      draftHookState.valuesBySessionId.set(_sessionId, remainingText);
+      onChange(remainingText);
+      return true;
+    },
+    draftSnapshot,
+    draftScope: TEST_SERVER_ACCOUNT_SCOPE,
   };
   },
 }));
@@ -592,6 +649,7 @@ vi.mock('@/sync/ops/sessionUsageLimitRecovery', () => ({
 }));
 vi.mock('@/sync/ops/sessionRunnerRestart', () => ({
   getSessionRunnerRuntimeStatus: (request: unknown) => getSessionRunnerRuntimeStatusSpy(request),
+  restartSessionRunnerForConfigurationWithObserve: (request: unknown) => restartSessionRunnerForConfigurationSpy(request),
   restartStaleSessionRunnerWithObserve: (request: unknown) => restartStaleSessionRunnerSpy(request),
 }));
 vi.mock('@/sync/ops/connectedServiceQuotaRecoveryCredits', () => ({
@@ -661,7 +719,11 @@ vi.mock('@/sync/domains/session/control/localControlSwitch', async (importOrigin
 });
 
 describe('SessionView (direct sessions)', () => {
-  async function renderSessionView(props: { sessionId?: string; routeServerId?: string } = {}) {
+  async function renderSessionView(props: {
+    sessionId?: string;
+    routeServerId?: string;
+    contentOverride?: React.ReactNode;
+  } = {}) {
     const sessionId = props.sessionId ?? 's1';
     const routeServerId = props.routeServerId?.trim();
     const sessions = storageState.sessions as Record<string, any>;
@@ -674,12 +736,20 @@ describe('SessionView (direct sessions)', () => {
     const { SessionView } = await import('./SessionView');
     return renderScreen(
       <AppPaneProvider>
-        <SessionView id={sessionId} routeServerId={props.routeServerId} />
+        <SessionView
+          id={sessionId}
+          routeServerId={props.routeServerId}
+          contentOverride={props.contentOverride}
+        />
       </AppPaneProvider>,
     );
   }
 
-  async function renderSessionViewAndSettle(props: { sessionId?: string; routeServerId?: string } = {}) {
+  async function renderSessionViewAndSettle(props: {
+    sessionId?: string;
+    routeServerId?: string;
+    contentOverride?: React.ReactNode;
+  } = {}) {
     const screen = await renderSessionView(props);
     await settleDirectSessionView();
     return screen;
@@ -738,6 +808,42 @@ describe('SessionView (direct sessions)', () => {
   function findStaleRunnerStatusBadge(screen: Awaited<ReturnType<typeof renderSessionView>>) {
     return findAgentInput(screen).props.statusBadges.find((badge: { key?: string }) =>
       badge.key === 'session-stale-runner');
+  }
+
+  function findMcpSelectionRestartStatusBadge(screen: Awaited<ReturnType<typeof renderSessionView>>) {
+    return findAgentInput(screen).props.statusBadges.find((badge: { key?: string }) =>
+      badge.key === 'session-mcp-selection-restart-required');
+  }
+
+  function installMcpSelectionRestartRequired() {
+    storageState.machines['machine-1'] = {
+      id: 'machine-1',
+      active: true,
+      metadata: { host: 'happy-host', homeDir: '/tmp' },
+    } as any;
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      active: true,
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        hostPid: 123,
+        mcpSelectionV1: {
+          v: 1,
+          managedServersEnabled: true,
+          forceIncludeServerIds: ['server-new'],
+          forceExcludeServerIds: [],
+        },
+        mcpSelectionRestartRequiredV1: {
+          v: 1,
+          appliedSelection: {
+            v: 1,
+            managedServersEnabled: true,
+            forceIncludeServerIds: [],
+            forceExcludeServerIds: [],
+          },
+        },
+      },
+    };
   }
 
   function buildSessionRunnerRuntimeStatus(input: Readonly<{
@@ -952,6 +1058,7 @@ describe('SessionView (direct sessions)', () => {
     sessionRunnerRuntimeStatusRetention.clear();
     chatListPropsSpy.mockReset();
     chatHeaderPropsSpy.mockReset();
+    chatHeaderHarnessState.renderRightElement = false;
     voiceSurfacePropsSpy.mockReset();
     featureEnabledState.voice = false;
     featureEnabledState['files.reviewComments'] = false;
@@ -962,6 +1069,7 @@ describe('SessionView (direct sessions)', () => {
     settingsState.current = {};
     settingByKeyState.current = {};
     modalAlertSpy.mockReset();
+    routerPushSpy.mockReset();
     syncRefreshSessionMessagesSpy.mockReset();
     syncSubmitMessageSpy.mockReset();
     syncSubmitMessageSpy.mockImplementation(async (...args: unknown[]) => {
@@ -980,6 +1088,8 @@ describe('SessionView (direct sessions)', () => {
     sessionUsageLimitConsumeResetCreditSpy.mockResolvedValue({ ok: true });
     restartStaleSessionRunnerSpy.mockReset();
     restartStaleSessionRunnerSpy.mockResolvedValue({ ok: true, status: 'restarted', sessionId: 's1' });
+    restartSessionRunnerForConfigurationSpy.mockReset();
+    restartSessionRunnerForConfigurationSpy.mockResolvedValue({ ok: true, status: 'restarted', sessionId: 's1' });
     getSessionRunnerRuntimeStatusSpy.mockReset();
     getSessionRunnerRuntimeStatusSpy.mockResolvedValue(null);
     connectedServiceQuotaRecoveryCreditConsumeSpy.mockReset();
@@ -1142,6 +1252,54 @@ describe('SessionView (direct sessions)', () => {
     }));
   });
 
+  it('reopens a session while usage-limit recovery is waiting for a known reset time', async () => {
+    featureEnabledState['sessions.usageLimitRecovery'] = true;
+    settingByKeyState.current.usageLimitRecoverySettingsV1 = { v: 1, mode: 'auto_wait', resumePromptMode: 'off' };
+    const resetAtMs = Date.UTC(2026, 4, 17, 17, 30, 0);
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      metadata: {
+        ...storageState.sessions.s1.metadata,
+        sessionUsageLimitRecoveryV1: {
+          v: 1,
+          status: 'waiting',
+          issueFingerprint: `usage-limit:claude:unknown-turn:1:${resetAtMs}`,
+          armedAtMs: 1,
+          resetAtMs,
+          nextCheckAtMs: resetAtMs,
+          attemptCount: 1,
+          maxAttempts: 3,
+          lastProbeError: null,
+          resumePromptMode: 'off',
+          selectedAuth: { kind: 'native' },
+        },
+      },
+      lastRuntimeIssue: {
+        v: 1,
+        scope: 'primary_session',
+        status: 'failed',
+        code: 'usage_limit',
+        source: 'usage_limit',
+        occurredAt: 1,
+        provider: 'claude',
+        usageLimit: {
+          v: 1,
+          resetAtMs,
+          retryAfterMs: null,
+          quotaScope: 'account',
+          recoverability: 'wait',
+        },
+      },
+    };
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+
+    expect(findUsageLimitStatusBadge(screen)).toEqual(expect.objectContaining({
+      label: expect.stringContaining('session.usageLimitRecovery.statusWaitingResetUntil:'),
+      testID: 'session-usageLimit-status-badge',
+    }));
+  });
+
   it('renders stale-runner composer notice and badge from canonical daemon status', async () => {
     installStaleSessionRunnerStatus();
 
@@ -1153,6 +1311,34 @@ describe('SessionView (direct sessions)', () => {
       testID: 'session-staleRunner-status-badge',
       tone: 'warning',
     }));
+  });
+
+  it('renders the MCP restart notice and badge for an active-session selection change', async () => {
+    installMcpSelectionRestartRequired();
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    expect(screen.findByTestId('session.mcpSelectionRestartRequired.banner')).toBeTruthy();
+    expect(findMcpSelectionRestartStatusBadge(screen)).toEqual(expect.objectContaining({
+      testID: 'session.mcpSelectionRestartRequired.badge',
+      tone: 'warning',
+    }));
+
+  });
+
+  it('restarts the active runner from the MCP selection banner', async () => {
+    installMcpSelectionRestartRequired();
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session.mcpSelectionRestartRequired.restart'));
+    await settleDirectSessionView();
+
+    expect(restartSessionRunnerForConfigurationSpy).toHaveBeenCalledWith({
+      sessionId: 's1',
+      machineId: 'machine-1',
+      serverId: 'server-route-1',
+      expectedRunnerPid: 123,
+    });
+    expect(screen.findByTestId('session.mcpSelectionRestartRequired.banner')).toBeNull();
   });
 
   it('renders stale-runner composer notice from daemon status RPC for an inactive session when metadata is not seeded', async () => {
@@ -1945,6 +2131,58 @@ describe('SessionView (direct sessions)', () => {
     const [, message] = modalAlertSpy.mock.calls[0] ?? [];
     expect(String(message ?? '')).not.toContain('session_usage_limit_recovery_control_remote_unavailable');
     expect(String(message ?? '')).not.toContain('_');
+  });
+
+  it('starts fresh from a usage-limit recovery failure with a fresh explicit draft identity', async () => {
+    featureEnabledState['sessions.usageLimitRecovery'] = true;
+    settingByKeyState.current.usageLimitRecoverySettingsV1 = { v: 1, mode: 'ask' };
+    sessionUsageLimitCheckNowSpy.mockResolvedValueOnce({
+      ok: false,
+      error: 'switch failed',
+      uxDiagnostic: {
+        code: 'post_switch_verification_failed',
+        failurePhase: 'post_switch_verification',
+        source: 'usage_limit_recovery',
+        retryable: false,
+        suggestedActions: ['start_fresh_under_selected_account'],
+      },
+    });
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      active: true,
+      lastRuntimeIssue: {
+        v: 1,
+        scope: 'primary_session',
+        status: 'failed',
+        code: 'usage_limit',
+        source: 'usage_limit',
+        occurredAt: 1,
+        provider: 'codex',
+        usageLimit: {
+          v: 1,
+          resetAtMs: null,
+          retryAfterMs: null,
+          quotaScope: 'account',
+          recoverability: 'wait',
+        },
+      },
+    };
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-usageLimit-recovery-checkNow'));
+
+    const buttons = modalAlertSpy.mock.calls[0]?.[2] as Array<{ text?: string; onPress?: () => void }> | undefined;
+    const startFresh = buttons?.find((button) =>
+      button.text === 'newSession.connectedServiceSwitchUnavailable.startFreshAction');
+    expect(startFresh).toBeTruthy();
+    startFresh?.onPress?.();
+
+    expect(routerPushSpy).toHaveBeenCalledWith({
+      pathname: '/new',
+      params: {
+        draftId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+      },
+    });
   });
 
   it('updates AgentInput runtime status from fresh heartbeat fields without replacing the shell session', async () => {
@@ -3180,7 +3418,6 @@ describe('SessionView (direct sessions)', () => {
   });
 
   it('does not restore an old semantic snapshot over newer semantic choices after direct-session handoff failure', async () => {
-    const draftValues = await import('@/sync/domains/input/draftValues/sessionDraftValueStore');
     const oldRecipient = { kind: 'execution_run' as const, runId: 'run-old' };
     const newRecipient = { kind: 'execution_run' as const, runId: 'run-new' };
     const oldMention = {
@@ -3195,11 +3432,10 @@ describe('SessionView (direct sessions)', () => {
     };
     let rejectSubmit!: (error: Error) => void;
 
-    draftValues.resetSessionDraftValuesCachesForTests();
-    draftValues.clearSessionDraftValues(null, 's1', { lifecycle: 'sessionDeleted' });
-    draftValues.writeSessionDraftValue(null, 's1', 'routing.recipient', oldRecipient);
-    draftValues.writeSessionDraftValue(null, 's1', 'routing.executionRunDelivery', 'interrupt');
-    draftValues.writeSessionDraftValue(null, 's1', 'structuredInput.mentions', [oldMention]);
+    void deleteSessionDraft({ scope: TEST_SERVER_ACCOUNT_SCOPE, address: TEST_SESSION_DRAFT_ADDRESS });
+    existingSessionDraftSemanticValues.write(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.recipient', oldRecipient);
+    existingSessionDraftSemanticValues.write(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.executionRunDelivery', 'interrupt');
+    existingSessionDraftSemanticValues.write(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'structuredInput.mentions', [oldMention]);
 
     try {
       syncSubmitMessageSpy.mockImplementationOnce(async (...args: unknown[]) => {
@@ -3225,13 +3461,13 @@ describe('SessionView (direct sessions)', () => {
       });
       await flushHookEffects({ cycles: 1, turns: 1 });
 
-      expect(draftValues.readSessionDraftValue(null, 's1', 'routing.recipient')).toBeUndefined();
-      expect(draftValues.readSessionDraftValue(null, 's1', 'routing.executionRunDelivery')).toBeUndefined();
-      expect(draftValues.readSessionDraftValue(null, 's1', 'structuredInput.mentions')).toBeUndefined();
+      expect(existingSessionDraftSemanticValues.read(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.recipient')).toBeUndefined();
+      expect(existingSessionDraftSemanticValues.read(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.executionRunDelivery')).toBeUndefined();
+      expect(existingSessionDraftSemanticValues.read(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'structuredInput.mentions')).toBeUndefined();
 
-      draftValues.writeSessionDraftValue(null, 's1', 'routing.recipient', newRecipient);
-      draftValues.writeSessionDraftValue(null, 's1', 'routing.executionRunDelivery', 'prompt');
-      draftValues.writeSessionDraftValue(null, 's1', 'structuredInput.mentions', [newMention]);
+      existingSessionDraftSemanticValues.write(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.recipient', newRecipient);
+      existingSessionDraftSemanticValues.write(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.executionRunDelivery', 'prompt');
+      existingSessionDraftSemanticValues.write(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'structuredInput.mentions', [newMention]);
 
       await act(async () => {
         rejectSubmit(new Error('direct send rejected'));
@@ -3241,13 +3477,12 @@ describe('SessionView (direct sessions)', () => {
 
       agentInput = findAgentInput(screen);
       expect(agentInput.props.value).toBe('');
-      expect(draftValues.readSessionDraftValue(null, 's1', 'routing.recipient')).toEqual(newRecipient);
-      expect(draftValues.readSessionDraftValue(null, 's1', 'routing.executionRunDelivery')).toBe('prompt');
-      expect(draftValues.readSessionDraftValue(null, 's1', 'structuredInput.mentions')).toEqual([newMention]);
+      expect(existingSessionDraftSemanticValues.read(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.recipient')).toEqual(newRecipient);
+      expect(existingSessionDraftSemanticValues.read(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.executionRunDelivery')).toBe('prompt');
+      expect(existingSessionDraftSemanticValues.read(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'structuredInput.mentions')).toEqual([newMention]);
       expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'direct send rejected');
     } finally {
-      draftValues.clearSessionDraftValues(null, 's1', { lifecycle: 'sessionDeleted' });
-      draftValues.resetSessionDraftValuesCachesForTests();
+      void deleteSessionDraft({ scope: TEST_SERVER_ACCOUNT_SCOPE, address: TEST_SESSION_DRAFT_ADDRESS });
     }
   });
 
@@ -3514,6 +3749,51 @@ describe('SessionView (direct sessions)', () => {
     expect(chatHeaderPropsSpy).toHaveBeenCalledWith(expect.objectContaining({
       badges: ['sessionsList.storageDirectTab', 'agentInput.agent.codex · happy-host'],
     }));
+  });
+
+  it('owns one direct-session status and transcript poller for the mounted session surface', async () => {
+    chatHeaderHarnessState.renderRightElement = true;
+    await renderSessionViewAndSettle();
+
+    expect(machineDirectSessionStatusGetSpy).toHaveBeenCalledTimes(1);
+    expect(syncRefreshSessionMessagesSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares the session surface direct runtime with nested details consumers', async () => {
+    const { useSessionDirectSessionRuntime } = await import('../model/useSessionDirectSessionRuntime');
+    let nestedRuntimeStatus: ReturnType<typeof useSessionDirectSessionRuntime>['status'] = null;
+    const NestedDetailsConsumer = () => {
+      nestedRuntimeStatus = useSessionDirectSessionRuntime({
+        sessionId: 's1',
+        metadata: storageState.sessions.s1.metadata,
+      }).status;
+      return null;
+    };
+
+    await renderSessionViewAndSettle({ contentOverride: <NestedDetailsConsumer /> });
+
+    expect(machineDirectSessionStatusGetSpy).toHaveBeenCalledTimes(1);
+    expect(syncRefreshSessionMessagesSpy).toHaveBeenCalledTimes(1);
+    expect(nestedRuntimeStatus).toMatchObject({ machineOnline: true, activity: 'running' });
+  });
+
+  it('shares the session surface direct runtime with nested execution and subagent projections', async () => {
+    const { useSessionExecutionRunLaunchability } = await import('@/hooks/session/useSessionExecutionRunLaunchability');
+    const { useSessionSubagents } = await import('@/hooks/session/useSessionSubagents');
+    const NestedSessionProjections = () => {
+      useSessionExecutionRunLaunchability('s1', storageState.sessions.s1);
+      useSessionSubagents({
+        sessionId: 's1',
+        session: storageState.sessions.s1,
+        messages: [],
+      });
+      return null;
+    };
+
+    await renderSessionViewAndSettle({ contentOverride: <NestedSessionProjections /> });
+
+    expect(machineDirectSessionStatusGetSpy).toHaveBeenCalledTimes(1);
+    expect(syncRefreshSessionMessagesSpy).toHaveBeenCalledTimes(1);
   });
 
   it('polls direct session status and transcript refreshes using the active cadence while the session view is open', async () => {

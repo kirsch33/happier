@@ -8,7 +8,6 @@ import { TerminalHostStartupError } from '@/integrations/terminalHost/errors';
 import { ZellijActionTimeoutError } from '@/integrations/zellij/actions';
 import type { TerminalAttachmentInfo } from '@/terminal/attachment/terminalAttachmentInfo';
 import type { AccountSettings } from '@happier-dev/protocol';
-import type { Metadata } from '@/api/types';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 
 import type { Session } from '../session';
@@ -66,6 +65,13 @@ import { PendingQueueMaterializationAuthError } from '@/agent/runtime/sessionInp
 
 const originalStdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 const originalStdoutIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+
+type ReplaySeedTestMetadata = Readonly<Record<string, unknown> & {
+  replaySeedV1?: Readonly<{
+    seedText?: string;
+    appliedToLocalId?: string;
+  }>;
+}>;
 
 const RESUME_CHOICE_DIALOG = [
   'This session is 18h 2m old and 560.4k tokens.',
@@ -133,19 +139,25 @@ function abortLauncherOnEmptyQueueWait(session: Session, waitNumber = 1): AbortS
 
 function createSession(overrides: Readonly<{
   terminalRuntime?: Session['terminalRuntime'];
-  metadata?: Metadata;
+  metadata?: unknown;
 }> = {}): Session {
+  let metadata: unknown = overrides.metadata ?? {};
   return {
     path: '/workspace/project',
     client: {
       sessionId: 'happy-session-id',
       sendSessionEvent: vi.fn(),
       sendClaudeSessionMessage: vi.fn(),
+      sendClaudeSessionMessageCommittedExact: vi.fn(async () => {}),
       sendClaudeSessionMessageCommitted: vi.fn(async () => ({
         persisted: true,
         delivered: true,
       })),
-      getMetadataSnapshot: vi.fn(() => overrides.metadata ?? {}),
+      getMetadataSnapshot: vi.fn(() => metadata),
+      // SessionClient's metadata updater is intentionally untyped at this test boundary.
+      updateMetadata: vi.fn(async (updater: (current: any) => any) => {
+        metadata = updater(metadata);
+      }),
       recordClaudeJsonlMessageConsumed: vi.fn(),
       bindProviderInputOutcomeProducer: vi.fn(() => vi.fn()),
       hasPendingProviderInputAcceptance: vi.fn(() => false),
@@ -309,28 +321,28 @@ describe('claudeUnifiedTerminalLauncher', () => {
 
       opts.onInFlightSteerAvailabilitySnapshot?.({ available: true, reason: null });
       await consumer.drainPending({ reason: 'test-exact-steer-available' });
-      expect(materializeNextPendingMessageSafely).toHaveBeenLastCalledWith({
+      expect(materializeNextPendingMessageSafely).toHaveBeenLastCalledWith(expect.objectContaining({
         reconcileWhenEmpty: 'force',
         activeTurnSteerability: 'steerable',
         pendingQueueDeliveryTiming: 'after_foreground_ready',
-      });
+      }));
 
       // A stale positive publication is presentation only. The request-scoped recapture is the
       // sole claim proof and must be able to revoke it immediately before materialization.
       opts.onInFlightSteerAvailabilitySnapshot?.({ available: true, reason: null });
       await consumer.drainPending({ reason: 'test-exact-steer-unavailable' });
-      expect(materializeNextPendingMessageSafely).toHaveBeenLastCalledWith({
+      expect(materializeNextPendingMessageSafely).toHaveBeenLastCalledWith(expect.objectContaining({
         reconcileWhenEmpty: 'force',
         activeTurnSteerability: 'unsteerable',
         pendingQueueDeliveryTiming: 'after_foreground_ready',
-      });
+      }));
 
       await consumer.drainPending({ reason: 'test-pre-claim-steer-refresh' });
-      expect(materializeNextPendingMessageSafely).toHaveBeenLastCalledWith({
+      expect(materializeNextPendingMessageSafely).toHaveBeenLastCalledWith(expect.objectContaining({
         reconcileWhenEmpty: 'force',
         activeTurnSteerability: 'steerable',
         pendingQueueDeliveryTiming: 'after_foreground_ready',
-      });
+      }));
       expect(refreshAvailability).toHaveBeenCalledTimes(3);
       unregisterRefresh();
     });
@@ -364,7 +376,9 @@ describe('claudeUnifiedTerminalLauncher', () => {
     };
     mocks.runClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: {
       onTerminalHostReady?: (params: { handle: TerminalHostHandle; terminal: NonNullable<TerminalAttachmentInfo['terminal']> }) => void;
+      publishTerminalHostMetadata?: (terminal: NonNullable<TerminalAttachmentInfo['terminal']>) => void | Promise<void>;
     }) => {
+      await opts.publishTerminalHostMetadata?.(terminal);
       opts.onTerminalHostReady?.({ handle, terminal });
     });
 
@@ -494,7 +508,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
           requested: 'tmux',
           tmux: { target: 'happy:unified-window' },
         },
-      } as Metadata,
+      },
     });
     mocks.runClaudeUnifiedTerminalSession.mockResolvedValueOnce(undefined);
 
@@ -525,7 +539,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
           requested: 'zellij',
           zellij: { sessionName: 'happy-zellij', paneId: 'terminal_7' },
         },
-      } as Metadata,
+      },
     });
     mocks.runClaudeUnifiedTerminalSession.mockResolvedValueOnce(undefined);
 
@@ -782,10 +796,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
       },
     });
 
-    expect(client.blockPendingMessageDelivery).toHaveBeenCalledWith({
-      localIds: ['l17'],
-      reason: 'runtime_disposed_before_delivery',
-    });
+    expect(client.blockPendingMessageDelivery).not.toHaveBeenCalled();
     expect(queue.unshift).not.toHaveBeenCalled();
     expect(client.bindProviderInputOutcomeProducer).toHaveBeenCalledWith(expect.objectContaining({
       providerId: 'claude',
@@ -795,6 +806,76 @@ describe('claudeUnifiedTerminalLauncher', () => {
     expect(observeProviderInputOutcome).toHaveBeenCalledWith({
       kind: 'accepted',
       localId: 'l17',
+    });
+  });
+
+  it('dispatches replay carry-over through unified terminal and retires it only after exact provider acceptance', async () => {
+    setProcessTty(false);
+    const session = createSession({
+      metadata: {
+        replaySeedV1: {
+          v: 1,
+          seedText: 'CARRY-OVER',
+          sourceSessionId: 'source-session',
+          sourceCutoffSeqInclusive: 41,
+          createdAtMs: 123,
+        },
+      },
+    });
+    const mode = {
+      permissionMode: 'default',
+      claudeUnifiedTerminalEnabled: true,
+      claudeUnifiedTerminalHost: 'tmux',
+      localId: 'transition-input',
+    } as const;
+    vi.mocked(session.queue.size).mockReturnValueOnce(1).mockReturnValue(0);
+    vi.mocked(session.queue.waitForMessagesAndGetAsString).mockResolvedValueOnce({
+      message: 'continue',
+      mode,
+      isolate: false,
+      hash: 'unified-mode',
+      maxUserMessageSeq: 42,
+      userMessageLocalIds: ['transition-input'],
+    });
+    mocks.runClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: {
+      nextMessage: () => Promise<{
+        message: string;
+        mode: typeof mode;
+        maxUserMessageSeq: number | null;
+        userMessageLocalIds: readonly string[];
+      } | null>;
+      onPromptAcceptedByProvider?: (input: {
+        message: string;
+        maxUserMessageSeq: number | null;
+        userMessageLocalIds: readonly string[];
+      }) => void;
+    }) => {
+      const batch = await opts.nextMessage();
+      expect(batch).toMatchObject({
+        message: 'CARRY-OVER\n\ncontinue',
+        maxUserMessageSeq: 42,
+        userMessageLocalIds: ['transition-input'],
+      });
+      const pendingSeed = (session.client.getMetadataSnapshot() as ReplaySeedTestMetadata).replaySeedV1;
+      expect(pendingSeed).toMatchObject({ seedText: 'CARRY-OVER' });
+      expect(pendingSeed?.appliedToLocalId).toBeUndefined();
+      opts.onPromptAcceptedByProvider?.({
+        message: batch?.message ?? '',
+        maxUserMessageSeq: batch?.maxUserMessageSeq ?? null,
+        userMessageLocalIds: batch?.userMessageLocalIds ?? [],
+      });
+    });
+
+    await claudeUnifiedTerminalLauncher(session, {
+      initialMode: {
+        permissionMode: 'default',
+        claudeUnifiedTerminalHost: 'tmux',
+      },
+    });
+
+    expect((session.client.getMetadataSnapshot() as ReplaySeedTestMetadata).replaySeedV1).toMatchObject({
+      seedText: '',
+      appliedToLocalId: 'transition-input',
     });
   });
 
@@ -1074,12 +1155,12 @@ describe('claudeUnifiedTerminalLauncher', () => {
       },
     });
 
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenCalledTimes(1);
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenCalledTimes(1);
     expect(session.client.recordClaudeJsonlMessageConsumed).toHaveBeenCalledWith(expect.objectContaining({
       type: 'user',
       uuid: 'user-echo',
     }));
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenCalledWith(expect.objectContaining({
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenCalledWith(expect.objectContaining({
       type: 'assistant',
       uuid: 'assistant-reply',
     }));
@@ -1130,12 +1211,12 @@ describe('claudeUnifiedTerminalLauncher', () => {
       type: 'user',
       uuid: 'historical-user-echo',
     }));
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenCalledTimes(2);
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenCalledTimes(2);
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenNthCalledWith(1, expect.objectContaining({
       type: 'user',
       uuid: 'fresh-terminal-user',
     }));
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenNthCalledWith(2, expect.objectContaining({
       type: 'assistant',
       uuid: 'assistant-reply',
     }));
@@ -1173,7 +1254,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
         provenance: { kind: 'non_dependent', source: 'history' },
       },
     );
-    expect(session.client.sendClaudeSessionMessage).not.toHaveBeenCalled();
+    expect(session.client.sendClaudeSessionMessageCommittedExact).not.toHaveBeenCalled();
   });
 
   it('does not persist Claude compact summary or compact local-command artifacts from unified transcripts', async () => {
@@ -1229,7 +1310,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
       },
     });
 
-    expect(session.client.sendClaudeSessionMessage).not.toHaveBeenCalled();
+    expect(session.client.sendClaudeSessionMessageCommittedExact).not.toHaveBeenCalled();
   });
 
   it('does not emit a stale compaction started event after a compact boundary completed event', async () => {
@@ -1548,12 +1629,12 @@ describe('claudeUnifiedTerminalLauncher', () => {
       type: 'user',
       uuid: 'cli-positional-user',
     }));
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenCalledTimes(2);
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenCalledTimes(2);
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenNthCalledWith(1, expect.objectContaining({
       type: 'user',
       uuid: 'cli-positional-user',
     }));
-    expect(session.client.sendClaudeSessionMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(session.client.sendClaudeSessionMessageCommittedExact).toHaveBeenNthCalledWith(2, expect.objectContaining({
       type: 'assistant',
       uuid: 'cli-positional-assistant',
     }));
@@ -1630,11 +1711,11 @@ describe('claudeUnifiedTerminalLauncher', () => {
       },
     });
 
-    expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith({
+    expect(materializeNextPendingMessageSafely).toHaveBeenCalledWith(expect.objectContaining({
       reconcileWhenEmpty: 'skip',
       activeTurnSteerability: 'unsteerable',
       pendingQueueDeliveryTiming: 'after_foreground_ready',
-    });
+    }));
   });
 
   it('attempts pending materialization while parked after host death (queued messages must not require a manual Send now)', async () => {
@@ -2790,9 +2871,19 @@ describe('claudeUnifiedTerminalLauncher', () => {
 
   it('requeues a parked message when relaunch fails during terminal-host startup before runner handback', async () => {
     setProcessTty(false);
-    const session = createSession();
+    const session = createSession({
+      metadata: {
+        replaySeedV1: {
+          v: 1,
+          seedText: 'CARRY-OVER',
+          sourceSessionId: 'source-session',
+          sourceCutoffSeqInclusive: 30,
+          createdAtMs: 123,
+        },
+      },
+    });
     const signal = abortLauncherOnEmptyQueueWait(session, 2);
-    const mode = { permissionMode: 'default' };
+    const mode = { permissionMode: 'default', localId: 'pending-retry-after-startup-failure' };
     const injectionError = Object.assign(new Error('Claude unified terminal prompt injection failed'), {
       code: 'claude_unified_terminal_injection_failed',
       failureState: 'failed_terminal',
@@ -2822,7 +2913,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
         nextMessage: () => Promise<{ message: string; mode: typeof mode; maxUserMessageSeq: number | null; userMessageLocalIds: readonly string[] } | null>;
       }) => {
         await expect(runOpts.nextMessage()).resolves.toEqual(expect.objectContaining({
-          message: 'retry after startup failure',
+          message: 'CARRY-OVER\n\nretry after startup failure',
           maxUserMessageSeq: 31,
         }));
         throw startupError;
@@ -2981,11 +3072,25 @@ describe('claudeUnifiedTerminalLauncher', () => {
     mocks.runClaudeUnifiedTerminalSession
       .mockImplementationOnce(async (runOpts: {
         nextMessage: () => Promise<{ message: string; mode: { permissionMode: string } } | null>;
+        returnUnconsumedMessage?: (input: {
+          message: string;
+          mode: { permissionMode: string };
+          maxUserMessageSeq?: number | null;
+          userMessageLocalIds?: readonly string[] | null;
+        }) => void;
         onTerminalHostReady?: (input: { handle: TerminalHostHandle; terminal: TerminalAttachmentInfo['terminal'] }) => Promise<void>;
       }) => {
-        await expect(runOpts.nextMessage()).resolves.toEqual(expect.objectContaining({
+        const batch = await runOpts.nextMessage();
+        expect(batch).toEqual(expect.objectContaining({
           message: 'resume after readiness timeout',
         }));
+        if (!batch) throw new Error('expected pending readiness-timeout batch');
+        runOpts.returnUnconsumedMessage?.({
+          message: batch.message,
+          mode: batch.mode,
+          maxUserMessageSeq: null,
+          userMessageLocalIds: ['pending-readiness-timeout'],
+        });
         await runOpts.onTerminalHostReady?.({
           handle: {
             kind: 'zellij',
@@ -3031,6 +3136,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
       expect.objectContaining({ permissionMode: 'default' }),
       { userMessageSeq: null, userMessageLocalIds: ['pending-readiness-timeout'] },
     );
+    expect(session.client.blockPendingMessageDelivery).not.toHaveBeenCalled();
 
     expect(session.client.sessionTurnLifecycle?.failTurn).toHaveBeenCalledWith({
       provider: 'claude',
@@ -3043,6 +3149,94 @@ describe('claudeUnifiedTerminalLauncher', () => {
     });
     expect(session.onThinkingChange).toHaveBeenCalledWith(false);
     expect(session.client.flush).toHaveBeenCalled();
+  });
+
+  it('pauses durable rows after repeated readiness timeouts instead of redelivering them forever', async () => {
+    setProcessTty(false);
+    const session = createSession();
+    const readinessError = new ClaudeUnifiedTerminalReadinessTimeoutError({
+      timeoutMs: 15_000,
+      handle: {
+        kind: 'tmux',
+        sessionName: 'happier-claude-readiness-loop',
+        paneId: '0',
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      diagnostics: {
+        elapsedMs: 15_000,
+        hostAlive: true,
+        sessionStartObserved: false,
+        lastLivenessPaneAlive: true,
+        lastScreenTail: '❯ No, exit\n  Yes, I accept\nEnter to confirm · Esc to cancel',
+      },
+    });
+    const blockPendingMessageDelivery = session.client.blockPendingMessageDelivery;
+    if (!blockPendingMessageDelivery) throw new Error('test fixture missing blockPendingMessageDelivery');
+    let rowsBlocked = false;
+    vi.mocked(blockPendingMessageDelivery).mockImplementation(async () => {
+      rowsBlocked = true;
+      return true;
+    });
+    vi.mocked(session.queue.size).mockReturnValue(1);
+    vi.mocked(session.queue.waitForMessagesAndGetAsString).mockImplementation((async (abortSignal?: AbortSignal) => {
+      if (!rowsBlocked) {
+        return {
+          message: 'poisoned startup message',
+          mode: { permissionMode: 'default' },
+          hash: 'readiness-loop',
+          maxUserMessageSeq: 9,
+          userMessageLocalIds: ['local-readiness-loop'],
+        };
+      }
+      return await new Promise((resolveWait) => {
+        if (abortSignal?.aborted) return resolveWait(null);
+        abortSignal?.addEventListener('abort', () => resolveWait(null), { once: true });
+      });
+    }) as never);
+    mocks.runClaudeUnifiedTerminalSession.mockImplementation(async (runOpts: {
+      nextMessage: () => Promise<{
+        message: string;
+        mode: { permissionMode: string };
+        maxUserMessageSeq?: number | null;
+        userMessageLocalIds?: readonly string[] | null;
+      } | null>;
+      returnUnconsumedMessage?: (input: {
+        message: string;
+        mode: { permissionMode: string };
+        maxUserMessageSeq?: number | null;
+        userMessageLocalIds?: readonly string[] | null;
+      }) => void;
+    }) => {
+      const batch = await runOpts.nextMessage();
+      if (!batch) throw new Error('expected pending readiness-timeout batch');
+      runOpts.returnUnconsumedMessage?.(batch);
+      throw readinessError;
+    });
+
+    const abortController = new AbortController();
+    const result = claudeUnifiedTerminalLauncher(session, {
+      initialMode: {
+        permissionMode: 'default',
+        claudeUnifiedTerminalHost: 'tmux',
+      },
+      signal: abortController.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(blockPendingMessageDelivery).toHaveBeenCalledWith({
+        localIds: ['local-readiness-loop'],
+        reason: 'terminal_host_unreachable',
+      });
+    });
+    expect(mocks.runClaudeUnifiedTerminalSession).toHaveBeenCalledTimes(4);
+
+    abortController.abort();
+    await expect(result).resolves.toEqual({ type: 'exit', code: 1 });
   });
 
   it('surfaces terminal-host startup failures as structured runtime issues and exits without generic fatal handling', async () => {
@@ -3522,6 +3716,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
     expect(session.client.blockPendingMessageDelivery).toHaveBeenCalledWith({
       localIds: ['pending-local-steer'],
       reason: 'steering_unavailable',
+      providerEffect: 'none',
     });
     expect(failureHandlingResult).toEqual({ action: 'claimed_pending_delivery' });
     expect(session.client.sessionTurnLifecycle?.failTurn).not.toHaveBeenCalled();
@@ -3585,6 +3780,7 @@ describe('claudeUnifiedTerminalLauncher', () => {
         expect(blockPendingMessageDelivery).toHaveBeenCalledWith({
           localIds: ['pending-local-steer-bookkeeping-failure'],
           reason: 'steering_unavailable',
+          providerEffect: 'none',
         });
       }
       expect(failureHandlingResult).toBeUndefined();

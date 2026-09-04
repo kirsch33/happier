@@ -222,6 +222,8 @@ export type SpawnSessionResult =
         pid?: number;
         spawnNonce?: string;
         sessionIdStatus?: 'available' | 'pending';
+        /** True only when this daemon accepted the request's pending first input. */
+        pendingFirstInputAccepted?: boolean;
         /**
          * Canonical daemon disposition for callers that must distinguish a runner
          * accepted by this request from a live runner that merely predated it.

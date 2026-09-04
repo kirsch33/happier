@@ -186,6 +186,56 @@ describe('sync AppState pause/resume', () => {
         expect(rearm).toHaveBeenCalledTimes(2);
     });
 
+    it('resumes a paused bootstrap and exposes hydrated artifacts when draft hydration is unavailable', async () => {
+        const { sync } = await import('./sync');
+        const { storage } = await import('./domains/state/storage');
+        const events: string[] = [];
+        const pauseController = (sync as unknown as { pauseController: PauseController }).pauseController;
+
+        (sync as any).credentials = { token: 'token', secret: 'secret' };
+        (sync as any).serverID = 'account-a';
+        vi.spyOn(sync as any, 'ensureSessionDraftRepositoryRuntimeReady').mockRejectedValue(new Error('draft snapshot unavailable'));
+        vi.spyOn(sync as any, 'rearmPendingOutboxForActiveScope').mockResolvedValue(undefined);
+        vi.spyOn(storage.getState(), 'applyReady').mockImplementation(() => {
+            events.push('ready');
+        });
+
+        for (const field of [
+            'settingsSync',
+            'profileSync',
+            'sessionsSync',
+            'machinesSync',
+            'purchasesSync',
+            'automationsSync',
+            'todosSync',
+            'friendsSync',
+            'friendRequestsSync',
+            'feedSync',
+            'pushTokenSync',
+            'nativeUpdateSync',
+        ]) {
+            (sync as any)[field] = {
+                invalidateCoalesced: vi.fn(() => events.push(field)),
+                awaitQueue: vi.fn(async () => undefined),
+            };
+        }
+        (sync as any).artifactsSync = {
+            invalidateCoalesced: vi.fn(() => events.push('artifacts')),
+            awaitQueue: vi.fn(async () => undefined),
+        };
+
+        pauseController.pause();
+        const bootstrap = (sync as any).bootstrapSync() as Promise<void>;
+        await Promise.resolve();
+        expect(events).toEqual([]);
+
+        pauseController.resume();
+        await bootstrap;
+
+        expect(events).toContain('artifacts');
+        expect(events.indexOf('artifacts')).toBeLessThan(events.indexOf('ready'));
+    });
+
     it('pauses on background and resumes on active (disconnect/connect socket + invalidate reachability)', async () => {
         const { sync } = await import('./sync');
 
@@ -461,6 +511,92 @@ describe('sync AppState pause/resume', () => {
             expect(pauseController.isPaused()).toBe(false);
         } finally {
             globalWithDocument.document = originalDocument;
+        }
+    });
+
+    it('defers routine hidden teardown only until every in-flight user request lease is released', async () => {
+        const globalWithDocument = globalThis as unknown as { document?: unknown };
+        const originalDocument = globalWithDocument.document;
+        const handlers = new Map<string, Set<() => void>>();
+        const documentStub = {
+            visibilityState: 'visible',
+            addEventListener: (event: string, listener: () => void) => {
+                const set = handlers.get(event) ?? new Set<() => void>();
+                set.add(listener);
+                handlers.set(event, set);
+            },
+            removeEventListener: (event: string, listener: () => void) => {
+                handlers.get(event)?.delete(listener);
+            },
+            dispatchEvent: (_event: unknown) => {},
+        };
+        globalWithDocument.document = documentStub;
+
+        try {
+            const { sync } = await import('./sync');
+            const { isServerReachabilityNetworkAllowed } = await import('./runtime/connectivity/serverReachabilitySupervisorPool');
+            const pauseController = (sync as unknown as { pauseController: PauseController }).pauseController;
+            const releaseFirst = sync.acquireUserRequestLease();
+            const releaseSecond = sync.acquireUserRequestLease();
+
+            documentStub.visibilityState = 'hidden';
+            for (const handler of handlers.get('visibilitychange') ?? []) handler();
+
+            expect(apiSocketDisconnect).not.toHaveBeenCalled();
+            expect(isServerReachabilityNetworkAllowed()).toBe(true);
+            expect(pauseController.isPaused()).toBe(false);
+
+            releaseFirst();
+            expect(apiSocketDisconnect).not.toHaveBeenCalled();
+
+            releaseSecond();
+            expect(apiSocketDisconnect).toHaveBeenCalledTimes(1);
+            expect(isServerReachabilityNetworkAllowed()).toBe(false);
+            expect(pauseController.isPaused()).toBe(true);
+        } finally {
+            globalWithDocument.document = originalDocument;
+        }
+    });
+
+    it.each(['pagehide', 'freeze'] as const)('keeps %s as a hard boundary while a user request lease exists', async (eventName) => {
+        const globalWithDocument = globalThis as unknown as { document?: unknown };
+        const originalDocument = globalWithDocument.document;
+        const originalAddEventListener = globalThis.addEventListener;
+        const originalRemoveEventListener = globalThis.removeEventListener;
+        const windowHandlers = new Map<string, Set<() => void>>();
+        const documentStub = {
+            visibilityState: 'visible',
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            dispatchEvent: (_event: unknown) => {},
+        };
+        globalWithDocument.document = documentStub;
+        globalThis.addEventListener = ((event: string, listener: () => void) => {
+            const set = windowHandlers.get(event) ?? new Set<() => void>();
+            set.add(listener);
+            windowHandlers.set(event, set);
+        }) as typeof globalThis.addEventListener;
+        globalThis.removeEventListener = ((event: string, listener: () => void) => {
+            windowHandlers.get(event)?.delete(listener);
+        }) as typeof globalThis.removeEventListener;
+
+        try {
+            const { sync } = await import('./sync');
+            const { isServerReachabilityNetworkAllowed } = await import('./runtime/connectivity/serverReachabilitySupervisorPool');
+            const pauseController = (sync as unknown as { pauseController: PauseController }).pauseController;
+            const release = sync.acquireUserRequestLease();
+
+            for (const handler of windowHandlers.get(eventName) ?? []) handler();
+
+            expect(apiSocketDisconnect).toHaveBeenCalledTimes(1);
+            expect(isServerReachabilityNetworkAllowed()).toBe(false);
+            expect(pauseController.isPaused()).toBe(true);
+            release();
+            expect(apiSocketDisconnect).toHaveBeenCalledTimes(1);
+        } finally {
+            globalWithDocument.document = originalDocument;
+            globalThis.addEventListener = originalAddEventListener;
+            globalThis.removeEventListener = originalRemoveEventListener;
         }
     });
 

@@ -11,7 +11,10 @@ import {
     createProviderSessionInfoV1Schema,
     createSessionSystemSessionV1Schema,
     createSessionWorkspaceLocationV1Schema,
+    SessionMcpSelectionRestartRequiredV1Schema,
+    SessionMcpSelectionV1Schema,
     type PendingDeliveryBlockedReason,
+    type PendingActivationAuthorizationV1,
     type PrimaryTurnStatusV1,
     type SessionRuntimeActivityState,
     type SessionMessageRole,
@@ -245,6 +248,10 @@ const MetadataObjectSchema = z.object({
      * - Applied to outgoing user messages via `message.meta.model` where supported
      */
     modelOverrideV1: createModelOverrideV1Schema(z).optional(),
+    /** Per-session overlay for the account-owned managed MCP catalog. */
+    mcpSelectionV1: SessionMcpSelectionV1Schema.optional(),
+    /** Applied baseline retained only while an active runner needs a restart. */
+    mcpSelectionRestartRequiredV1: SessionMcpSelectionRestartRequiredV1Schema.optional(),
     /**
      * Local-only markers for committed transcript messages that should be treated as discarded
      * (e.g. when the user switches to terminal control and abandons unprocessed remote messages).
@@ -272,6 +279,7 @@ const MetadataObjectSchema = z.object({
         parentCutoffSeqInclusive: z.number(),
         createdAtMs: z.number(),
         strategy: z.string(),
+        requestId: z.string().optional(),
         providerHint: z.object({
             providerId: z.string().optional(),
             backendMode: z.string().optional(),
@@ -442,6 +450,7 @@ export interface Session {
     pendingVersion?: number,
     pendingCount?: number,
     pendingBlockedCount?: number,
+    pendingActivationAuthorization?: PendingActivationAuthorizationV1 | null,
     lastViewedSessionSeq?: number | null,
     pendingPermissionRequestCount?: number,
     pendingUserActionRequestCount?: number,
@@ -474,7 +483,6 @@ export interface Session {
         priority: 'high' | 'medium' | 'low';
         id: string;
     }>;
-    draft?: string | null; // Local draft message, not synced to server
     permissionMode?: PermissionMode | null; // Local permission mode, not synced to server
     permissionModeUpdatedAt?: number | null; // Local timestamp to coordinate inferred (from last message) vs user-selected mode, not synced to server
     modelMode?: ModelMode | null; // Local model mode, not synced to server
@@ -545,6 +553,8 @@ export interface PendingMessage {
     requestedAction?: import('@happier-dev/protocol').PendingRequestedActionV1;
     /** Explicit persisted action was malformed; the row remains visible but is never executable. */
     requestedActionMalformed?: true;
+    /** Protocol-owned role for eligibility decisions; null means an older/unknown row. */
+    messageRole?: 'user' | 'non_user' | null;
     pendingOutboxConflict?: true;
     text: string;
     displayText?: string;
@@ -583,6 +593,7 @@ export const MachineMetadataSchema = z.object({
     windowsRemoteSessionLaunchMode: WindowsRemoteSessionLaunchModeSchema.optional(),
     windowsRemoteSessionConsole: z.enum(['hidden', 'visible']).optional(),
     daemonTerminalSessionAttachSupported: z.boolean().optional(),
+    daemonSessionGoalControlsSupported: z.boolean().optional(),
     // Daemon status fields
     daemonLastKnownStatus: z.enum(['running', 'shutting-down']).optional(),
     daemonLastKnownPid: z.number().optional(),

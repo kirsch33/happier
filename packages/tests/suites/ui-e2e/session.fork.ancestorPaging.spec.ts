@@ -5,13 +5,19 @@ import { execFileSync } from 'node:child_process';
 
 import { createRunDirs } from '../../src/testkit/runDir';
 import { startServerLight, type StartedServer } from '../../src/testkit/process/serverLight';
-import { startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
-import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/daemon';
-import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
+import { resolveUiWebBeforeAllTimeoutMs, startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
+import { type StartedDaemon } from '../../src/testkit/daemon/daemon';
 import { fakeClaudeFixturePath } from '../../src/testkit/fakeClaude';
-import { createSessionFromNewSessionComposer } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
+import {
+  createSessionFromNewSessionComposer,
+  reloadCreatedSessionFromNewSessionComposer,
+  type CreatedSessionFromNewSessionComposer,
+} from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
+import { selectSessionForkStrategy } from '../../src/testkit/uiE2e/selectSessionForkStrategy';
 import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
+import { authenticateAndStartDaemon } from '../../src/testkit/uiE2e/authenticateAndStartDaemon';
+import { ensureSessionReplayForkEnabled } from '../../src/testkit/uiE2e/ensureSessionReplayForkEnabled';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -57,33 +63,13 @@ function parseSessionIdFromUrl(url: string): string {
   return sessionId;
 }
 
-async function createSessionFromComposer(params: {
+async function ensureReplayForkEnabled(params: {
   page: Page;
   uiBaseUrl: string;
-  machineId: string;
-  prompt: string;
-}): Promise<string> {
-  return createSessionFromNewSessionComposer(params);
-}
-
-async function ensureReplayForkEnabled(params: { page: Page; uiBaseUrl: string; sessionId: string }): Promise<void> {
-  await params.page.goto(`${params.uiBaseUrl}/settings/session`, { waitUntil: 'domcontentloaded' });
-  await expect(params.page.getByTestId('settings-session-replay-enabled-item')).toHaveCount(1, { timeout: 60_000 });
-  const replayItem = params.page.getByTestId('settings-session-replay-enabled-item');
-  const replaySwitch = replayItem.locator('input[type="checkbox"]').first();
-  const hasSwitch = (await replaySwitch.count()) > 0;
-  if (hasSwitch) {
-    const checked = await replaySwitch.isChecked().catch(() => false);
-    if (!checked) {
-      await replayItem.click();
-      await expect(replaySwitch).toBeChecked({ timeout: 60_000 });
-    }
-  } else {
-    await replayItem.click();
-  }
-
-  await params.page.goto(`${params.uiBaseUrl}/session/${params.sessionId}`, { waitUntil: 'domcontentloaded' });
-  await expect(params.page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
+  session: CreatedSessionFromNewSessionComposer;
+}): Promise<void> {
+  await ensureSessionReplayForkEnabled(params);
+  await reloadCreatedSessionFromNewSessionComposer({ page: params.page, session: params.session });
 }
 
 async function forkFromFirstMessageMatching(params: { page: Page; containsText: string; currentSessionId: string }): Promise<string> {
@@ -95,6 +81,7 @@ async function forkFromFirstMessageMatching(params: { page: Page; containsText: 
   const messageId = wrapperTestId.replace(/^transcript-message-/, '');
   await expect(params.page.getByTestId(`transcript-message-fork:${messageId}`)).toHaveCount(1, { timeout: 120_000 });
   await params.page.getByTestId(`transcript-message-fork:${messageId}`).click();
+  await selectSessionForkStrategy(params.page, 'replay');
   const deadlineMs = Date.now() + 180_000;
   while (Date.now() < deadlineMs) {
     try {
@@ -144,7 +131,7 @@ test.describe('ui e2e: fork ancestor paging across segments', () => {
   let daemon: StartedDaemon | null = null;
 
   test.beforeAll(async () => {
-    test.setTimeout(420_000);
+    test.setTimeout(resolveUiWebBeforeAllTimeoutMs(process.env));
     await mkdir(cliHomeDir, { recursive: true });
     await writeFile(resolve(join(cliHomeDir, 'AGENTS.md')), '# UI e2e fixture\n', 'utf8');
 
@@ -152,7 +139,7 @@ test.describe('ui e2e: fork ancestor paging across segments', () => {
       testDir: suiteDir,
       dbProvider: 'sqlite',
       extraEnv: {
-        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys',
+        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,providers.claude.unifiedTerminal',
         HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
       },
     });
@@ -189,41 +176,18 @@ test.describe('ui e2e: fork ancestor paging across segments', () => {
     const testDir = resolve(join(suiteDir, 't1-ancestor-paging'));
     await mkdir(testDir, { recursive: true });
 
-    const cliLogin: StartedCliTerminalConnect = await startCliAuthLoginForTerminalConnect({
-      testDir,
-      cliHomeDir,
-      serverUrl: server.baseUrl,
-      webappUrl: uiBaseUrl,
-      env: {
-        ...process.env,
-        HOME: cliHomeDir,
-        CI: '1',
-        HAPPIER_DISABLE_CAFFEINATE: '1',
-        HAPPIER_VARIANT: 'dev',
-      },
-    });
-
-    await page.goto(cliLogin.connectUrl, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('terminal-connect-approve')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('terminal-connect-approve').click();
-    await cliLogin.waitForSuccess();
-    await cliLogin.stop().catch(() => {});
-
     const fakeClaudeLogPath = resolve(join(testDir, 'fake-claude.jsonl'));
     const fakeClaudePath = fakeClaudeFixturePath();
 
-    daemon = await startTestDaemon({
+    daemon = await authenticateAndStartDaemon({
+      page,
       testDir,
-      happyHomeDir: cliHomeDir,
-      env: {
+      cliHomeDir,
+      serverUrl: server.baseUrl,
+      uiBaseUrl,
+      extraEnv: {
         ...process.env,
         HOME: cliHomeDir,
-        CI: '1',
-        HAPPIER_HOME_DIR: cliHomeDir,
-        HAPPIER_SERVER_URL: server.baseUrl,
-        HAPPIER_WEBAPP_URL: uiBaseUrl,
-        HAPPIER_DISABLE_CAFFEINATE: '1',
-        HAPPIER_VARIANT: 'dev',
         HAPPIER_CLAUDE_PATH: fakeClaudePath,
         HAPPIER_E2E_FAKE_CLAUDE_LOG: fakeClaudeLogPath,
         HAPPIER_E2E_FAKE_CLAUDE_SESSION_ID: `fake-claude-session-${run.runId}`,
@@ -234,10 +198,16 @@ test.describe('ui e2e: fork ancestor paging across segments', () => {
     const machineId = await waitForLatestMachineId({ suiteDir, timeoutMs: 120_000 });
 
     const marker0 = `PARENT_MARKER_0 ${run.runId}`;
-    const parentSessionId = await createSessionFromComposer({ page, uiBaseUrl, machineId, prompt: marker0 });
+    const parentSession = await createSessionFromNewSessionComposer({
+      page,
+      uiBaseUrl,
+      machineId,
+      prompt: marker0,
+      readiness: 'first-turn-reload-safe',
+    });
+    const { sessionId: parentSessionId } = parentSession;
 
-    await page.goto(`${uiBaseUrl}/session/${parentSessionId}`, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
+    await reloadCreatedSessionFromNewSessionComposer({ page, session: parentSession });
     await expect(page.getByText('FAKE_CLAUDE_OK_1').first()).toBeVisible({ timeout: 180_000 });
 
     // Create enough turns to exceed a single transcript page (SESSION_MESSAGES_PAGE_SIZE=150).
@@ -246,7 +216,7 @@ test.describe('ui e2e: fork ancestor paging across segments', () => {
       await sendPromptAndWaitForOk({ page, prompt: `PARENT_MARKER_${i} ${run.runId}`, okNumber: i + 1 });
     }
 
-    await ensureReplayForkEnabled({ page, uiBaseUrl, sessionId: parentSessionId });
+    await ensureReplayForkEnabled({ page, uiBaseUrl, session: parentSession });
 
     const forkTarget = `PARENT_MARKER_80 ${run.runId}`;
     await expect(page.getByText(forkTarget).first()).toBeVisible({ timeout: 60_000 });

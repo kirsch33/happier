@@ -5,11 +5,13 @@ import {
   type ActionId,
   type ActionsSettingsV1,
   type ApprovalRequestOriginV1,
+  type ExecutionRunStartRequest,
   type ResolvedActionOption,
 } from '@happier-dev/protocol';
 import {
   getEquivalentActionIdForBuiltInTool,
   isActionDirectToolAvailableOnToolSurface,
+  isManualToolDirectAvailableOnToolSurface,
   resolveActionAvailabilityOnToolSurface,
 } from './actionToolCatalog';
 import type { HappierBuiltInToolDispatchResult } from './types';
@@ -26,8 +28,12 @@ import {
 } from './manualToolContracts';
 
 type DispatchDeps = Readonly<{
-  changeTitle: (sessionId: string, title: string) => Promise<unknown>;
-  startExecutionRun: (sessionId: string, request: unknown) => Promise<HappierBuiltInToolDispatchResult>;
+  changeTitle: (
+    sessionId: string,
+    title: string,
+    options?: Readonly<{ approvalOrigin?: ApprovalRequestOriginV1 | null }>,
+  ) => Promise<unknown>;
+  startExecutionRun: (sessionId: string, request: ExecutionRunStartRequest) => Promise<HappierBuiltInToolDispatchResult>;
   executeActionByToolName: (
     toolName: string,
     args: unknown,
@@ -180,12 +186,25 @@ export async function dispatchBuiltInHappierTool(params: Readonly<{
     if (!availability.available) {
       return err('action_disabled', 'Action is disabled', availability);
     }
+    if (!isManualToolDirectAvailableOnToolSurface({
+      toolName: params.toolName,
+      actionId: gatedManualActionId,
+      surface,
+      isActionEnabled,
+      actionsSettings,
+    })) {
+      return err('unknown_tool', `Unknown built-in Happier tool: ${params.toolName}`);
+    }
   }
 
   if (params.toolName === 'change_title') {
     const parsed = changeTitleToolInputSchema.safeParse(params.args ?? {});
     if (!parsed.success) return err('invalid_action_input', 'Invalid title payload');
-    return normalizeChangeTitleResult(await params.deps.changeTitle(params.sessionId, parsed.data.title));
+    return normalizeChangeTitleResult(await params.deps.changeTitle(
+      params.sessionId,
+      parsed.data.title,
+      ...(actionExecutionOptions ? [actionExecutionOptions] as const : [] as const),
+    ));
   }
 
   if (params.toolName === 'action_spec_search') {

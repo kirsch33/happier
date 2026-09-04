@@ -2,9 +2,10 @@ import { expect, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 
 import { fetchJson } from '../http';
+import { patchPlainAccountSettingsV2 } from '../accountSettings';
 import { mutateUiE2eLocalSettings } from './localSettingsStorage';
 import { gotoDomContentLoadedWithRetries } from './pageNavigation';
-import { mutateUiE2eScopedAccountSettings } from './scopedAccountSettingsStorage';
+import { readUiE2eScopedAccountSettings } from './scopedAccountSettingsStorage';
 import {
   buildSessionOrganizationImportRequestFromFolderSettings,
   fetchSessionOrganizationSnapshot,
@@ -49,6 +50,10 @@ type ServerFeaturesIdentityResponse = {
   };
 };
 
+type AccountSettingsV2GetResponse = Readonly<{
+  content?: Readonly<{ t: 'plain'; v: unknown }> | Readonly<{ t: 'encrypted'; c: string }> | null;
+}>;
+
 type SessionFolderDragSettingsRouteParams = Readonly<{
   baseUrl: string;
   token: string;
@@ -86,6 +91,66 @@ export function folderOrderKey(folderId: string): string {
   return `folder:${folderId}`;
 }
 
+async function readServerSessionFolderViewMode(params: Readonly<{
+  apiBaseUrl: string;
+  token: string;
+}>): Promise<'tree' | 'off'> {
+  const response = await fetchJson<AccountSettingsV2GetResponse>(`${params.apiBaseUrl}/v2/account/settings`, {
+    headers: { Authorization: `Bearer ${params.token}` },
+    timeoutMs: 20_000,
+  });
+  if (response.status !== 200) {
+    throw new Error(`Failed to read account settings (status=${response.status})`);
+  }
+  const value = response.data?.content?.t === 'plain' ? response.data.content.v : null;
+  return value && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as Record<string, unknown>).sessionFolderViewModeV1 === 'tree'
+    ? 'tree'
+    : 'off';
+}
+
+export async function ensureSessionFolderTreeView(params: Readonly<{
+  page: Page;
+  apiBaseUrl: string;
+  token: string;
+  firstFolderId: string;
+}>): Promise<void> {
+  const firstFolderHeader = params.page.getByTestId(`session-folder-header-${params.firstFolderId}`);
+
+  // Wait for the browser cache/store to converge with the server snapshot
+  // before deciding whether to toggle. Seeding an account-synced preference
+  // only in localStorage races the subsequent authoritative hydration.
+  await expect.poll(async () => {
+    const [localSettings, serverMode, renderedCount] = await Promise.all([
+      readUiE2eScopedAccountSettings({ page: params.page }),
+      readServerSessionFolderViewMode(params),
+      firstFolderHeader.count(),
+    ]);
+    const localMode = localSettings.sessionFolderViewModeV1 === 'tree' ? 'tree' : 'off';
+    return localMode === serverMode && (renderedCount > 0) === (serverMode === 'tree');
+  }, { timeout: 120_000 }).toBe(true);
+
+  if (await readServerSessionFolderViewMode(params) === 'tree') return;
+
+  await expect(params.page.getByTestId('session-list-ordering-menu-trigger').first()).toHaveCount(1, { timeout: 120_000 });
+  await params.page.getByTestId('session-list-ordering-menu-trigger').first().click();
+  const toggle = params.page.getByTestId('session-folder-view-toggle');
+  await expect(toggle).toHaveCount(1, { timeout: 60_000 });
+  await toggle.click();
+
+  await expect.poll(async () => {
+    const [localSettings, serverMode, renderedCount] = await Promise.all([
+      readUiE2eScopedAccountSettings({ page: params.page }),
+      readServerSessionFolderViewMode(params),
+      firstFolderHeader.count(),
+    ]);
+    return localSettings.sessionFolderViewModeV1 === 'tree'
+      && serverMode === 'tree'
+      && renderedCount > 0;
+  }, { timeout: 120_000 }).toBe(true);
+}
+
 function readOrderIndex(
   order: Readonly<Record<string, readonly string[] | undefined>>,
   firstKey: string,
@@ -98,29 +163,6 @@ function readOrderIndex(
     if (first >= 0 && second >= 0) return { first, second };
   }
   return null;
-}
-
-async function ensureSessionFolderViewMode(params: Readonly<{
-  page: Page;
-  folderViewMode: 'tree' | 'off';
-  sessionFoldersV1: SessionFoldersSetting;
-}>): Promise<void> {
-  if (params.folderViewMode !== 'tree') return;
-  const firstFolderId = params.sessionFoldersV1.folders[0]?.id;
-  if (!firstFolderId) return;
-
-  const firstFolderHeader = params.page.getByTestId(`session-folder-header-${firstFolderId}`);
-  const alreadyTree = await firstFolderHeader.waitFor({ state: 'attached', timeout: 2_000 }).then(
-    () => true,
-    () => false,
-  );
-  if (alreadyTree) return;
-
-  await params.page.getByTestId('session-list-ordering-menu-trigger').first().click();
-  const folderViewToggle = params.page.getByTestId('session-folder-view-toggle');
-  await expect(folderViewToggle).toHaveCount(1, { timeout: 60_000 });
-  await folderViewToggle.click();
-  await expect(firstFolderHeader).toHaveCount(1, { timeout: 120_000 });
 }
 
 async function selectSessionListViewMenuItem(page: Page, testId: string): Promise<void> {
@@ -151,7 +193,6 @@ export async function setSessionFolderDragSettings(params: Readonly<{
   serverId: string;
   sessionFoldersV1: SessionFoldersSetting;
   sessionListGroupOrderV1?: Record<string, string[]>;
-  folderViewMode?: 'tree' | 'off';
   folderSortMode?: 'foldersFirst' | 'mixed';
 }>): Promise<void> {
   await importSessionOrganization({
@@ -164,10 +205,15 @@ export async function setSessionFolderDragSettings(params: Readonly<{
     }),
   });
 
-  await mutateUiE2eScopedAccountSettings({
-    page: params.page,
+  // Account-scoped settings are server-authoritative. Writing only the persisted
+  // browser envelope leaves the hydrated React store stale; the next real menu
+  // action can then persist that stale snapshot over the test's intended values.
+  await patchPlainAccountSettingsV2({
+    baseUrl: params.apiBaseUrl,
+    token: params.token,
     settingsPatch: {
-      sessionFolderViewModeV1: params.folderViewMode ?? 'tree',
+      sessionListActiveGroupingV1: 'project',
+      sessionListInactiveGroupingV1: 'project',
       sessionListOrderingModeV1: 'custom',
     },
   });
@@ -184,11 +230,15 @@ export async function setSessionFolderDragSettings(params: Readonly<{
     page: params.page,
     folderSortMode: params.folderSortMode ?? 'mixed',
   });
-  await ensureSessionFolderViewMode({
-    page: params.page,
-    folderViewMode: params.folderViewMode ?? 'tree',
-    sessionFoldersV1: params.sessionFoldersV1,
-  });
+  const firstFolderId = params.sessionFoldersV1.folders[0]?.id;
+  if (firstFolderId) {
+    await ensureSessionFolderTreeView({
+      page: params.page,
+      apiBaseUrl: params.apiBaseUrl,
+      token: params.token,
+      firstFolderId,
+    });
+  }
 }
 
 export async function readSessionFolderDragSettings(
@@ -302,19 +352,6 @@ export async function expectFolderParent(params: Readonly<{
     const snapshot = await readSessionFolderDragSettings(params);
     return snapshot.sessionFoldersV1.folders.find((folder) => folder.id === params.folderId)?.parentId ?? null;
   }, { timeout: 60_000 }).toBe(params.parentId);
-}
-
-export async function expectOrderBefore(params: Readonly<{
-  page: Page;
-  firstTestId: string;
-  secondTestId: string;
-}>): Promise<void> {
-  await expect.poll(async () => {
-    const firstBox = await params.page.getByTestId(params.firstTestId).boundingBox();
-    const secondBox = await params.page.getByTestId(params.secondTestId).boundingBox();
-    if (!firstBox || !secondBox) return false;
-    return firstBox.y < secondBox.y;
-  }, { timeout: 60_000 }).toBe(true);
 }
 
 export async function expectOrderMapContainsBefore(params: Readonly<{

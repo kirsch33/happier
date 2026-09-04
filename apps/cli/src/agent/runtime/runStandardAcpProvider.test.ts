@@ -251,6 +251,68 @@ function createHarness() {
 }
 
 describe('runStandardAcpProvider', () => {
+  it('preserves an ordinary manifest resume identity when no matching local return exists', async () => {
+    const harness = createHarness();
+    harness.opts.resume = 'qwen-native-1';
+    harness.deps.createLocalAgentNativeResumeRecordStoreFn = () => ({
+      readAgentNativeResumeRecord: async () => null,
+      writeAgentNativeResumeRecord: async () => undefined,
+    });
+    const observed = { loopParams: null as Record<string, unknown> | null };
+    harness.deps.runPermissionModePromptLoopFn = async (params: Record<string, unknown>) => {
+      observed.loopParams = params;
+    };
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+
+    const projectedMetadata = harness.session.updateMetadata.mock.calls
+      .map(([updater]: [(metadata: Record<string, unknown>) => Record<string, unknown>]) =>
+        updater({ qwenSessionId: 'qwen-native-1', unrelated: 'kept' }),
+      );
+    expect(projectedMetadata).not.toContainEqual({ unrelated: 'kept' });
+    expect(observed.loopParams).toMatchObject({
+      initialResumeId: 'qwen-native-1',
+      strictInitialResume: true,
+      onStrictInitialResumeFailure: undefined,
+    });
+  });
+
+  it('clears and invalidates only a matching local native return', async () => {
+    const harness = createHarness();
+    harness.opts.resume = 'qwen-native-1';
+    const writes: Array<Record<string, unknown>> = [];
+    harness.deps.createLocalAgentNativeResumeRecordStoreFn = () => ({
+      readAgentNativeResumeRecord: async () => ({
+        identity: { v: 1, vendorResumeId: 'qwen-native-1' },
+        departureSeqInclusive: 42,
+      }),
+      writeAgentNativeResumeRecord: async (write: Record<string, unknown>) => {
+        writes.push(write);
+      },
+    });
+    const observed = { loopParams: null as Record<string, unknown> | null };
+    harness.deps.runPermissionModePromptLoopFn = async (params: Record<string, unknown>) => {
+      observed.loopParams = params;
+    };
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+
+    const projectedMetadata = harness.session.updateMetadata.mock.calls
+      .map(([updater]: [(metadata: Record<string, unknown>) => Record<string, unknown>]) =>
+        updater({ qwenSessionId: 'qwen-native-1', unrelated: 'kept' }),
+      );
+    expect(projectedMetadata).toContainEqual({ unrelated: 'kept' });
+    const onStrictInitialResumeFailure = observed.loopParams?.onStrictInitialResumeFailure;
+    expect(onStrictInitialResumeFailure).toEqual(expect.any(Function));
+    await (onStrictInitialResumeFailure as () => Promise<void>)();
+    expect(writes).toContainEqual({
+      happierSessionId: 'session-1',
+      agentId: 'qwen',
+      identity: null,
+      departureSeqInclusive: 42,
+    });
+  });
+
   it('does not let a generic ACP provider configure Runtime Activity participation or a producer', async () => {
     const harness = createHarness();
     let initializeOptions: Record<string, unknown> | null = null;
@@ -269,6 +331,23 @@ describe('runStandardAcpProvider', () => {
 
     expect(initializeOptions).not.toHaveProperty('runtimeActivityPreparation');
     expect(runtimeOptions).not.toHaveProperty('runtimeActivityContributionHandle');
+  });
+
+  it('binds the managed Happier session id into every standard ACP provider environment', async () => {
+    const harness = createHarness();
+    let runtimeOptions: Record<string, unknown> | null = null;
+    harness.config.createRuntime = (options: Record<string, unknown>) => {
+      runtimeOptions = options;
+      return harness.runtime;
+    };
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+
+    expect(runtimeOptions).toMatchObject({
+      processEnv: {
+        HAPPIER_SESSION_ID: 'session-1',
+      },
+    });
   });
 
   it('does not emit idle keepAlive heartbeats at the thinking cadence', async () => {
@@ -569,6 +648,20 @@ describe('runStandardAcpProvider', () => {
     expect(resolvedPrompt).not.toContain('vendor-session-123');
   });
 
+  it('does not duplicate a spawn-delivered system prompt on the first message', async () => {
+    const harness = createHarness();
+    harness.config.deliversSystemPromptAtSpawn = true;
+    let firstMessagePrompt = '';
+    harness.deps.runPermissionModePromptLoopFn = async (params: any) => {
+      await params.runtime.startOrLoad({});
+      firstMessagePrompt = await params.resolveFreshSessionSystemPrompt({ baseOverride: 'EXPLICIT BASE' });
+    };
+
+    await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
+
+    expect(firstMessagePrompt).toBe('EXPLICIT BASE');
+  });
+
   it('in-flight steer controller calls steerPrompt with correct receiver', async () => {
     const harness = createHarness();
 
@@ -615,7 +708,9 @@ describe('runStandardAcpProvider', () => {
 
     await runStandardAcpProvider(harness.opts, harness.config, harness.deps);
 
-    expect(runtime.steerPrompt).toHaveBeenCalledWith('hello');
+    expect(runtime.steerPrompt).toHaveBeenCalledWith('hello', {
+      onProviderPromptAccepted: expect.any(Function),
+    });
   });
 
   it('in-flight action controller cancels the active runtime with the correct receiver', async () => {
@@ -737,6 +832,7 @@ describe('runStandardAcpProvider', () => {
     expect(runtime.steerPrompt).toHaveBeenCalledWith('hello', {
       localId: 'local-1',
       localIds: ['local-1'],
+      onProviderPromptAccepted: expect.any(Function),
       userMessageSeq: 1,
       userMessageSeqs: [1],
     });

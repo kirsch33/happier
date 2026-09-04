@@ -155,6 +155,38 @@ describe('registerPermissionModeMessageQueueBinding (in-flight steer)', () => {
     });
   });
 
+  it('proves no provider effect when a claimed steer is unavailable before invocation', async () => {
+    const { session, emitUserMessage } = createSessionHarness();
+    const { queue, spyPush } = createQueue();
+    const steerText = vi.fn(async () => {});
+
+    registerPermissionModeMessageQueueBinding({
+      session,
+      queue,
+      getCurrentPermissionMode: () => 'default',
+      setCurrentPermissionMode: () => {},
+      inFlightSteer: {
+        isTurnInFlight: () => true,
+        supportsInFlightSteer: () => false,
+        steerText,
+      },
+    });
+
+    emitUserMessage(
+      { content: { text: 'conditional steer' }, localId: 'pending-conditional-steer', meta: {} },
+      { seq: 12, providerAcceptancePending: true, pendingProviderAction: 'steer' },
+    );
+    await waitForSteerWork();
+
+    expect(steerText).not.toHaveBeenCalled();
+    expect(spyPush).not.toHaveBeenCalled();
+    expect(session.blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['pending-conditional-steer'],
+      reason: 'steering_unavailable',
+      providerEffect: 'none',
+    });
+  });
+
   it('executes a claimed interrupt_and_send action by cancelling before queueing the send', async () => {
     const { session, emitUserMessage } = createSessionHarness();
     const { queue, spyPush } = createQueue();
@@ -332,7 +364,7 @@ describe('registerPermissionModeMessageQueueBinding (in-flight steer)', () => {
     expect(spyPush).not.toHaveBeenCalled();
   });
 
-  it('prefixes replaySeedV1 when steering and consumes it exactly once', async () => {
+  it('prefixes replaySeedV1 when steering and consumes it only after exact provider acceptance', async () => {
     const { session, emitUserMessage, setMetadataSnapshot } = createSessionHarness();
     const { queue, spyPush } = createQueue();
 
@@ -346,7 +378,14 @@ describe('registerPermissionModeMessageQueueBinding (in-flight steer)', () => {
       },
     });
 
-    const steerText = vi.fn(async () => {});
+    let acceptProviderPrompt: (() => void) | undefined;
+    const steerText = vi.fn(async (
+      _text: string,
+      _identity: unknown,
+      callbacks?: { onProviderPromptAccepted?: () => void },
+    ) => {
+      acceptProviderPrompt = callbacks?.onProviderPromptAccepted;
+    });
 
     registerPermissionModeMessageQueueBinding({
       session: session as any,
@@ -364,15 +403,128 @@ describe('registerPermissionModeMessageQueueBinding (in-flight steer)', () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(steerText).toHaveBeenCalledWith('SEED\n\nsteer me', {
-      localId: 'local-1',
-      localIds: ['local-1'],
-    });
+    expect(steerText).toHaveBeenCalledWith(
+      'SEED\n\nsteer me',
+      {
+        localId: 'local-1',
+        localIds: ['local-1'],
+      },
+      expect.objectContaining({ onProviderPromptAccepted: expect.any(Function) }),
+    );
     expect(spyPush).not.toHaveBeenCalled();
 
+    expect(session.getMetadataSnapshot()?.replaySeedV1?.seedText).toBe('SEED');
+
+    acceptProviderPrompt?.();
+    await vi.waitFor(() => {
+      expect(session.getMetadataSnapshot()?.replaySeedV1?.seedText).toBe('');
+    });
     const finalMeta = session.getMetadataSnapshot();
     expect(finalMeta?.replaySeedV1?.seedText).toBe('');
     expect(finalMeta?.replaySeedV1?.appliedToLocalId).toBe('local-1');
+  });
+
+  it('settles an accepted steer against its original Session after the queue binding moves', async () => {
+    const first = createSessionHarness();
+    const second = createSessionHarness();
+    const { queue } = createQueue();
+    first.setMetadataSnapshot({
+      replaySeedV1: {
+        v: 1,
+        seedText: 'SEED',
+        sourceSessionId: 'sess_parent',
+        sourceCutoffSeqInclusive: 3,
+        createdAtMs: 123,
+      },
+    });
+    let acceptFirstPrompt: (() => void) | undefined;
+    const binding = registerPermissionModeMessageQueueBinding({
+      session: first.session as any,
+      queue,
+      getCurrentPermissionMode: () => 'default',
+      setCurrentPermissionMode: () => {},
+      inFlightSteer: {
+        isTurnInFlight: () => true,
+        supportsInFlightSteer: () => true,
+        steerText: vi.fn(async (
+          _text: string,
+          _identity: unknown,
+          callbacks?: { onProviderPromptAccepted?: () => void },
+        ) => {
+          acceptFirstPrompt = callbacks?.onProviderPromptAccepted;
+        }),
+      },
+    } as any);
+
+    first.emitUserMessage({ content: { text: 'steer me' }, localId: 'local-old-session', meta: {} });
+    await vi.waitFor(() => expect(acceptFirstPrompt).toBeTypeOf('function'));
+
+    binding.bindSession(second.session);
+    acceptFirstPrompt?.();
+    await vi.waitFor(() => {
+      expect(first.session.getMetadataSnapshot()?.replaySeedV1?.seedText).toBe('');
+    });
+    expect(first.session.getMetadataSnapshot()?.replaySeedV1?.appliedToLocalId).toBe(
+      'local-old-session',
+    );
+  });
+
+  it('keeps delayed acceptance correlated to its steer and drains it before the following prompt', async () => {
+    const { session, emitUserMessage, setMetadataSnapshot } = createSessionHarness();
+    const { queue } = createQueue();
+
+    setMetadataSnapshot({
+      replaySeedV1: {
+        v: 1,
+        seedText: 'SEED',
+        sourceSessionId: 'sess_parent',
+        sourceCutoffSeqInclusive: 3,
+        createdAtMs: 123,
+      },
+    });
+
+    const acceptProviderPrompt: Array<(() => void) | undefined> = [];
+    const steeredTexts: string[] = [];
+    const steerText = vi.fn(async (
+      text: string,
+      _identity: unknown,
+      callbacks?: { onProviderPromptAccepted?: () => void },
+    ) => {
+      steeredTexts.push(text);
+      acceptProviderPrompt.push(callbacks?.onProviderPromptAccepted);
+    });
+
+    registerPermissionModeMessageQueueBinding({
+      session: session as any,
+      queue,
+      getCurrentPermissionMode: () => 'default',
+      setCurrentPermissionMode: () => {},
+      inFlightSteer: {
+        isTurnInFlight: () => true,
+        supportsInFlightSteer: () => true,
+        steerText,
+      },
+    } as any);
+
+    emitUserMessage({ content: { text: 'first' }, localId: 'local-1', meta: {} });
+    await vi.waitFor(() => expect(steeredTexts).toHaveLength(1));
+
+    emitUserMessage({ content: { text: 'second' }, localId: 'local-2', meta: {} });
+    await vi.waitFor(() => expect(steeredTexts).toHaveLength(2));
+
+    // The first provider ACK may arrive after the transport has already accepted the second
+    // steer. It must retire the first steer identity, never whichever settler was bound last.
+    acceptProviderPrompt[0]?.();
+    emitUserMessage({ content: { text: 'third' }, localId: 'local-3', meta: {} });
+
+    await vi.waitFor(() => expect(steeredTexts).toHaveLength(3));
+    expect(steeredTexts[0]).toBe('SEED\n\nfirst');
+    expect(steeredTexts[1]).toBe('SEED\n\nsecond');
+    expect(steeredTexts[2]).toBe('third');
+    expect(session.getMetadataSnapshot()?.replaySeedV1).toMatchObject({
+      seedText: '',
+      appliedToLocalId: 'local-1',
+    });
   });
 
   it('carries the session-reference block on the steered text, not only on send (D-21)', async () => {

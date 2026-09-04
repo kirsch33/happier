@@ -58,10 +58,47 @@ async function setupHarness() {
     errorMessage: 'Daemon RPC is not available',
   }));
   const machineResolveSpawnSessionByNonceSpy = vi.fn(async (): Promise<ResolveSpawnSessionTestResult> => ({ status: 'not_found' }));
-  const machineResolveSpawnSessionByNonceUntilSettledSpy = vi.fn(async (): Promise<ResolveSpawnSessionTestResult> => ({ status: 'not_found' }));
+  const machineResolveSpawnSessionByNonceUntilSettledSpy = vi.fn(async (_params: unknown): Promise<ResolveSpawnSessionTestResult> => ({ status: 'not_found' }));
   const modalConfirmSpy = vi.fn(async () => false);
   const completeMachineSpawnAttemptCustodySpy = vi.fn(async () => true);
+  const reconcileSpawnAttemptCustodyFromOperationSpy = vi.fn(async (params: {
+    outcome: { kind: 'succeeded'; createdSessionId: string } | { kind: 'failed' | 'cancelled' };
+  }) => params.outcome.kind === 'succeeded'
+    ? {
+        status: 'reconciled' as const,
+        record: {
+          v: 2 as const,
+          scope: { serverId: 'server-a', accountId: 'account-a' },
+          machineId: 'm1',
+          targetFingerprint: 'target-1',
+          userAttemptId: 'attempt-reentry',
+          nonce: 'request-reentry',
+          phase: 'post_spawn' as const,
+          createdSessionId: params.outcome.createdSessionId,
+          firstTurnLocalId: 'first-turn-reentry',
+          attachmentMessageLocalId: 'attachments-reentry',
+        },
+      }
+    : { status: 'removed' as const });
   const followUpSpawnedSessionWithServerScopeSpy = vi.fn(async (_params: unknown) => {});
+  const captureSessionDraftCurrentnessSpy = vi.fn((params: Readonly<{
+    scope: Readonly<{ serverId: string; accountId: string }>;
+    address: Readonly<{ kind: 'newSession'; draftId: string }>;
+  }>) => ({
+    address: params.address,
+    mutationIds: { 'composer.text': 'mutation-before-launch' },
+  }));
+  const captureSessionDraftLaunchCurrentnessSpy = vi.fn((params: Readonly<{
+    scope: Readonly<{ serverId: string; accountId: string }>;
+    address: Readonly<{ kind: 'newSession'; draftId: string }>;
+    userAttemptId: string;
+  }>) => ({
+    address: params.address,
+    mutationIds: { 'composer.text': 'mutation-before-launch' },
+  }));
+  const clearSessionDraftCurrentnessSpy = vi.fn(async () => true);
+  const clearSessionDraftLaunchCurrentnessSpy = vi.fn(() => true);
+  const markActionOperationSeenSpy = vi.fn(() => true);
   const storageState = {
     settings: {},
     machines: { m1: { id: 'm1' } },
@@ -69,6 +106,8 @@ async function setupHarness() {
     updateSessionPermissionMode: vi.fn(),
     updateSessionModelMode: vi.fn(),
     updateSessionDraft: vi.fn(),
+    markSessionOptimisticThinking: vi.fn(),
+    upsertPendingMessage: vi.fn(),
   };
 
   installNewSessionScreenModelCommonModuleMocks({
@@ -101,6 +140,7 @@ async function setupHarness() {
       ensureSessionVisibleForMessageRoute: vi.fn(async (sessionId: string) => {
         storageState.sessions[sessionId] = { id: sessionId };
       }),
+      acquireUserRequestLease: () => () => {},
     },
   }));
   vi.doMock('@/sync/store/settingsWriters', () => ({
@@ -172,9 +212,14 @@ async function setupHarness() {
   vi.doMock('@/sync/runtime/orchestration/connectionManager', () => ({
     switchConnectionToActiveServer: vi.fn(async () => ({ token: 'next-token', secret: 'next-secret' })),
   }));
-  vi.doMock('@/sync/runtime/orchestration/serverScopedRpc/followUpSpawnedSession', () => ({
-    followUpSpawnedSessionWithServerScope: followUpSpawnedSessionWithServerScopeSpy,
-    readRecoverableFollowUpPayload: (error: unknown) => {
+  vi.doMock('@/sync/runtime/orchestration/serverScopedRpc/followUpSpawnedSession', async () => {
+    const actual = await vi.importActual<typeof import('@/sync/runtime/orchestration/serverScopedRpc/followUpSpawnedSession')>(
+      '@/sync/runtime/orchestration/serverScopedRpc/followUpSpawnedSession',
+    );
+    return {
+      ...actual,
+      followUpSpawnedSessionWithServerScope: followUpSpawnedSessionWithServerScopeSpy,
+      readRecoverableFollowUpPayload: (error: unknown) => {
       if (!(error instanceof Error)) return null;
       const payload = (error as Error & { recoverableFollowUpPayload?: unknown }).recoverableFollowUpPayload;
       if (
@@ -186,8 +231,9 @@ async function setupHarness() {
         return payload;
       }
       return null;
-    },
-  }));
+      },
+    };
+  });
   vi.doMock('@/sync/domains/settings/terminalSettings', () => ({ resolveTerminalSpawnOptions: vi.fn(() => null) }));
   vi.doMock('@/hooks/server/useMachineCapabilitiesCache', () => ({
     getMachineCapabilitiesSnapshot: vi.fn(() => ({ supported: true, response: { protocolVersion: 1, results: {} } })),
@@ -218,18 +264,54 @@ async function setupHarness() {
     completeMachineSpawnAttemptCustody: completeMachineSpawnAttemptCustodySpy,
     resetMachineSpawnAttemptCustody: vi.fn(async () => true),
   }));
-
+  vi.doMock('@/sync/ops/machines', async () => {
+    const actual = await vi.importActual<typeof import('@/sync/ops/machines')>('@/sync/ops/machines');
+    return {
+      ...actual,
+      machineResolveSpawnSessionByNonce: machineResolveSpawnSessionByNonceSpy,
+      machineResolveSpawnSessionByNonceUntilSettled: machineResolveSpawnSessionByNonceUntilSettledSpy,
+    };
+  });
+  vi.doMock('@/sync/domains/session/spawn/spawnAttemptNonceStore', async () => {
+    const actual = await vi.importActual<typeof import('@/sync/domains/session/spawn/spawnAttemptNonceStore')>(
+      '@/sync/domains/session/spawn/spawnAttemptNonceStore',
+    );
+    return {
+      ...actual,
+      reconcileSpawnAttemptCustodyFromOperation: reconcileSpawnAttemptCustodyFromOperationSpy,
+    };
+  });
+  vi.doMock('@/sync/domains/actionOperations/actionOperationStore', () => ({
+    actionOperationStore: {
+      getState: () => ({ operationsById: new Map() }),
+      markSeen: markActionOperationSeenSpy,
+    },
+  }));
+  vi.doMock('@/sync/ops/sessionDrafts/sessionDraftRepository', () => ({
+    captureSessionDraftCurrentness: captureSessionDraftCurrentnessSpy,
+    captureSessionDraftLaunchCurrentness: captureSessionDraftLaunchCurrentnessSpy,
+    readSessionDraftLaunchCurrentness: vi.fn(() => null),
+    clearSessionDraftCurrentness: clearSessionDraftCurrentnessSpy,
+    clearSessionDraftLaunchCurrentness: clearSessionDraftLaunchCurrentnessSpy,
+    getSessionDraftSnapshot: vi.fn(() => null),
+  }));
   const { useCreateNewSession } = await import('./useCreateNewSession');
   return {
     useCreateNewSession,
     modalAlertSpy,
     modalConfirmSpy,
     completeMachineSpawnAttemptCustodySpy,
+    reconcileSpawnAttemptCustodyFromOperationSpy,
     machineSpawnNewSessionSpy,
     machineResolveSpawnSessionByNonceSpy,
     machineResolveSpawnSessionByNonceUntilSettledSpy,
     storageState,
     followUpSpawnedSessionWithServerScopeSpy,
+    captureSessionDraftCurrentnessSpy,
+    captureSessionDraftLaunchCurrentnessSpy,
+    clearSessionDraftCurrentnessSpy,
+    clearSessionDraftLaunchCurrentnessSpy,
+    markActionOperationSeenSpy,
   };
 }
 
@@ -246,9 +328,17 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
   });
 
   it('shows a daemon-unavailable alert with a Retry action', async () => {
-    const { useCreateNewSession, modalAlertSpy } = await setupHarness();
+    const {
+      useCreateNewSession,
+      modalAlertSpy,
+      captureSessionDraftLaunchCurrentnessSpy,
+      clearSessionDraftCurrentnessSpy,
+      clearSessionDraftLaunchCurrentnessSpy,
+    } = await setupHarness();
 
     const setIsCreating = vi.fn();
+    const persistDraftForLaunch = vi.fn();
+    const onLaunchUserAttemptIdChange = vi.fn();
     const settings = { experiments: false } as unknown as Settings;
     const machineEnvPresence: UseMachineEnvPresenceResult = {
       isPreviewEnvSupported: false,
@@ -259,6 +349,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     };
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
@@ -285,6 +376,9 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
         selectedMachineCapabilities: {},
         targetServerId: null,
         allowedTargetServerIds: undefined,
+        draftScope: { serverId: 'server-a', accountId: 'account-a' },
+        persistDraftForLaunch,
+        onLaunchUserAttemptIdChange,
       }),
     );
 
@@ -303,6 +397,15 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     expect(Array.isArray(args[2])).toBe(true);
     const buttons = args[2] as any[];
     expect(buttons.some((b) => b?.text === 'common.retry' && typeof b?.onPress === 'function')).toBe(true);
+    expect(persistDraftForLaunch).toHaveBeenCalledTimes(1);
+    expect(captureSessionDraftLaunchCurrentnessSpy).toHaveBeenCalledWith({
+      scope: { serverId: 'server-a', accountId: 'account-a' },
+      address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+      userAttemptId: expect.stringMatching(/^attempt-/),
+    });
+    expect(clearSessionDraftCurrentnessSpy).not.toHaveBeenCalled();
+    expect(clearSessionDraftLaunchCurrentnessSpy).not.toHaveBeenCalled();
+    expect(onLaunchUserAttemptIdChange).not.toHaveBeenCalledWith(null);
     await hook.unmount();
   });
 
@@ -322,6 +425,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const hook = await renderHook(
       ({ selectedMachineId }: { selectedMachineId: string | null }) =>
         useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
           router: { push: vi.fn(), replace: vi.fn() },
           selectedMachineId,
@@ -387,6 +491,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const hook = await renderHook(
       ({ selectedPath, triggerCreate }: { selectedPath: string; triggerCreate: boolean }) => {
         const createHook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
           router: { push: vi.fn(), replace: vi.fn() },
           selectedMachineId: 'm1',
@@ -456,6 +561,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
@@ -515,6 +621,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
@@ -586,6 +693,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
@@ -624,6 +732,168 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     expect(modalAlertSpy).toHaveBeenCalled();
   });
 
+  it('continues outer follow-up without navigating after direct spawn custody settles when the launcher unmounts', async () => {
+    const {
+      useCreateNewSession,
+      machineSpawnNewSessionSpy,
+      storageState,
+      followUpSpawnedSessionWithServerScopeSpy,
+      completeMachineSpawnAttemptCustodySpy,
+      captureSessionDraftLaunchCurrentnessSpy,
+      clearSessionDraftCurrentnessSpy,
+      clearSessionDraftLaunchCurrentnessSpy,
+    } = await setupHarness();
+    let resolveSpawn!: (value: Readonly<{
+      type: 'success';
+      sessionId: string;
+      spawnAttemptCustody: Readonly<{
+        status: 'completed';
+        userAttemptId: string;
+        spawnNonce: string;
+        targetFingerprint: string;
+      }>;
+    }>) => void;
+    machineSpawnNewSessionSpy.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSpawn = resolve;
+    }));
+    storageState.sessions['session-created'] = { id: 'session-created' };
+    completeMachineSpawnAttemptCustodySpy.mockResolvedValueOnce(false);
+    const callOrder: string[] = [];
+    storageState.markSessionOptimisticThinking.mockImplementation(() => {
+      callOrder.push('thinking');
+    });
+    storageState.upsertPendingMessage.mockImplementation(() => {
+      callOrder.push('pending');
+    });
+    clearSessionDraftCurrentnessSpy.mockImplementationOnce(async () => {
+      callOrder.push('clear');
+      return true;
+    });
+    const router = {
+      push: vi.fn(),
+      replace: vi.fn(() => {
+        callOrder.push('replace');
+      }),
+    };
+    const afterCreated = vi.fn(async () => {});
+    const persistDraftForLaunch = vi.fn();
+    const onLaunchUserAttemptIdChange = vi.fn();
+    const hook = await renderHook(() => useCreateNewSession({
+      draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
+      launchIntentSignature: 'direct-launch-intent',
+      router,
+      selectedMachineId: 'm1',
+      selectedPath: '/tmp',
+      selectedMachine: { id: 'm1', active: true, activeAt: Date.now(), metadata: { host: 'devbox', homeDir: '/Users/alice' } },
+      setIsCreating: vi.fn(),
+      setIsResumeSupportChecking: vi.fn(),
+      settings: { experiments: false } as unknown as Settings,
+      useProfiles: false,
+      selectedProfileId: null,
+      profileMap: new Map(),
+      recentMachinePaths: [],
+      agentType: 'opencode' as any,
+      permissionMode: 'default' as PermissionMode,
+      modelMode: 'default' as ModelMode,
+      promptStore: createNewSessionPromptStore('First turn'),
+      resumeSessionId: '',
+      agentNewSessionOptions: null,
+      machineEnvPresence: { isPreviewEnvSupported: false, isLoading: false, meta: {}, refreshedAt: null, refresh: () => {} },
+      secrets: [],
+      secretBindingsByProfileId: {},
+      selectedSecretIdByProfileIdByEnvVarName: {},
+      sessionOnlySecretValueByProfileIdByEnvVarName: {},
+      selectedMachineCapabilities: {},
+      targetServerId: null,
+      allowedTargetServerIds: undefined,
+      draftScope: { serverId: 'server-a', accountId: 'account-a' },
+      persistDraftForLaunch,
+      onLaunchUserAttemptIdChange,
+    }));
+
+    let createPromise: Promise<void> | void | null = null;
+    await act(async () => {
+      createPromise = hook.getCurrent().handleCreateSession({ afterCreated });
+      await flushHookEffects({ cycles: 1, turns: 2 });
+    });
+
+    expect(machineSpawnNewSessionSpy).toHaveBeenCalledWith(expect.objectContaining({
+      machineId: 'm1',
+      serverId: 'server-a',
+      directory: '/tmp',
+      spawnNonce: expect.stringMatching(/^spawn-/),
+      userAttemptId: expect.stringMatching(/^attempt-/),
+    }));
+    expect(router.replace).not.toHaveBeenCalled();
+
+    await hook.unmount();
+    const spawnOptions = machineSpawnNewSessionSpy.mock.calls[0]?.[0] as {
+      spawnNonce: string;
+      userAttemptId: string;
+    };
+    resolveSpawn({
+      type: 'success',
+      sessionId: 'session-created',
+      spawnAttemptCustody: {
+        status: 'completed',
+        userAttemptId: spawnOptions.userAttemptId,
+        spawnNonce: spawnOptions.spawnNonce,
+        targetFingerprint: 'machine.spawn_new:{"machineId":"m1","serverId":"server-a","directory":"/tmp"}',
+      },
+    });
+    await createPromise;
+
+    expect(followUpSpawnedSessionWithServerScopeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-created',
+      initialMessageText: 'First turn',
+      messageLocalId: expect.stringMatching(/^first-turn-/),
+    }));
+    expect(storageState.markSessionOptimisticThinking).toHaveBeenCalledWith('session-created');
+    expect(storageState.upsertPendingMessage).toHaveBeenCalledWith(
+      'session-created',
+      expect.objectContaining({
+        localId: expect.stringMatching(/^first-turn-/),
+        source: 'local_outbound',
+        deliveryStatus: 'accepted',
+        text: 'First turn',
+        displayText: 'First turn',
+      }),
+    );
+    const projectedFirstTurn = storageState.upsertPendingMessage.mock.calls[0]?.[1];
+    expect(projectedFirstTurn).not.toHaveProperty('pendingOutboxScope');
+    expect(projectedFirstTurn).not.toHaveProperty('pendingOutboxOperation');
+    expect(callOrder.indexOf('pending')).toBeGreaterThanOrEqual(0);
+    expect(callOrder).not.toContain('replace');
+    expect(callOrder.indexOf('clear')).toBeGreaterThan(callOrder.indexOf('pending'));
+    expect(afterCreated).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-created',
+      launchAttempt: expect.objectContaining({
+        spawnTargetFingerprint: 'machine.spawn_new:{"machineId":"m1","serverId":"server-a","directory":"/tmp"}',
+      }),
+    }));
+    expect(completeMachineSpawnAttemptCustodySpy).toHaveBeenCalledTimes(1);
+    expect(persistDraftForLaunch).toHaveBeenCalledTimes(1);
+    expect(captureSessionDraftLaunchCurrentnessSpy).toHaveBeenCalledWith({
+      scope: { serverId: 'server-a', accountId: 'account-a' },
+      address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+      userAttemptId: spawnOptions.userAttemptId,
+    });
+    expect(clearSessionDraftLaunchCurrentnessSpy).toHaveBeenCalledWith({
+      scope: { serverId: 'server-a', accountId: 'account-a' },
+      address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+      userAttemptId: spawnOptions.userAttemptId,
+    });
+    expect(clearSessionDraftCurrentnessSpy).toHaveBeenCalledWith({
+      scope: { serverId: 'server-a', accountId: 'account-a' },
+      address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+      currentness: expect.objectContaining({
+        mutationIds: { 'composer.text': 'mutation-before-launch' },
+      }),
+    });
+    expect(onLaunchUserAttemptIdChange).toHaveBeenLastCalledWith(null);
+    expect(router.replace).not.toHaveBeenCalled();
+  }, 120_000);
+
   it('consumes the operation settlement and actual custody identity without a hook-level resolver', async () => {
     const {
       useCreateNewSession,
@@ -657,6 +927,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -735,6 +1006,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const disableDraftPersistence = vi.fn();
     const onLaunchUserAttemptIdChange = vi.fn();
     const hook = await renderHook(() => useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
       router,
       selectedMachineId: 'm1',
@@ -802,6 +1074,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     };
     const hook = await renderHook(
       ({ launchIntentSignature }: { launchIntentSignature: string }) => useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm-mounted-prompt',
         selectedPath: '/tmp',
@@ -882,6 +1155,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -958,6 +1232,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1044,6 +1319,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1151,6 +1427,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1255,6 +1532,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1354,6 +1632,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1436,6 +1715,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const hook = await renderHook(
       ({ targetServerId }: { targetServerId: string | null }) =>
         useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
           router,
           selectedMachineId: 'm1',
@@ -1511,6 +1791,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const hook = await renderHook(
       ({ targetServerId }: { targetServerId: string | null }) =>
         useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
           router,
           selectedMachineId: 'm1',
@@ -1595,6 +1876,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const hook = await renderHook(
       ({ useProfiles }: { useProfiles: boolean }) =>
         useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
           router,
           selectedMachineId: 'm1',
@@ -1667,6 +1949,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
@@ -1718,8 +2001,8 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     expect(machineSpawnNewSessionSpy).toHaveBeenCalledTimes(1);
     expect(afterCreated).toHaveBeenCalledTimes(2);
     expect(modalAlertSpy.mock.calls).toContainEqual([
-      'common.error',
-      'Attachment validation failed',
+      'newSession.createdWithSetupIssueTitle',
+      expect.stringContaining('Attachment validation failed'),
     ]);
 
     await hook.unmount();
@@ -1753,6 +2036,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1798,6 +2082,10 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
       '/session/session-created?serverId=server-a',
       expect.anything(),
     );
+    // The scoped send owner already records an ACK timeout as unconfirmed. The
+    // launch flow must not overwrite that projection as accepted merely because
+    // it still opens the created session for retry.
+    expect(storageState.upsertPendingMessage).not.toHaveBeenCalled();
 
     expect(machineSpawnNewSessionSpy).toHaveBeenCalledTimes(1);
 
@@ -1832,6 +2120,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1868,7 +2157,10 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     expect(machineSpawnNewSessionSpy).toHaveBeenCalledTimes(1);
     expect(followUpSpawnedSessionWithServerScopeSpy).toHaveBeenCalledTimes(1);
-    expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'timeout');
+    expect(modalAlertSpy).toHaveBeenCalledWith(
+      'newSession.createdWithSetupIssueTitle',
+      expect.stringContaining('timeout'),
+    );
     expect(router.replace).not.toHaveBeenCalledWith(
       '/session/session-created?serverId=server-a',
       expect.anything(),
@@ -1907,6 +2199,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -1993,6 +2286,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router,
         selectedMachineId: 'm1',
@@ -2029,7 +2323,10 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     expect(machineSpawnNewSessionSpy).toHaveBeenCalledTimes(1);
     expect(router.replace).not.toHaveBeenCalled();
-    expect(modalAlertSpy.mock.calls).toContainEqual(['common.error', 'invalid_parameters']);
+    expect(modalAlertSpy.mock.calls).toContainEqual([
+      'newSession.createdWithSetupIssueTitle',
+      expect.stringContaining('invalid_parameters'),
+    ]);
 
     await act(async () => {
       await hook.getCurrent().handleCreateSession({ initialMessage: 'skip', afterCreated });
@@ -2073,6 +2370,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
 
     const hook = await renderHook(() =>
       useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
         router: { push: vi.fn(), replace: vi.fn() },
         selectedMachineId: 'm1',
@@ -2110,8 +2408,8 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     expect(afterCreated).toHaveBeenCalledTimes(1);
     expect(machineSpawnNewSessionSpy).toHaveBeenCalledTimes(1);
     expect(modalAlertSpy.mock.calls).toContainEqual([
-      'common.error',
-      'Machine transfer is disabled on the selected server',
+      'newSession.createdWithSetupIssueTitle',
+      expect.stringContaining('Machine transfer is disabled on the selected server'),
     ]);
     const retryAlerts = modalAlertSpy.mock.calls.filter((call) => {
       const buttons = call[2];
@@ -2147,6 +2445,7 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const hook = await renderHook(
       ({ triggerCreate }: { triggerCreate: boolean }) => {
         const createHook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
           router: { push: vi.fn(), replace: vi.fn() },
           selectedMachineId: 'm1',
@@ -2193,6 +2492,163 @@ describe('useCreateNewSession (daemon unavailable UX)', () => {
     const arg = machineSpawnNewSessionSpy.mock.calls[0]?.[0] as any;
     expect(arg?.directory).toBe('/tmp');
 
+    await hook.unmount();
+  });
+
+  it('reattaches a succeeded tracked spawn and runs the incumbent completion path without spawning again', async () => {
+    const {
+      useCreateNewSession,
+      machineSpawnNewSessionSpy,
+      reconcileSpawnAttemptCustodyFromOperationSpy,
+      followUpSpawnedSessionWithServerScopeSpy,
+      markActionOperationSeenSpy,
+      captureSessionDraftLaunchCurrentnessSpy,
+      clearSessionDraftCurrentnessSpy,
+      clearSessionDraftLaunchCurrentnessSpy,
+    } = await setupHarness();
+    const router = { push: vi.fn(), replace: vi.fn() };
+    const custody = {
+      v: 2 as const,
+      scope: { serverId: 'server-a', accountId: 'account-a' },
+      machineId: 'm1',
+      targetFingerprint: 'target-1',
+      userAttemptId: 'attempt-reentry',
+      nonce: 'request-reentry',
+      phase: 'spawning' as const,
+      createdSessionId: null,
+      firstTurnLocalId: 'first-turn-reentry',
+      attachmentMessageLocalId: 'attachments-reentry',
+    };
+    const hook = await renderHook(() => useCreateNewSession({
+      draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
+      launchIntentSignature: 'reentry-intent',
+      launchUserAttemptId: custody.userAttemptId,
+      persistedOperationReentry: {
+        custody,
+        launchCurrentness: {
+          address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+          mutationIds: { 'composer.text': 'captured-before-reload' },
+        },
+        operation: {
+          version: 1,
+          operationId: 'operation-reentry',
+          requestId: custody.nonce,
+          revision: 3,
+          actionId: 'session.spawn_new',
+          state: 'succeeded',
+          scope: { accountId: custody.scope.accountId, machineId: custody.machineId },
+          title: 'Create session',
+          createdAt: 1,
+          startedAt: 2,
+          settledAt: 3,
+          result: { type: 'success', sessionId: 'session-reentry' },
+          cancellation: 'unsupported',
+        },
+      },
+      router,
+      selectedMachineId: 'm1',
+      selectedPath: '/tmp',
+      selectedMachine: { id: 'm1', active: true, activeAt: Date.now(), metadata: { host: 'devbox' } },
+      setIsCreating: vi.fn(),
+      setIsResumeSupportChecking: vi.fn(),
+      settings: { experiments: false } as unknown as Settings,
+      useProfiles: false,
+      selectedProfileId: null,
+      profileMap: new Map(),
+      recentMachinePaths: [],
+      agentType: 'opencode' as any,
+      permissionMode: 'default' as PermissionMode,
+      modelMode: 'default' as ModelMode,
+      promptStore: createNewSessionPromptStore(''),
+      resumeSessionId: '',
+      agentNewSessionOptions: null,
+      machineEnvPresence: { isPreviewEnvSupported: false, isLoading: false, meta: {}, refreshedAt: null, refresh: () => {} },
+      secrets: [],
+      secretBindingsByProfileId: {},
+      selectedSecretIdByProfileIdByEnvVarName: {},
+      sessionOnlySecretValueByProfileIdByEnvVarName: {},
+      selectedMachineCapabilities: {},
+      targetServerId: 'server-a',
+      draftScope: custody.scope,
+    }));
+
+    await act(async () => {
+      await hook.getCurrent().handleCreateSession();
+    });
+    await flushHookEffects({ runAllTimers: true });
+
+    expect(reconcileSpawnAttemptCustodyFromOperationSpy).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'request-reentry',
+      outcome: { kind: 'succeeded', createdSessionId: 'session-reentry' },
+    }));
+    expect(machineSpawnNewSessionSpy).not.toHaveBeenCalled();
+    expect(followUpSpawnedSessionWithServerScopeSpy).toHaveBeenCalledOnce();
+    expect(followUpSpawnedSessionWithServerScopeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-reentry',
+      targetServerId: 'server-a',
+    }));
+    expect(captureSessionDraftLaunchCurrentnessSpy).not.toHaveBeenCalled();
+    expect(clearSessionDraftCurrentnessSpy).toHaveBeenCalledWith({
+      scope: custody.scope,
+      address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+      currentness: {
+        address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+        mutationIds: { 'composer.text': 'captured-before-reload' },
+      },
+    });
+    expect(clearSessionDraftLaunchCurrentnessSpy).toHaveBeenCalledWith({
+      scope: custody.scope,
+      address: { kind: 'newSession', draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e' },
+      userAttemptId: custody.userAttemptId,
+    });
+    expect(router.replace).toHaveBeenCalledWith(
+      '/session/session-reentry?serverId=server-a',
+      expect.anything(),
+    );
+    expect(markActionOperationSeenSpy).toHaveBeenCalledWith('operation-reentry');
+    await hook.unmount();
+  });
+
+  it('does not surface a socket-disconnected error after the exact tracked spawn is running', async () => {
+    const { useCreateNewSession, machineSpawnNewSessionSpy, modalAlertSpy } = await setupHarness();
+    machineSpawnNewSessionSpy.mockRejectedValueOnce(new Error('Socket not connected'));
+    const custody = {
+      v: 2 as const,
+      scope: { serverId: 'server-a', accountId: 'account-a' },
+      machineId: 'm1', targetFingerprint: 'target-1', userAttemptId: 'attempt-reentry',
+      nonce: 'request-reentry', phase: 'spawning' as const, createdSessionId: null,
+      firstTurnLocalId: 'first-turn-reentry', attachmentMessageLocalId: 'attachments-reentry',
+    };
+    const hook = await renderHook(() => useCreateNewSession({
+      draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
+      launchIntentSignature: 'reentry-intent', launchUserAttemptId: custody.userAttemptId,
+      persistedOperationReentry: {
+        custody,
+        launchCurrentness: null,
+        operation: {
+          version: 1, operationId: 'operation-reentry', requestId: custody.nonce, revision: 2,
+          actionId: 'session.spawn_new', state: 'running',
+          scope: { accountId: custody.scope.accountId, machineId: custody.machineId },
+          title: 'Create session', createdAt: 1, startedAt: 2, cancellation: 'unsupported',
+        },
+      },
+      router: { push: vi.fn(), replace: vi.fn() }, selectedMachineId: 'm1', selectedPath: '/tmp',
+      selectedMachine: { id: 'm1', active: true, activeAt: Date.now(), metadata: { host: 'devbox' } },
+      setIsCreating: vi.fn(), setIsResumeSupportChecking: vi.fn(),
+      settings: { experiments: false } as unknown as Settings, useProfiles: false,
+      selectedProfileId: null, profileMap: new Map(), recentMachinePaths: [], agentType: 'opencode' as any,
+      permissionMode: 'default' as PermissionMode, modelMode: 'default' as ModelMode,
+      promptStore: createNewSessionPromptStore(''), resumeSessionId: '', agentNewSessionOptions: null,
+      machineEnvPresence: { isPreviewEnvSupported: false, isLoading: false, meta: {}, refreshedAt: null, refresh: () => {} },
+      secrets: [], secretBindingsByProfileId: {}, selectedSecretIdByProfileIdByEnvVarName: {},
+      sessionOnlySecretValueByProfileIdByEnvVarName: {}, selectedMachineCapabilities: {}, targetServerId: 'server-a',
+      draftScope: custody.scope,
+    }));
+
+    await act(async () => { await hook.getCurrent().handleCreateSession(); });
+
+    expect(machineSpawnNewSessionSpy).toHaveBeenCalledTimes(1);
+    expect(modalAlertSpy).not.toHaveBeenCalled();
     await hook.unmount();
   });
 });

@@ -190,6 +190,23 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
         vi.clearAllMocks();
     });
 
+    it('does not publish an empty loaded transcript while the route owner is unresolved', async () => {
+        const sessionId = 'route_owner_race';
+        const { sync } = await import('./sync');
+        const syncInternals = sync as unknown as {
+            hasFetchedSessionsSnapshotForActiveServer: boolean;
+            activeServerSessionIds: Set<string>;
+            deferredMessagesFetchSessionIds: Set<string>;
+        };
+        syncInternals.hasFetchedSessionsSnapshotForActiveServer = true;
+        syncInternals.activeServerSessionIds = new Set<string>();
+        syncInternals.deferredMessagesFetchSessionIds = new Set<string>();
+
+        await expect((sync as any).fetchMessages(sessionId)).resolves.toBeUndefined();
+        expect(storage.getState().sessionMessages[sessionId]?.isLoaded).not.toBe(true);
+        expect(syncInternals.deferredMessagesFetchSessionIds.has(sessionId)).toBe(true);
+    });
+
     it('keeps storage-present sessions absent from the active-server snapshot on the normal fetch path', async () => {
         // The active-server list snapshot is partial (archived sessions and rows beyond the
         // snapshot page are absent). A storage-present session resolved to the active server
@@ -404,13 +421,12 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
         await expect((sync as any).fetchMessages(sessionId)).resolves.toBeUndefined();
 
         expect(requestMock).not.toHaveBeenCalled();
-        expect(runtimeFetchMock).toHaveBeenCalledWith(
-            `https://owner.example/v1/sessions/${sessionId}/messages?scope=main`,
-            expect.objectContaining({
-                method: 'GET',
-            }),
-        );
-        const ownerMessagesCall = findRuntimeFetchCall(`https://owner.example/v1/sessions/${sessionId}/messages?scope=main`);
+        const ownerMessagesCall = runtimeFetchMock.mock.calls.find(([url]) => (
+            typeof url === 'string'
+            && url.startsWith(`https://owner.example/v1/sessions/${sessionId}/messages?`)
+            && new URL(url).searchParams.get('scope') === 'main'
+        ));
+        expect(ownerMessagesCall?.[1]).toEqual(expect.objectContaining({ method: 'GET' }));
         expectHeaderValue(ownerMessagesCall?.[1]?.headers, 'Authorization', `Bearer ${ownerToken}`);
         const messagesById = storage.getState().sessionMessages[sessionId]?.messagesById ?? {};
         expect(Object.values(messagesById).some((message) => message.kind === 'user-text' && message.text === 'hello scoped')).toBe(true);
@@ -1119,6 +1135,66 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
             .filter((message) => message.kind === 'user-text')
             .map((message) => message.text);
         expect(orderedTexts).toEqual(['older', 'latest']);
+    });
+
+    it('replaces a direct transcript when older paging reports a discontinuity', async () => {
+        const sessionId = 'direct_session_discontinuity';
+        storage.getState().applySessions([createDirectSession(sessionId)]);
+        machineDirectSessionTranscriptPageMock
+            .mockResolvedValueOnce({
+                ok: true,
+                items: [{
+                    id: 'stale-direct-msg',
+                    createdAtMs: 1,
+                    raw: { role: 'user', content: { type: 'text', text: 'stale branch' } },
+                }],
+                nextCursor: 'stale-older-cursor',
+                tailCursor: 'stale-tail-cursor',
+                hasMore: true,
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                items: [],
+                nextCursor: null,
+                tailCursor: 'current-tail-cursor',
+                hasMore: false,
+                truncated: true,
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                items: [{
+                    id: 'current-direct-msg',
+                    createdAtMs: 2,
+                    raw: { role: 'user', content: { type: 'text', text: 'current branch' } },
+                }],
+                nextCursor: null,
+                tailCursor: 'current-tail-cursor',
+                hasMore: false,
+            });
+
+        const { sync } = await import('./sync');
+        (sync as any).encryption = {
+            getSessionEncryption: () => null,
+        };
+        (sync as any).activeServerSessionIds = new Set<string>([sessionId]);
+        (sync as any).hasFetchedSessionsSnapshotForActiveServer = true;
+
+        await (sync as any).fetchMessages(sessionId);
+        const result = await (sync as any).loadOlderMessages(sessionId);
+
+        expect(result).toEqual({ loaded: 0, hasMore: false, status: 'not_ready' });
+        expect(machineDirectSessionTranscriptPageMock).toHaveBeenNthCalledWith(3, expect.objectContaining({
+            remoteSessionId: 'vendor-session-1',
+            direction: 'older',
+        }), expect.anything());
+        expect(machineDirectSessionTranscriptPageMock.mock.calls[2]?.[0]).not.toHaveProperty('cursor');
+        const sessionMessages = storage.getState().sessionMessages[sessionId];
+        const orderedTexts = (sessionMessages?.messageIdsOldestFirst ?? [])
+            .map((id) => sessionMessages?.messagesById[id])
+            .filter((message): message is NonNullable<typeof message> => Boolean(message))
+            .filter((message) => message.kind === 'user-text')
+            .map((message) => message.text);
+        expect(orderedTexts).toEqual(['current branch']);
     });
 
     it('refreshes loaded direct session transcripts through the shared messages invalidation path', async () => {

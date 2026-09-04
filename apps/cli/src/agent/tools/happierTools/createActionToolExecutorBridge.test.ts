@@ -143,6 +143,83 @@ describe('createActionToolExecutorBridge', () => {
     ]);
   });
 
+  it('binds only ActionSpec-declared current session and machine fields', async () => {
+    const calls: Array<{ actionId: string; input: unknown; ctx: unknown }> = [];
+    const bridge = createActionToolExecutorBridge({
+      surface: 'session_agent',
+      defaultSessionMachineId: 'machine-current',
+      executor: {
+        execute: async (actionId, input, ctx) => {
+          calls.push({ actionId, input, ctx });
+          return { ok: true, result: { ok: true } };
+        },
+      },
+    });
+
+    await bridge.executeActionByToolName('action_execute', {
+      actionId: 'memory.search',
+      input: { query: { v: 1, query: 'native tools', scope: { type: 'global' }, mode: 'hints' } },
+    }, 'sess-current');
+    await bridge.executeActionByToolName('action_execute', {
+      actionId: 'memory.get_window',
+      input: { seqFrom: 10, seqTo: 12 },
+    }, 'sess-current');
+    await bridge.executeActionByToolName('action_execute', {
+      actionId: 'session.status.get',
+      input: { live: true },
+    }, 'sess-current');
+
+    expect(calls).toEqual([
+      expect.objectContaining({
+        actionId: 'memory.search',
+        input: expect.objectContaining({ machineId: 'machine-current' }),
+        ctx: expect.objectContaining({ defaultSessionMachineId: 'machine-current' }),
+      }),
+      expect.objectContaining({
+        actionId: 'memory.get_window',
+        input: { machineId: 'machine-current', seqFrom: 10, seqTo: 12 },
+      }),
+      expect.objectContaining({
+        actionId: 'session.status.get',
+        input: { sessionId: 'sess-current', live: true },
+      }),
+    ]);
+  });
+
+  it('preserves explicit contextual values', async () => {
+    const calls: unknown[] = [];
+    const bridge = createActionToolExecutorBridge({
+      surface: 'session_agent',
+      defaultSessionMachineId: 'machine-current',
+      executor: {
+        execute: async (actionId, input) => {
+          calls.push({ actionId, input });
+          return { ok: true, result: { ok: true } };
+        },
+      },
+    });
+
+    await bridge.executeActionByToolName('action_execute', {
+      actionId: 'memory.get_window',
+      input: {
+        machineId: 'machine-explicit',
+        sessionId: 'sess-historical',
+        seqFrom: 1,
+        seqTo: 2,
+      },
+    }, 'sess-current');
+
+    expect(calls).toEqual([{
+      actionId: 'memory.get_window',
+      input: {
+        machineId: 'machine-explicit',
+        sessionId: 'sess-historical',
+        seqFrom: 1,
+        seqTo: 2,
+      },
+    }]);
+  });
+
   it('returns approved result-bearing action results without converting them to approval requests', async () => {
     const actionsSettings = ActionsSettingsV1Schema.parse({
       v: 1,
@@ -230,6 +307,58 @@ describe('createActionToolExecutorBridge', () => {
     });
   });
 
+  it('preserves start identity, effective permission, and nested wait through the public bridge', async () => {
+    const bridge = createActionToolExecutorBridge({
+      surface: 'session_agent',
+      executor: {
+        execute: async () => ({
+          ok: true,
+          result: {
+            ok: true,
+            data: {
+              runId: 'run-1',
+              callId: 'call-1',
+              sidechainId: 'side-1',
+              permissionMode: 'default',
+              wait: {
+                ok: true,
+                status: 'running',
+                disposition: 'observation_timeout',
+                runId: 'run-1',
+                timeoutMs: 1000,
+                observedAtMs: 2000,
+                deadlineAtMs: 2000,
+              },
+            },
+          },
+        }),
+      },
+    });
+
+    const res = await bridge.executeActionByToolName('action_execute', {
+      actionId: 'execution.run.start',
+      input: {
+        intent: 'delegate',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        permissionMode: 'default',
+        retentionPolicy: 'ephemeral',
+        runClass: 'bounded',
+        ioMode: 'request_response',
+        waitForCompletion: true,
+        waitTimeoutSeconds: 1,
+      },
+    }, 'session-1');
+
+    expect(res).toMatchObject({
+      ok: true,
+      result: {
+        runId: 'run-1',
+        permissionMode: 'default',
+        wait: { disposition: 'observation_timeout', runId: 'run-1' },
+      },
+    });
+  });
+
   it('normalizes execution.run.wait success payloads instead of returning undefined tool content', async () => {
     const bridge = createActionToolExecutorBridge({
       surface: 'mcp',
@@ -280,8 +409,13 @@ describe('createActionToolExecutorBridge', () => {
         execute: async () => ({
           ok: true,
           result: {
-            ok: false,
-            code: 'timeout',
+            ok: true,
+            status: 'running',
+            disposition: 'observation_timeout',
+            runId: 'run-1',
+            timeoutMs: 5000,
+            observedAtMs: 6000,
+            deadlineAtMs: 6000,
           },
         }),
       },
@@ -297,9 +431,44 @@ describe('createActionToolExecutorBridge', () => {
     }, 'sess-1');
 
     expect(res).toEqual({
-      ok: false,
-      errorCode: 'timeout',
-      error: 'timeout',
+      ok: true,
+      result: {
+        status: 'running',
+        disposition: 'observation_timeout',
+        runId: 'run-1',
+        timeoutMs: 5000,
+        observedAtMs: 6000,
+        deadlineAtMs: 6000,
+      },
     });
+  });
+
+  it('forwards dependent draftInput through the public option bridge', async () => {
+    const calls: unknown[] = [];
+    const bridge = createActionToolExecutorBridge({
+      surface: 'session_agent',
+      executor: {
+        execute: async (actionId, input) => {
+          calls.push({ actionId, input });
+          return { ok: true, result: { actionId: 'subagents.delegate.start', fieldPath: 'modelId', optionsSourceId: 'agents.models.available', options: [] } };
+        },
+      },
+    });
+
+    await bridge.resolveActionOptions({
+      actionId: 'subagents.delegate.start',
+      fieldPath: 'modelId',
+      optionsSourceId: null,
+      sessionId: null,
+      limit: null,
+      query: null,
+      draftInput: { backendTargetKeys: ['agent:pi'] },
+    }, 'session_current');
+
+    expect(calls).toEqual([{ actionId: 'action.options.resolve', input: {
+      actionId: 'subagents.delegate.start',
+      fieldPath: 'modelId',
+      draftInput: { backendTargetKeys: ['agent:pi'] },
+    } }]);
   });
 });

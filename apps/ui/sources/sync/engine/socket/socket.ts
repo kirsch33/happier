@@ -2,8 +2,10 @@ import type { ApiEphemeralActivityUpdate, ApiMessage, ApiUpdateContainer } from 
 import type { Encryption } from '@/sync/encryption/encryption';
 import type { NormalizedMessage } from '@/sync/typesRaw';
 import type { EphemeralUpdate } from '@happier-dev/protocol/updates';
+import type { ActionOperationRevisionEphemeralV1 } from '@happier-dev/protocol';
 import type { Metadata, Session } from '@/sync/domains/state/storageTypes';
 import type { Machine } from '@/sync/domains/state/storageTypes';
+import { buildPendingChangedSessionPatch } from './pendingChangedSessionPatch';
 import { isSessionVisible } from '@/sync/domains/session/activeViewingSession';
 import { computeNextSessionSeqFromUpdate } from '@/sync/domains/session/sequence/realtimeSessionSeq';
 import { resolveLastViewedSessionSeq } from '@/sync/domains/session/readCursor/resolveLastViewedSessionSeq';
@@ -535,18 +537,6 @@ function readShareSessionId(body: unknown): string | null {
     if (!body || typeof body !== 'object') return null;
     const candidate = (body as { sessionId?: unknown; sid?: unknown }).sessionId ?? (body as { sid?: unknown }).sid;
     return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate.trim() : null;
-}
-
-function buildPendingChangedSessionPatch(body: unknown): Pick<Session, 'pendingCount' | 'pendingVersion'> & Pick<Partial<Session>, 'pendingBlockedCount' | 'meaningfulActivityAt'> {
-    const pendingBody = body as { pendingCount: number; pendingBlockedCount?: unknown; pendingVersion: number; meaningfulActivityAt?: unknown };
-    const meaningfulActivityAt = finiteTimestamp(pendingBody.meaningfulActivityAt);
-    const pendingBlockedCount = finiteNumber(pendingBody.pendingBlockedCount);
-    return {
-        pendingCount: pendingBody.pendingCount,
-        pendingVersion: pendingBody.pendingVersion,
-        ...(pendingBlockedCount === null ? {} : { pendingBlockedCount: Math.max(0, Math.trunc(pendingBlockedCount)) }),
-        ...(meaningfulActivityAt === undefined ? {} : { meaningfulActivityAt }),
-    };
 }
 
 function buildShareSessionPatch(body: unknown): Partial<Pick<Session, 'accessLevel' | 'canApprovePermissions' | 'updatedAt'>> {
@@ -1997,6 +1987,11 @@ export function flushActivityUpdates(params: {
             const isTimestampOnlyPatch = isTimestampOnlyActivityPatch(session, patch);
             const isTurningOff = update.active === false && nextThinking === false;
             const isThinkingResurrection = nextThinking === true && session.thinking !== true;
+            const isThinkingStop =
+                nextThinking === false
+                && session.thinking === true
+                && update.active === session.active
+                && update.activeAt >= session.activeAt;
 
             // Most state-changing activity ephemerals should be ignored when they predate a newer durable/lifecycle update
             // (for example a recent turn_aborted/task_complete clear). Otherwise old "thinking=true" ephemerals
@@ -2013,7 +2008,11 @@ export function flushActivityUpdates(params: {
             if (isTimestampOnlyPatch && isStaleTimestampOnlyActivityPatch(session, patch)) {
                 continue;
             }
-            if (!isTimestampOnlyPatch) {
+            // A durable terminal projection can advance `updatedAt` before the
+            // daemon's activity-off event arrives. That event is still the
+            // authoritative working -> online transition when its activity
+            // timestamp is newer than the last activity heartbeat.
+            if (!isTimestampOnlyPatch && !isThinkingStop) {
                 if (isTurningOff) {
                     if (update.activeAt < session.activeAt) continue;
                 } else {
@@ -2152,6 +2151,7 @@ export function handleEphemeralSocketUpdate(params: {
     getSession: (sessionId: string) => Session | undefined;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => void;
     updateDirectSessionTranscript?: (update: DirectSessionTranscriptUpdatedEphemeralUpdate) => Promise<void> | void;
+    applyActionOperationRevision?: (update: ActionOperationRevisionEphemeralV1) => Promise<void> | void;
 }): Promise<void> {
     const {
         update,
@@ -2163,6 +2163,7 @@ export function handleEphemeralSocketUpdate(params: {
         getSession,
         applyMessages,
         updateDirectSessionTranscript,
+        applyActionOperationRevision,
     } = params;
 
     const updateData = parseEphemeralUpdate(update);
@@ -2170,7 +2171,10 @@ export function handleEphemeralSocketUpdate(params: {
     if (!shouldContinue()) return Promise.resolve();
 
     // Process activity updates through smart debounce accumulator
-    if (updateData.type === 'activity') {
+    if (updateData.type === 'action-operation-updated') {
+        if (!shouldContinue()) return Promise.resolve();
+        return Promise.resolve(applyActionOperationRevision?.(updateData));
+    } else if (updateData.type === 'activity') {
         if (!shouldContinue()) return Promise.resolve();
         addActivityUpdate(updateData);
     } else if (updateData.type === 'machine-activity') {

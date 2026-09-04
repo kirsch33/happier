@@ -4,16 +4,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { findTestInstanceByTypeWithProps, invokeTestInstanceHandler, renderScreen } from '@/dev/testkit';
 import { installSessionShellCommonModuleMocks } from './sessionShellTestHelpers';
 import { clearSessionAttachmentDrafts } from '@/components/sessions/attachments/sessionAttachmentDraftStore';
+import { existingSessionDraftSemanticValues } from '@/sync/domains/input/drafts/existingSessionDraftSemanticValues';
 import {
-    clearSessionDraftValues,
-    readSessionDraftValue,
-    writeSessionDraftValue,
-} from '@/sync/domains/input/draftValues/sessionDraftValueStore';
+    captureSessionDraftCurrentness,
+    clearSessionDraftCurrentness,
+    deleteSessionDraft,
+    getSessionDraftSnapshot,
+    subscribeSessionDraft,
+    writeExistingSessionDraft,
+} from '@/sync/ops/sessionDrafts/sessionDraftRepository';
 
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 (globalThis as any).__DEV__ = false;
 const TEST_SERVER_ACCOUNT_SCOPE = { serverId: 'server-1', accountId: 'account-1' } as const;
+const TEST_SESSION_DRAFT_ADDRESS = { kind: 'session' as const, sessionId: 's1' };
 let authCredentials: any = { token: 't', secret: 's' };
 const sessionState = vi.hoisted(() => ({
     session: {
@@ -44,9 +49,14 @@ const sessionMachineTargetState = vi.hoisted(() => ({ available: false }));
 const armedContinuationState = vi.hoisted(() => ({
     intent: null as any,
     localId: null as string | null,
+    submission: null as any,
+    submissionIntent: null as any,
 }));
 const clearArmedContinuationSpy = vi.hoisted(() => vi.fn());
+const clearArmedContinuationSubmissionSpy = vi.hoisted(() => vi.fn(() => true));
+const recordArmedContinuationSubmissionSpy = vi.hoisted(() => vi.fn());
 const useFeatureEnabledSpy = vi.hoisted(() => vi.fn());
+const useFeatureDecisionSpy = vi.hoisted(() => vi.fn());
 const runSessionAgentTransitionSpy = vi.hoisted(() => vi.fn(async (..._args: any[]) => ({
     type: 'accepted' as const,
     localId: 'agent-transition:armed-local-id',
@@ -153,11 +163,10 @@ vi.mock('@/components/sessions/files/useSessionFileUploadAvailability', () => ({
     useSessionFileUploadAvailability: () => true,
 }));
 
-vi.mock('@/hooks/server/useFeatureEnabled', () => ({
-    useFeatureEnabled: (featureId: string, scope?: unknown) => {
-        useFeatureEnabledSpy(featureId, scope);
-        return featureId === 'attachments.uploads'
-            || (featureId === 'files.reviewComments' && featureEnabledState.reviewComments);
+vi.mock('@/hooks/server/useFeatureDecision', () => ({
+    useFeatureDecision: (featureId: string, scope?: unknown) => {
+        useFeatureDecisionSpy(featureId, scope);
+        return featureId === 'sessions.agentSwitching' ? { state: 'enabled' } : null;
     },
 }));
 
@@ -171,6 +180,12 @@ vi.mock('@/utils/platform/responsive', () => ({
 vi.mock('@/hooks/session/useDraft', () => ({
     useDraft: (_sessionId: string, value: string, onChange: (next: string) => void) => {
         draftHookState.valuesBySessionId.set(_sessionId, value);
+        const address = { kind: 'session' as const, sessionId: _sessionId };
+        const draftSnapshot = React.useSyncExternalStore(
+            (listener) => subscribeSessionDraft(TEST_SERVER_ACCOUNT_SCOPE, address, listener),
+            () => getSessionDraftSnapshot(TEST_SERVER_ACCOUNT_SCOPE, address),
+            () => getSessionDraftSnapshot(TEST_SERVER_ACCOUNT_SCOPE, address),
+        );
         return {
             clearDraft: () => {
                 draftHookState.valuesBySessionId.set(_sessionId, '');
@@ -218,6 +233,38 @@ vi.mock('@/hooks/session/useDraft', () => ({
                     onChange(snapshot.text);
                 }
             },
+            captureDraftForOutboundHandoff: () => ({
+                sessionId: _sessionId,
+                text: draftHookState.valuesBySessionId.get(_sessionId) ?? '',
+                scope: TEST_SERVER_ACCOUNT_SCOPE,
+                currentness: captureSessionDraftCurrentness({
+                    scope: TEST_SERVER_ACCOUNT_SCOPE,
+                    address,
+                }),
+            }),
+            clearDraftCurrentness: (snapshot: Readonly<{ text: string; currentness?: any }>) => {
+                if (!snapshot.currentness) return false;
+                const currentText = draftHookState.valuesBySessionId.get(_sessionId) ?? '';
+                if (currentText !== snapshot.text) {
+                    writeExistingSessionDraft({
+                        scope: TEST_SERVER_ACCOUNT_SCOPE,
+                        sessionId: _sessionId,
+                        patch: { text: currentText },
+                    });
+                }
+                void clearSessionDraftCurrentness({
+                    scope: TEST_SERVER_ACCOUNT_SCOPE,
+                    address,
+                    currentness: snapshot.currentness,
+                });
+                const remainingText = getSessionDraftSnapshot(TEST_SERVER_ACCOUNT_SCOPE, address)
+                    ?.document.composer.text.value ?? '';
+                draftHookState.valuesBySessionId.set(_sessionId, remainingText);
+                onChange(remainingText);
+                return true;
+            },
+            draftSnapshot,
+            draftScope: TEST_SERVER_ACCOUNT_SCOPE,
         };
     },
 }));
@@ -309,7 +356,15 @@ vi.mock('@/components/sessions/agentPicker/useInSessionAgentPickerControls', () 
         agentPickerSelectedOptionId: null,
         armedContinuation: armedContinuationState.intent,
         armedContinuationLocalId: armedContinuationState.localId,
+        armedContinuationSubmission: armedContinuationState.submission,
+        armedContinuationSubmissionIntent: armedContinuationState.submissionIntent,
         clearArmedContinuation: clearArmedContinuationSpy,
+        clearArmedContinuationSubmissionIfCurrent: clearArmedContinuationSubmissionSpy,
+        recordArmedContinuationSubmission: (submission: unknown) => {
+            recordArmedContinuationSubmissionSpy(submission);
+            armedContinuationState.submission = submission;
+            return true;
+        },
         onAgentPickerVisibilityChange: () => {},
     }),
 }));
@@ -324,6 +379,13 @@ vi.mock('@/components/sessions/agentInput', () => ({
 const modalAlertSpy = vi.fn();
 
 installSessionShellCommonModuleMocks({
+    featureEnabled: () => ({
+        useFeatureEnabled: (featureId: string, scope?: unknown) => {
+            useFeatureEnabledSpy(featureId, scope);
+            return featureId === 'attachments.uploads'
+                || (featureId === 'files.reviewComments' && featureEnabledState.reviewComments);
+        },
+    }),
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
         return createReactNativeWebMock({
@@ -438,7 +500,10 @@ installSessionShellCommonModuleMocks({
                         },
                     },
                     sessionListViewDataByServerId: {},
-                    settings: settingsDefaults,
+                    settings: {
+                        ...settingsDefaults,
+                        sessionMessageSendMode: 'agent_queue',
+                    },
                     deleteWorkspaceReviewCommentDraft: deleteWorkspaceReviewCommentDraftSpy,
             })),
             useSession: () => sessionState.session,
@@ -578,7 +643,11 @@ vi.mock('@/sync/domains/session/control/submitMode', () => ({
         mode: chooseSubmitModeState.mode,
         intent: 'default',
         reason: 'test_decision',
-        pendingSupportState: 'supported',
+        pendingSupportState: chooseSubmitModeState.mode === 'agent_queue' ? 'unsupported' : 'supported',
+        requestedAction: {
+            v: 1,
+            kind: chooseSubmitModeState.mode === 'interrupt' ? 'steer_now' : 'send_now',
+        },
         ...(chooseSubmitModeState.mode === 'agent_queue'
             ? { directBypassReason: 'selected_direct' }
             : chooseSubmitModeState.mode === 'interrupt'
@@ -588,8 +657,8 @@ vi.mock('@/sync/domains/session/control/submitMode', () => ({
     chooseSubmitMode: () => chooseSubmitModeState.mode,
     chooseForceImmediateSubmitMode: () => chooseSubmitModeState.mode,
     canDirectSubmitUserMessageNow: () => true,
-    getPendingQueueSubmitSupportState: () => 'supported',
-    isPendingQueueSubmitKnownUnsupported: () => false,
+    getPendingQueueSubmitSupportState: () => chooseSubmitModeState.mode === 'agent_queue' ? 'unsupported' : 'supported',
+    isPendingQueueSubmitKnownUnsupported: () => chooseSubmitModeState.mode === 'agent_queue',
 }));
 vi.mock('@/sync/domains/session/control/localControlSwitch', () => ({
     shouldRenderChatTimelineForSession: () => true,
@@ -615,10 +684,10 @@ describe('SessionView (attachments.uploads resumable send)', () => {
         sessionState.session.active = true;
         sessionState.session.presence = 'online';
         sessionMachineTargetState.available = false;
-        // Most cases exercise direct-send handoff callbacks. Pending delivery has
-        // its own explicit case below and must not make these tests wait on a
-        // callback that transport does not expose.
-        chooseSubmitModeState.mode = 'interrupt';
+        // Most cases exercise the legacy direct-send compatibility path: an
+        // agent queue whose runtime is known not to support durable pending input.
+        // Pending delivery has explicit cases below.
+        chooseSubmitModeState.mode = 'agent_queue';
         enqueuePendingMessageSpy.mockClear();
         updatePendingMessageSpy.mockClear();
         chatListPropsSpy.mockClear();
@@ -627,21 +696,24 @@ describe('SessionView (attachments.uploads resumable send)', () => {
         sessionPendingStoreState.current = {};
         armedContinuationState.intent = null;
         armedContinuationState.localId = null;
+        armedContinuationState.submission = null;
+        armedContinuationState.submissionIntent = null;
         clearArmedContinuationSpy.mockClear();
+        clearArmedContinuationSubmissionSpy.mockClear();
+        recordArmedContinuationSubmissionSpy.mockClear();
         runSessionAgentTransitionSpy.mockClear();
         useFeatureEnabledSpy.mockClear();
+        useFeatureDecisionSpy.mockClear();
         sessionTranscriptIdsState.current = [];
         draftHookState.valuesBySessionId.clear();
         clearSessionAttachmentDrafts('s1');
-        clearSessionDraftValues(TEST_SERVER_ACCOUNT_SCOPE, 's1', { lifecycle: 'composerCleared' });
-        // Neither half of the armed composer decision clears on a composer
-        // clear, by design; a Session-delete lifecycle is what takes them both.
-        clearSessionDraftValues(TEST_SERVER_ACCOUNT_SCOPE, 's1', { lifecycle: 'sessionDeleted' });
+        void deleteSessionDraft({ scope: TEST_SERVER_ACCOUNT_SCOPE, address: TEST_SESSION_DRAFT_ADDRESS });
     });
 
     it('restores unsent attachment drafts when the session input remounts', async () => {
         featureEnabledState.reviewComments = false;
         sendMessageSpy.mockClear();
+        enqueuePendingMessageSpy.mockClear();
         resumeSessionSpy.mockClear();
         uploadSpy.mockClear();
         modalAlertSpy.mockClear();
@@ -1063,7 +1135,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
         }];
         sessionTranscriptIdsState.current = ['m1'];
         pendingFireAndForget.length = 0;
-        writeSessionDraftValue(
+        existingSessionDraftSemanticValues.write(
             TEST_SERVER_ACCOUNT_SCOPE,
             's1',
             'routing.executionRunDelivery',
@@ -1093,7 +1165,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 });
             });
 
-            expect(readSessionDraftValue(
+            expect(existingSessionDraftSemanticValues.read(
                 TEST_SERVER_ACCOUNT_SCOPE,
                 's1',
                 'routing.executionRunDelivery',
@@ -1106,7 +1178,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 editBadge.onPress();
             });
 
-            expect(readSessionDraftValue(
+            expect(existingSessionDraftSemanticValues.read(
                 TEST_SERVER_ACCOUNT_SCOPE,
                 's1',
                 'routing.executionRunDelivery',
@@ -1248,7 +1320,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             rawRecord: {},
         }];
         sessionTranscriptIdsState.current = ['m1'];
-        writeSessionDraftValue(
+        existingSessionDraftSemanticValues.write(
             TEST_SERVER_ACCOUNT_SCOPE,
             's1',
             'routing.executionRunDelivery',
@@ -1299,7 +1371,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             agentInput = findTestInstanceByTypeWithProps(renderedTree, 'AgentInput' as any, {}) as any;
             expect(agentInput.props.value).toBe('queued message');
             expect(agentInput.props.attachments).toEqual([]);
-            expect(readSessionDraftValue(
+            expect(existingSessionDraftSemanticValues.read(
                 TEST_SERVER_ACCOUNT_SCOPE,
                 's1',
                 'routing.executionRunDelivery',
@@ -1319,7 +1391,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             expect(agentInput.props.attachments).toEqual([
                 expect.objectContaining({ label: 'draft-note.txt', status: 'pending' }),
             ]);
-            expect(readSessionDraftValue(
+            expect(existingSessionDraftSemanticValues.read(
                 TEST_SERVER_ACCOUNT_SCOPE,
                 's1',
                 'routing.executionRunDelivery',
@@ -1416,7 +1488,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
         }
     });
 
-    it('keeps composer text visible while attachment upload is pending and clears after send', async () => {
+    it('keeps composer text visible while attachment upload is pending and clears at outbound handoff', async () => {
         featureEnabledState.reviewComments = false;
         sendMessageSpy.mockClear();
         resumeSessionSpy.mockClear();
@@ -1427,28 +1499,35 @@ describe('SessionView (attachments.uploads resumable send)', () => {
         deleteWorkspaceReviewCommentDraftSpy.mockClear();
         pendingFireAndForget.length = 0;
 
-        let resolveUpload: (() => void) | null = null;
+        let resolveUpload: ((result: Readonly<{
+            success: true;
+            path: string;
+            sizeBytes: number;
+            sha256: string;
+        }>) => void) | null = null;
+        const uploadResult = new Promise<Readonly<{
+            success: true;
+            path: string;
+            sizeBytes: number;
+            sha256: string;
+        }>>((resolve) => {
+            resolveUpload = resolve;
+        });
         const uploadStarted = new Promise<void>((resolveStarted) => {
-            uploadSpy.mockImplementationOnce(async () => {
+            uploadSpy.mockImplementationOnce(() => {
                 resolveStarted();
-                return await new Promise((resolve) => {
-                    resolveUpload = () => resolve({ success: true, path: 'p1', sizeBytes: 1, sha256: 'h1' });
-                });
+                return uploadResult;
             });
         });
-        let resolveSend: (() => void) | null = null;
-        let localPendingProjectionCreated: (() => void) | null = null;
         const sendStarted = new Promise<void>((resolveStarted) => {
-            sendMessageSpy.mockImplementationOnce(async (...args: any[]) => {
+            const submit = async (...args: any[]) => {
                 const options = args[4] as
                     | { onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void }
                     | undefined;
-                localPendingProjectionCreated = () => options?.onLocalPendingProjectionCreated?.({ localId: 'attachment-local-id' });
+                options?.onLocalPendingProjectionCreated?.({ localId: 'attachment-local-id' });
                 resolveStarted();
-                return await new Promise<void>((resolve) => {
-                    resolveSend = resolve;
-                });
-            });
+            };
+            sendMessageSpy.mockImplementationOnce(submit);
         });
 
         let tree: renderer.ReactTestRenderer | undefined;
@@ -1483,37 +1562,23 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             });
 
             expect(pendingFireAndForget.length).toBe(1);
-            await act(async () => {
-                await uploadStarted;
-            });
+            await uploadStarted;
 
             agentInput = findTestInstanceByTypeWithProps(renderedTree, 'AgentInput' as any, {}) as any;
             expect(agentInput.props.value).toBe('Describe this image');
             expect(sendMessageSpy).toHaveBeenCalledTimes(0);
 
+            if (!resolveUpload) throw new Error('upload did not start');
+            act(() => resolveUpload?.({ success: true, path: 'p1', sizeBytes: 1, sha256: 'h1' }));
+            await sendStarted;
+            await pendingFireAndForget[0];
             await act(async () => {
-                if (!resolveUpload) throw new Error('upload did not start');
-                resolveUpload();
-                await sendStarted;
+                await Promise.resolve();
             });
 
             agentInput = findTestInstanceByTypeWithProps(renderedTree, 'AgentInput' as any, {}) as any;
             expect(sendMessageSpy).toHaveBeenCalledTimes(1);
-            expect(agentInput.props.value).toBe('Describe this image');
-
-            await act(async () => {
-                if (!localPendingProjectionCreated) throw new Error('local pending projection callback was not registered');
-                localPendingProjectionCreated();
-            });
-
-            agentInput = findTestInstanceByTypeWithProps(renderedTree, 'AgentInput' as any, {}) as any;
             expect(agentInput.props.value).toBe('');
-
-            await act(async () => {
-                if (!resolveSend) throw new Error('send did not start');
-                resolveSend();
-                await pendingFireAndForget[0];
-            });
         } finally {
             act(() => {
                 tree?.unmount();
@@ -1537,12 +1602,13 @@ describe('SessionView (attachments.uploads resumable send)', () => {
 
         let resolveSend: (() => void) | null = null;
         const sendStarted = new Promise<void>((resolveStarted) => {
-            sendMessageSpy.mockImplementationOnce(async () => {
+            const submit = async () => {
                 resolveStarted();
                 return await new Promise<void>((resolve) => {
                     resolveSend = resolve;
                 });
-            });
+            };
+            sendMessageSpy.mockImplementationOnce(submit);
         });
 
         let tree: renderer.ReactTestRenderer | undefined;
@@ -1572,9 +1638,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 invokeTestInstanceHandler(agentInput, 'onSend', undefined, 'AgentInput');
             });
 
-            await act(async () => {
-                await sendStarted;
-            });
+            await sendStarted;
 
             await act(async () => {
                 invokeTestInstanceHandler(agentInput, 'onChangeText', 'Next draft', 'AgentInput');
@@ -1586,10 +1650,11 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 ], 'AgentInput');
             });
 
+            if (!resolveSend) throw new Error('send did not start');
+            act(() => resolveSend?.());
+            await pendingFireAndForget[0];
             await act(async () => {
-                if (!resolveSend) throw new Error('send did not start');
-                resolveSend();
-                await pendingFireAndForget[0];
+                await Promise.resolve();
             });
 
             agentInput = findTestInstanceByTypeWithProps(renderedTree, 'AgentInput' as any, {}) as any;
@@ -1626,16 +1691,6 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             });
         });
 
-        let resolveSend: (() => void) | null = null;
-        const sendStarted = new Promise<void>((resolveStarted) => {
-            sendMessageSpy.mockImplementationOnce(async () => {
-                resolveStarted();
-                return await new Promise<void>((resolve) => {
-                    resolveSend = resolve;
-                });
-            });
-        });
-
         let tree: renderer.ReactTestRenderer | undefined;
         try {
             tree = (await renderScreen(<AppPaneProvider>
@@ -1669,10 +1724,10 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             });
 
             agentInput = findTestInstanceByTypeWithProps(renderedTree, 'AgentInput' as any, {}) as any;
-            await act(async () => {
+            act(() => {
                 invokeTestInstanceHandler(agentInput, 'onChangeText', 'Next draft', 'AgentInput');
             });
-            await act(async () => {
+            act(() => {
                 invokeTestInstanceHandler(agentInput, 'onAttachmentsAdded', [
                     { name: 'next.txt', size: 1, type: 'text/plain', slice: () => new Blob([new Uint8Array([98])]) } as any,
                 ], 'AgentInput');
@@ -1681,12 +1736,6 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             await act(async () => {
                 if (!resolveUpload) throw new Error('upload did not start');
                 resolveUpload();
-                await sendStarted;
-            });
-
-            await act(async () => {
-                if (!resolveSend) throw new Error('send did not start');
-                resolveSend();
                 await pendingFireAndForget[0];
             });
 
@@ -1724,17 +1773,6 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             });
         });
 
-        let localPendingProjectionCreated: (() => void) | null = null;
-        const sendStarted = new Promise<void>((resolveStarted) => {
-            sendMessageSpy.mockImplementationOnce(async (...args: any[]) => {
-                const options = args[4] as
-                    | { onLocalPendingProjectionCreated?: (event: Readonly<{ localId: string }>) => void }
-                    | undefined;
-                localPendingProjectionCreated = () => options?.onLocalPendingProjectionCreated?.({ localId: 'attachment-local-id' });
-                resolveStarted();
-            });
-        });
-
         let tree: renderer.ReactTestRenderer | undefined;
         try {
             tree = (await renderScreen(<AppPaneProvider>
@@ -1767,7 +1805,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 await uploadStarted;
             });
 
-            await act(async () => {
+            act(() => {
                 invokeTestInstanceHandler(agentInput, 'onAttachmentsAdded', [
                     { name: 'next.txt', size: 1, type: 'text/plain', slice: () => new Blob([new Uint8Array([98])]) } as any,
                 ], 'AgentInput');
@@ -1776,12 +1814,6 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             await act(async () => {
                 if (!resolveUpload) throw new Error('upload did not start');
                 resolveUpload();
-                await sendStarted;
-            });
-
-            await act(async () => {
-                if (!localPendingProjectionCreated) throw new Error('local pending projection callback was not registered');
-                localPendingProjectionCreated();
                 await pendingFireAndForget[0];
             });
 
@@ -2067,6 +2099,12 @@ describe('SessionView (attachments.uploads resumable send)', () => {
     // non-idle. So the destination decision must happen before any Agent-runtime
     // side effect, not after the upload.
     describe('armed Agent continuation', () => {
+        beforeEach(() => {
+            // These cases exercise the transition-owned outbound handoff. The
+            // outer suite defaults to the legacy unsupported-queue fallback.
+            chooseSubmitModeState.mode = 'interrupt';
+        });
+
         const armSecondAgent = () => {
             sessionState.session.active = false;
             sessionState.session.presence = 'offline';
@@ -2077,6 +2115,8 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 selection: { v: 1, agentId: 'claude' },
             };
             armedContinuationState.localId = 'armed-local-id';
+            armedContinuationState.submission = null;
+            armedContinuationState.submissionIntent = null;
         };
 
         async function sendOneAttachment(tree: renderer.ReactTestRenderer) {
@@ -2104,7 +2144,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 tree = (await renderScreen(<AppPaneProvider>
                             <SessionView id="s1" />
                         </AppPaneProvider>)).tree;
-                expect(useFeatureEnabledSpy).toHaveBeenCalledWith(
+                expect(useFeatureDecisionSpy).toHaveBeenCalledWith(
                     'sessions.agentSwitching',
                     expect.objectContaining({ scopeKind: 'spawn', serverId: 'server-1' }),
                 );
@@ -2179,9 +2219,22 @@ describe('SessionView (attachments.uploads resumable send)', () => {
          * store publishes in production.
          */
         function syncPendingRowForLocalId(localId: string) {
-            sessionPendingStoreState.current = {
-                s1: { messages: [{ source: 'server_pending', localId }], discarded: [], isLoaded: true },
+            const row = {
+                id: `pending-${localId}`,
+                localId,
+                createdAt: 1,
+                updatedAt: 1,
+                source: 'server_pending',
+                messageRole: 'user',
+                pendingDeliveryStatus: 'server_queued',
+                requestedAction: { v: 1, kind: 'enqueue' },
+                text: 'queued message',
+                rawRecord: { role: 'user', content: { type: 'text', text: 'queued message' } },
             };
+            sessionPendingStoreState.current = {
+                s1: { messages: [row], discarded: [], isLoaded: true },
+            };
+            sessionPendingMessagesState.current = [row];
             act(() => {
                 for (const listener of sessionPendingMessagesState.listeners) listener();
             });
@@ -2200,27 +2253,24 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             try {
                 expect(modalAlertSpy).not.toHaveBeenCalled();
                 // Nothing yet, correctly: no canonical fact has arrived.
-                expect(screen.findAllByTestId('session-pendingQueue-resumeFailed')).toHaveLength(0);
+                expect(screen.findAllByTestId('session-pendingActivation')).toHaveLength(0);
 
+                sessionState.session.active = false;
+                sessionState.session.presence = 0;
                 syncPendingRowForLocalId('armed-local-id');
 
-                const banner = screen.findAllByTestId('session-pendingQueue-resumeFailed');
+                const banner = screen.findAllByTestId('session-pendingActivation');
                 expect(banner.length).toBeGreaterThan(0);
-                expect(screen.getTextContent()).toContain('session.pendingQueuedResumeFailedTitle');
                 // Never an invitation to send the same input twice: the only action
                 // is the Session's own resume owner, which drains the queue.
-                expect(screen.findAllByTestId('session-pendingQueue-resumeFailed-retry').length).toBeGreaterThan(0);
+                expect(screen.findAllByTestId('session-pendingActivation-resume').length).toBeGreaterThan(0);
             } finally {
                 act(() => { screen.tree?.unmount(); });
                 pendingFireAndForget.length = 0;
             }
         });
 
-        it('does not let a live Session view silence an activation failure the daemon proved', async () => {
-            // `target_start_failed` is the daemon's own account: the input was
-            // admitted and the target then failed to start. A client-side liveness
-            // read must never weaken a definite daemon arm, so this must be stated
-            // even while this client still believes the Session is running.
+        it('does not show a stale queued-input activation banner while the Session and machine are reachable', async () => {
             sessionState.session.active = true;
             sessionState.session.presence = 'online';
             armedContinuationState.intent = {
@@ -2244,8 +2294,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             if (!screen.tree) throw new Error('SessionView test renderer did not mount');
             try {
                 await sendOneAttachment(screen.tree);
-                expect(screen.findAllByTestId('session-pendingQueue-resumeFailed').length)
-                    .toBeGreaterThan(0);
+                expect(screen.findAllByTestId('session-pendingActivation')).toHaveLength(0);
             } finally {
                 act(() => { screen.tree?.unmount(); });
                 pendingFireAndForget.length = 0;
@@ -2257,7 +2306,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             // target and only the message failed. Reporting it as "Error" behind an
             // OK button — and discarding the fact once dismissed — is the original
             // defect, so the assertion is on both halves.
-            // `divider_missing` rather than `target_start_failed`: the latter now
+            // `divider_unavailable` rather than `target_start_failed`: the latter now
             // rides the queued-input contract (the daemon proved the input was
             // admitted before activation was even attempted), which the two cases
             // above own. Every OTHER code at this depth still leaves the message
@@ -2266,7 +2315,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 type: 'partially_applied',
                 localId: 'armed-local-id',
                 applied: 'current_view_committed',
-                code: 'divider_missing',
+                code: 'divider_unavailable',
             });
             try {
                 expect(modalAlertSpy).not.toHaveBeenCalled();
@@ -2292,7 +2341,7 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 type: 'partially_applied',
                 localId: 'armed-local-id',
                 applied: 'current_view_committed',
-                code: 'divider_missing',
+                code: 'divider_unavailable',
             });
             try {
                 resumeSessionSpy.mockClear();
@@ -2326,12 +2375,14 @@ describe('SessionView (attachments.uploads resumable send)', () => {
         });
 
         /**
-         * A text send through the armed destination, so the composer's own draft
-         * — the thing a remount leaves sendable — is what the case observes.
+         * A text send through the armed destination, so the composer's persisted
+         * draft can restore after a remount, but its retained arm blocks dispatch
+         * until canonical reconciliation settles.
          */
         async function sendArmedText(result: unknown, text: string) {
             modalAlertSpy.mockClear();
             armSecondAgent();
+            resolveSessionComposerSendMock.mockImplementationOnce(() => ({ kind: 'send', text }));
             runSessionAgentTransitionSpy.mockImplementationOnce(async () => result as any);
             const screen = await renderScreen(<AppPaneProvider>
                         <SessionView id="s1" />
@@ -2346,27 +2397,20 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 invokeTestInstanceHandler(agentInput, 'onSend', undefined, 'AgentInput');
             });
             for (const pending of [...pendingFireAndForget]) await pending;
+            const [transitionDispatch] = runSessionAgentTransitionSpy.mock.calls[0] ?? [];
+            expect((transitionDispatch as any)?.request?.input).toEqual({
+                text,
+                localId: 'armed-local-id',
+                meta: {},
+            });
             return screen;
         }
 
-        function readPersistedSubmission() {
-            return readSessionDraftValue(
-                TEST_SERVER_ACCOUNT_SCOPE,
-                's1',
-                'routing.agentContinuationSubmission',
-            );
+        function readNestedArmSubmission() {
+            return armedContinuationState.submission;
         }
 
-        // The whole point. An unestablished outcome leaves the draft in the
-        // composer on purpose, and every guard that stops it becoming a SECOND
-        // logical message — the notice, the send block, and the retained
-        // identity — lived in state a remount threw away.
-        it('carries an unestablished switch across a remount instead of leaving the draft sendable', async () => {
-            // Reconciliation reads canonical facts through the owners that
-            // already publish them; holding that read open is the window the
-            // reader can leave the Session in — and the one the composer must
-            // still be held in when they come back.
-            ensureSessionVisibleSpy.mockImplementation((() => new Promise(() => {})) as never);
+        it('blocks a remounted nested submission until reconciliation reads canonical custody', async () => {
             const first = await sendArmedText(
                 { type: 'outcome_unknown', localId: 'armed-local-id' },
                 'switch and send this',
@@ -2374,48 +2418,68 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             try {
                 expect(first.getTextContent()).toContain('session.agentContinuation.transition.unknown');
                 expect(draftHookState.valuesBySessionId.get('s1')).toBe('switch and send this');
-                expect(readPersistedSubmission()).toMatchObject({
+                expect(readNestedArmSubmission()).toMatchObject({
                     localId: 'armed-local-id',
-                    submittedText: 'switch and send this',
-                    result: { type: 'outcome_unknown' },
-                    reconciled: false,
+                    input: { localId: 'armed-local-id', text: 'switch and send this' },
                 });
             } finally {
                 act(() => { first.tree?.unmount(); });
                 pendingFireAndForget.length = 0;
             }
 
-            // Navigating away and back is a fresh mount: nothing in memory survives.
             runSessionAgentTransitionSpy.mockClear();
             sendMessageSpy.mockClear();
             enqueuePendingMessageSpy.mockClear();
+            ensureSessionVisibleSpy.mockClear();
+            refreshSessionMessagesSpy.mockClear();
+            let settleCanonicalRefresh: () => void = () => {};
+            const canonicalRefresh = new Promise<void>((resolve) => {
+                settleCanonicalRefresh = resolve;
+            });
+            ensureSessionVisibleSpy.mockImplementationOnce(async () => {
+                await canonicalRefresh;
+                return { kind: 'available' };
+            });
+            refreshSessionMessagesSpy.mockImplementationOnce(async () => {
+                await canonicalRefresh;
+            });
             const second = await renderScreen(<AppPaneProvider>
                         <SessionView id="s1" />
                     </AppPaneProvider>);
             try {
-                expect(second.getTextContent()).toContain('session.agentContinuation.transition.unknown');
-                expect(second.findAllByTestId('session.agentTransitionOutcome.banner').length)
-                    .toBeGreaterThan(0);
-                // The record survived with the identity a retry must reuse.
-                expect(readPersistedSubmission()).toMatchObject({ localId: 'armed-local-id' });
-
-                // And the still-visible draft cannot leave as a NEW logical
-                // message while nothing has established whether it already went.
+                expect(readNestedArmSubmission()).toMatchObject({ localId: 'armed-local-id' });
                 const agentInput = findTestInstanceByTypeWithProps(second.tree!, 'AgentInput' as any, {}) as any;
+                await act(async () => {
+                    invokeTestInstanceHandler(agentInput, 'onChangeText', 'later edited draft', 'AgentInput');
+                });
                 await act(async () => {
                     invokeTestInstanceHandler(agentInput, 'onSend', undefined, 'AgentInput');
                 });
-                for (const pending of [...pendingFireAndForget]) await pending;
                 expect(sendMessageSpy).not.toHaveBeenCalled();
                 expect(enqueuePendingMessageSpy).not.toHaveBeenCalled();
+                // A restored submission has no persisted daemon result to
+                // replay. Until the existing one-shot refresh has read custody,
+                // it is treated as the same unknown outcome and cannot dispatch
+                // a second transition under the old localId.
                 expect(runSessionAgentTransitionSpy).not.toHaveBeenCalled();
-                // The refusal is visible rather than silent: the banner already
-                // on screen is re-expanded rather than replaced by a restatement.
-                expect(second.findAllByTestId('session.agentTransitionOutcome.banner').length)
-                    .toBeGreaterThan(0);
+                expect(ensureSessionVisibleSpy).toHaveBeenCalledWith(
+                    's1',
+                    expect.objectContaining({ forceRefresh: true }),
+                );
+                expect(refreshSessionMessagesSpy).toHaveBeenCalledWith('s1');
+
+                syncPendingRowForLocalId('armed-local-id');
+                settleCanonicalRefresh();
+                await act(async () => {
+                    await Promise.resolve();
+                    await Promise.resolve();
+                });
+
+                // Once custody has arrived, the canonical disposition spends
+                // the arm rather than offering the same transition again.
+                expect(clearArmedContinuationSpy).toHaveBeenCalled();
             } finally {
                 act(() => { second.tree?.unmount(); });
-                ensureSessionVisibleSpy.mockImplementation((async () => ({ kind: 'available' })) as never);
                 pendingFireAndForget.length = 0;
             }
         });
@@ -2440,7 +2504,6 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 expect(draftHookState.valuesBySessionId.get('s1')).toBe('');
                 // The arm goes with the draft: this depth spends the switch.
                 expect(clearArmedContinuationSpy).toHaveBeenCalled();
-                expect(readPersistedSubmission()).toBeUndefined();
             } finally {
                 act(() => { screen.tree?.unmount(); });
                 pendingFireAndForget.length = 0;
@@ -2472,6 +2535,78 @@ describe('SessionView (attachments.uploads resumable send)', () => {
             }
         });
 
+        it('after remount clears only admitted attachment drafts, preserving later attachment edits', async () => {
+            const first = await sendArmedAndReadBanner({
+                type: 'outcome_unknown',
+                localId: 'armed-local-id',
+            });
+            let submittedAttachmentId: string;
+            try {
+                const firstInput = findTestInstanceByTypeWithProps(first.tree!, 'AgentInput' as any, {}) as any;
+                const submittedAttachments = firstInput.props.attachments as readonly { key: string; label: string }[];
+                expect(submittedAttachments).toEqual([
+                    expect.objectContaining({ label: 'a.txt' }),
+                ]);
+                submittedAttachmentId = submittedAttachments[0]!.key;
+
+                // The continuation record carries the exact delivered attachment
+                // metadata and the local draft identity needed to compare-clear
+                // after remount. It deliberately does not create a second
+                // plugin-attachment draft representation.
+                expect(readNestedArmSubmission()).toMatchObject({
+                    input: {
+                        meta: {
+                            happier: expect.objectContaining({ kind: 'attachments.v1' }),
+                        },
+                    },
+                    currentness: {
+                        text: '',
+                        mentions: [],
+                        attachmentDraftIds: [submittedAttachmentId],
+                    },
+                });
+                expect(readNestedArmSubmission().currentness).not.toHaveProperty('composerAttachments');
+            } finally {
+                act(() => { first.tree?.unmount(); });
+                pendingFireAndForget.length = 0;
+            }
+
+            const second = await renderScreen(<AppPaneProvider>
+                        <SessionView id="s1" />
+                    </AppPaneProvider>);
+            try {
+                let agentInput = findTestInstanceByTypeWithProps(second.tree!, 'AgentInput' as any, {}) as any;
+                expect(agentInput.props.attachments).toEqual([
+                    expect.objectContaining({ key: submittedAttachmentId, label: 'a.txt' }),
+                ]);
+
+                await act(async () => {
+                    invokeTestInstanceHandler(agentInput, 'onAttachmentsAdded', [
+                        { name: 'later.txt', size: 1, type: 'text/plain', slice: () => new Blob([new Uint8Array([98])]) } as any,
+                    ], 'AgentInput');
+                });
+                agentInput = findTestInstanceByTypeWithProps(second.tree!, 'AgentInput' as any, {}) as any;
+                expect(agentInput.props.attachments).toEqual([
+                    expect.objectContaining({ key: submittedAttachmentId, label: 'a.txt' }),
+                    expect.objectContaining({ label: 'later.txt' }),
+                ]);
+
+                // Canonical custody arrives after the remount. The ID-based
+                // compare-clear removes the admitted attachment but leaves the
+                // newer draft untouched.
+                syncPendingRowForLocalId('armed-local-id');
+
+                agentInput = findTestInstanceByTypeWithProps(second.tree!, 'AgentInput' as any, {}) as any;
+                expect(agentInput.props.attachments).toEqual([
+                    expect.objectContaining({ label: 'later.txt' }),
+                ]);
+                expect(clearArmedContinuationSpy).toHaveBeenCalled();
+            } finally {
+                act(() => { second.tree?.unmount(); });
+                pendingFireAndForget.length = 0;
+            }
+        });
+
         it('does not clear a newer same-target arm when the previous transition reaches custody', async () => {
             const screen = await sendArmedText(
                 { type: 'outcome_unknown', localId: 'armed-local-id' },
@@ -2485,43 +2620,6 @@ describe('SessionView (attachments.uploads resumable send)', () => {
                 syncPendingRowForLocalId('armed-local-id');
 
                 expect(clearArmedContinuationSpy).not.toHaveBeenCalled();
-            } finally {
-                act(() => { screen.tree?.unmount(); });
-                pendingFireAndForget.length = 0;
-            }
-        });
-
-        // Restoration re-validates, exactly as a restored arm does. A record
-        // whose Session has since answered it must not come back as a banner
-        // pointing at a resolved transition, still less as a send block.
-        it('clears a persisted switch the Session has already answered instead of resurrecting it', async () => {
-            sessionPendingStoreState.current = {
-                s1: {
-                    messages: [{ source: 'server_pending', localId: 'armed-local-id' }],
-                    discarded: [],
-                    isLoaded: true,
-                },
-            };
-            writeSessionDraftValue(TEST_SERVER_ACCOUNT_SCOPE, 's1', 'routing.agentContinuationSubmission', {
-                localId: 'armed-local-id',
-                intent: {
-                    v: 1,
-                    mode: 'same_session',
-                    sourceAgentId: 'codex',
-                    selection: { v: 1, agentId: 'claude' },
-                },
-                result: { type: 'outcome_unknown', localId: 'armed-local-id' },
-                submittedText: 'switch and send this',
-                reconciled: true,
-            });
-
-            const screen = await renderScreen(<AppPaneProvider>
-                        <SessionView id="s1" />
-                    </AppPaneProvider>);
-            try {
-                expect(screen.getTextContent()).not.toContain('session.agentContinuation.transition.unknown');
-                expect(screen.findAllByTestId('session.agentTransitionOutcome.banner')).toHaveLength(0);
-                expect(readPersistedSubmission()).toBeUndefined();
             } finally {
                 act(() => { screen.tree?.unmount(); });
                 pendingFireAndForget.length = 0;

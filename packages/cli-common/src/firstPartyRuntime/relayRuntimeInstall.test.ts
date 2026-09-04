@@ -82,6 +82,57 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
     }
   });
 
+  it('preserves operator-owned web app URLs when reinstalling without explicit overrides', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-'));
+    try {
+      const payloadRoot = join(homeDir, 'payload');
+      const migrationsSourceDir = join(payloadRoot, 'prisma', 'sqlite', 'migrations', '20200101000000_init');
+      await mkdir(migrationsSourceDir, { recursive: true });
+      await writeFile(join(migrationsSourceDir, 'migration.sql'), '-- init\n', 'utf8');
+
+      const serverBinaryPath = join(payloadRoot, 'happier-server');
+      await writeFile(serverBinaryPath, '#!/bin/sh\necho ok\n', 'utf8');
+
+      await installOrUpdateRelayRuntimeLocal({
+        serverBinaryPath,
+        channel: 'preview',
+        mode: 'user',
+        platform: 'linux',
+        arch: 'arm64',
+        homeDir,
+        env: {
+          HAPPIER_WEBAPP_URL: 'https://web.example.test',
+          HAPPY_WEBAPP_URL: 'https://legacy-web.example.test',
+        },
+        runServiceCommands: false,
+        skipHealthCheck: true,
+      });
+
+      await installOrUpdateRelayRuntimeLocal({
+        serverBinaryPath,
+        channel: 'preview',
+        mode: 'user',
+        platform: 'linux',
+        arch: 'arm64',
+        homeDir,
+        runServiceCommands: false,
+        skipHealthCheck: true,
+      });
+
+      const defaults = resolveRelayRuntimeDefaults({
+        platform: 'linux',
+        mode: 'user',
+        channel: 'preview',
+        homeDir,
+      });
+      const envText = await readFileText(join(defaults.configDir, 'server.env'));
+      expect(envText).toContain('HAPPIER_WEBAPP_URL=https://web.example.test');
+      expect(envText).toContain('HAPPY_WEBAPP_URL=https://legacy-web.example.test');
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves existing persistent relay state when reinstalling into the canonical preview root', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-'));
     try {
@@ -102,10 +153,12 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
       await mkdir(join(defaults.installRoot, 'bin'), { recursive: true });
       await mkdir(defaults.configDir, { recursive: true });
       await mkdir(defaults.dataDir, { recursive: true });
+      await mkdir(join(defaults.installRoot, 'full-server', 'infra', 'pgdata'), { recursive: true });
       await mkdir(defaults.logDir, { recursive: true });
       await writeFile(join(defaults.installRoot, 'bin', 'happier-server'), '#!/bin/sh\necho old\n', 'utf8');
       await writeFile(join(defaults.dataDir, 'handy-master-secret.txt'), 'secret-before-update\n', 'utf8');
       await writeFile(join(defaults.dataDir, 'session-marker.txt'), 'session-before-update\n', 'utf8');
+      await writeFile(join(defaults.installRoot, 'full-server', 'infra', 'pgdata', 'authority-marker'), 'postgres-before-update\n', 'utf8');
       await writeFile(join(defaults.logDir, 'server.out.log'), 'existing-log\n', 'utf8');
 
       await installOrUpdateRelayRuntimeLocal({
@@ -121,6 +174,7 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
 
       await expect(readFileText(join(defaults.dataDir, 'handy-master-secret.txt'))).resolves.toBe('secret-before-update\n');
       await expect(readFileText(join(defaults.dataDir, 'session-marker.txt'))).resolves.toBe('session-before-update\n');
+      await expect(readFileText(join(defaults.installRoot, 'full-server', 'infra', 'pgdata', 'authority-marker'))).resolves.toBe('postgres-before-update\n');
       await expect(readFileText(join(defaults.logDir, 'server.out.log'))).resolves.toBe('existing-log\n');
     } finally {
       await rm(homeDir, { recursive: true, force: true });
@@ -347,6 +401,7 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
       const installedUiPath = join(defaults.installRoot, 'ui-web', 'current', 'index.html');
       const installedMigrationPath = join(
         defaults.installRoot,
+        'bin',
         'prisma',
         'sqlite',
         'migrations',

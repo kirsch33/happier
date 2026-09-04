@@ -132,6 +132,7 @@ import {
 import { createCodexRequestUserInputBridge } from './runtime/codexRequestUserInputBridge';
 import { runCodexLocalModePass } from './runtime/localModePass';
 import { resolveCodexQueuedPromptForDispatch } from './runtime/resolveCodexQueuedPromptForDispatch';
+import { createProviderPromptAcceptanceSettlement } from '@/agent/runtime/prompt/createProviderPromptAcceptanceSettlement';
 import type { StructuredInputCatalogReaders } from '@/agent/runtime/prompt/resolveStructuredInputProviderContext';
 import { cleanupCodexRunResources } from './runtime/cleanupRunResources';
 import {
@@ -159,6 +160,11 @@ import {
 } from '@/agent/runtime/startup/startupOverridesCache';
 import { resolvePermissionModeSeedForAgentStart } from '@/settings/permissions/permissionModeSeed';
 import { shouldSendReadyPushNotification } from '@/settings/notifications/notificationsPolicy';
+import {
+    createLocalAgentNativeResumeRecordStore,
+    isAgentNativeResumeIdentityMismatchError,
+    prepareAgentNativeReturnStrictResume,
+} from '@/session/agentTransition/agentNativeReturn';
 import { runStartupCoordinator } from '@/agent/runtime/startup/startupCoordinator';
 import type { BackendStartupSpec, StartupContext } from '@/agent/runtime/startup/startupSpec';
 import { resolveEffectiveCodingPromptText } from '@/agent/prompting/coding/resolveEffectiveCodingPrompt';
@@ -178,6 +184,7 @@ import {
 	import { resolveCodexBackendModeForRun } from './utils/resolveCodexBackendModeForRun';
 	import { resolveCodexRequestedDirectory } from './utils/resolveCodexRequestedDirectory';
 import { readDaemonInitialGoalFromEnv } from '@/agent/runtime/sessionInitialGoal';
+import { withCurrentHappierSessionId } from '@/agent/runtime/session/currentSessionIdEnv';
 
 function isRuntimeAuthFailureClassification(value: unknown): value is ConnectedServiceRuntimeFailureClassification {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -203,6 +210,16 @@ function readRuntimeAuthClassification(error: unknown): ConnectedServiceRuntimeF
     const record = error as Record<string, unknown>;
     const classification = record.runtimeAuthClassification ?? null;
     return isRuntimeAuthFailureClassification(classification) ? classification : null;
+}
+
+function isAppServerTerminalOwnedUsageLimitGroupRecovery(
+    classification: ConnectedServiceRuntimeFailureClassification,
+): boolean {
+    return classification.kind === 'usage_limit'
+        && typeof classification.groupId === 'string'
+        && classification.groupId.length > 0
+        && typeof classification.profileId === 'string'
+        && classification.profileId.length > 0;
 }
 
 function readRuntimeAuthClassificationLogField(
@@ -281,6 +298,7 @@ export async function runCodex(opts: {
 
     type CodexRemoteRuntime = Readonly<{
         getSessionId: () => string | null;
+        getPublishedSessionId?: () => string | null;
         supportsInFlightSteer: () => boolean;
         supportsInFlightConfigApply?: () => boolean;
         isTurnInFlight: () => boolean;
@@ -292,13 +310,14 @@ export async function runCodex(opts: {
         startOrLoad: (options: {
             resumeId?: string | null;
             existingSessionId?: string | null;
+            strictNativeResumeIdentity?: boolean;
             importHistory?: boolean;
             initialGoal?: import('@happier-dev/protocol').SessionInitialGoalRequestV1;
         }) => Promise<unknown>;
         setSessionMode: (mode: string) => Promise<void>;
         setSessionModel: (model: string) => Promise<void>;
         setSessionConfigOption: (key: string, value: string | number | boolean | null) => Promise<void>;
-        steerPrompt: (prompt: string, options?: { metadata?: unknown; localId?: string | null; localIds?: readonly string[]; userMessageSeq?: number | null }) => Promise<void>;
+        steerPrompt: (prompt: string, options?: { metadata?: unknown; localId?: string | null; localIds?: readonly string[]; userMessageSeq?: number | null; onProviderPromptAccepted?: () => void }) => Promise<void>;
         sendPrompt: (prompt: string, options?: { metadata?: unknown; localId?: string | null; localIds?: readonly string[]; userMessageSeq?: number | null; appliedModelId?: string | null }) => Promise<void>;
         sendPromptWithMeta?: (params: {
             text: string;
@@ -376,7 +395,10 @@ export async function runCodex(opts: {
 
     const explicitPermissionMode = opts.permissionMode;
     const hasResumeArg = typeof opts.resume === 'string' && opts.resume.trim().length > 0;
-    const accountSettings = hasResumeArg ? null : (opts.accountSettingsContext?.settings ?? null);
+    const loadedAccountSettings = opts.accountSettingsContext?.settings ?? null;
+    // Resume suppresses account defaults only for permission seeding. MCP selection is
+    // persisted session configuration and must remain available when reattaching.
+    const accountSettings = hasResumeArg ? null : loadedAccountSettings;
     const pendingQueueDrainMaxPopPerWake = resolveSessionPendingQueueMaxPopPerWake(opts.accountSettingsContext?.settings ?? null);
     const permissionModeSeed = resolvePermissionModeSeedForAgentStart({
         agentId: 'codex',
@@ -449,6 +471,7 @@ export async function runCodex(opts: {
         localIds: readonly string[];
         reason: PendingQueueDeliveryBlockedReason;
         userMessageSeq: number | null;
+        providerEffect?: 'none';
     }>): Promise<void> => {
         const localIds = normalizeProviderPromptLocalIds(input.localIds);
         if (localIds.length === 0 || typeof session.blockPendingMessageDelivery !== 'function') {
@@ -458,6 +481,7 @@ export async function runCodex(opts: {
         await session.blockPendingMessageDelivery({
             localIds,
             reason: input.reason,
+            ...(input.providerEffect ? { providerEffect: input.providerEffect } : {}),
         });
     };
     const messageBuffer = new MessageBuffer();
@@ -825,6 +849,7 @@ export async function runCodex(opts: {
             ],
         startupSideEffectsOrder: 'persist-first',
         allowOfflineStub: true,
+        deferPendingFirstInputCommitUntilRuntimeReady: true,
         onSessionSwap: (newSession) => {
             session = newSession;
             if (useCodexAppServer) {
@@ -970,6 +995,13 @@ export async function runCodex(opts: {
     const getCodexRemoteRuntime = (): CodexRemoteRuntime | null => {
         return codexAcpRuntime ?? codexAppServerRuntime;
     };
+    const getCodexRemoteResumeId = (): string | null => {
+        const runtime = getCodexRemoteRuntime();
+        if (!runtime) return null;
+        return useCodexAppServer
+            ? (runtime.getPublishedSessionId?.() ?? null)
+            : runtime.getSessionId();
+    };
     /**
      * The live session catalogs the send-time resolver reads to reconstruct provider context
      * (INV-9). They are read lazily per dispatch — the resolver calls them only when the
@@ -1004,6 +1036,7 @@ export async function runCodex(opts: {
     const runtimeModelOverrideRef = { current: currentModelId, updatedAt: currentModelUpdatedAt };
     let runtimeOverridesSync: Awaited<ReturnType<typeof initializeRuntimeOverridesSynchronizer>> | null = null;
     let didReplaySeedBootstrap = false;
+    const liveSteerReplaySeedRetirement = createProviderPromptAcceptanceSettlement();
     const persistStartupOverridesCache = (): void => {
         try {
             writeStartupOverridesCacheForBackend({
@@ -1128,6 +1161,7 @@ export async function runCodex(opts: {
                     if (!inputConsumer) {
                         return;
                     }
+                    await liveSteerReplaySeedRetirement.drain();
                     const localIds = normalizeProviderPromptLocalIds([message.localId ?? null]);
                     const dispatchResolution = await resolveCodexQueuedPromptForDispatch({
                         sessionClient: session,
@@ -1147,16 +1181,25 @@ export async function runCodex(opts: {
                             permissionModeUpdatedAt: resolvedMode.permissionModeUpdatedAt,
                         })
                         : null;
+                    liveSteerReplaySeedRetirement.register(
+                        localIds.length === 1 ? localIds[0] : null,
+                        dispatchResolution.seedApplied
+                            ? dispatchResolution.settleReplaySeedOnProviderAcceptance
+                            : null,
+                    );
+                    const onProviderPromptAccepted = dispatchResolution.seedApplied
+                        ? () => liveSteerReplaySeedRetirement.confirmProviderAccepted(localIds)
+                        : null;
                     await dispatchProviderInputOrThrow(async () => {
                         await runtime.steerPrompt(providerPromptText, {
                             ...providerPromptIdentityOption(localIds),
                             metadata: providerPromptMetadata,
                             userMessageSeq,
+                            ...(onProviderPromptAccepted ? { onProviderPromptAccepted } : {}),
                         });
                     });
-                    if (dispatchResolution.seedApplied) {
-                        // Codex has the steered prompt, seed included: only now may it be retired.
-                        await dispatchResolution.settleReplaySeedOnProviderAcceptance();
+                    if (onProviderPromptAccepted) {
+                        await liveSteerReplaySeedRetirement.drain();
                     }
                 } catch (error) {
                     const localIds = normalizeProviderPromptLocalIds([message.localId ?? null]);
@@ -1179,6 +1222,7 @@ export async function runCodex(opts: {
                             localIds,
                             reason: 'steering_unavailable',
                             userMessageSeq,
+                            providerEffect: 'none',
                         });
                         return;
                     }
@@ -1204,6 +1248,7 @@ export async function runCodex(opts: {
                 localIds,
                 reason: 'steering_unavailable',
                 userMessageSeq,
+                providerEffect: 'none',
             });
             return;
         }
@@ -1339,6 +1384,40 @@ export async function runCodex(opts: {
         storedSessionIdFromLocalControl = false;
         logger.debug('[Codex] Resume requested via --resume:', storedSessionIdForResume);
     }
+    // This is inert for ordinary --resume runs. Only a matching same-machine
+    // handoff record clears the Codex projection until `thread/resume` has
+    // accepted the requested id, and only the provider's typed mismatch can
+    // invalidate that record.
+    const trackedNativeReturn = resumeIdFromArgs
+        ? await prepareAgentNativeReturnStrictResume({
+            store: createLocalAgentNativeResumeRecordStore(),
+            sessionId: session.sessionId,
+            targetAgentId: 'codex',
+            vendorResumeId: resumeIdFromArgs,
+            updateMetadata: async (updater) => await session.updateMetadata((metadata) =>
+                updater(metadata as Record<string, unknown>) as typeof metadata,
+            ),
+        })
+        : null;
+    const isTrackedNativeReturnResume = (resumeId: string): boolean =>
+        trackedNativeReturn?.isTracked === true && resumeId === resumeIdFromArgs;
+    const clearTrackedNativeReturnBeforeProviderOpen = async (resumeId: string): Promise<void> => {
+        if (isTrackedNativeReturnResume(resumeId)) {
+            await trackedNativeReturn?.clearBeforeProviderOpen();
+        }
+    };
+    const invalidateTrackedNativeReturnOnMismatch = async (error: unknown): Promise<boolean> => {
+        if (!isAgentNativeResumeIdentityMismatchError(error)) return false;
+        await trackedNativeReturn?.invalidateOnMismatch();
+        return true;
+    };
+    const createCodexResumeError = (message: string, cause: unknown): Error => {
+        const error = new Error(message);
+        error.name = 'CodexAcpResumeError';
+        return isAgentNativeResumeIdentityMismatchError(cause)
+            ? Object.assign(error, { happierNativeResumeIdentityMismatch: true })
+            : error;
+    };
 
 	    if (codexAcpFallbackToMcpMessage && codexAcpFallbackToMcpMessage !== initialCodexAcpFallbackToMcpMessage) {
 	        session.sendSessionEvent({ type: 'message', message: codexAcpFallbackToMcpMessage });
@@ -1366,7 +1445,7 @@ export async function runCodex(opts: {
             startOrLoadAbortController.abort();
             // Store the current session ID before aborting for potential resume
             if (useCodexAcp || useCodexAppServer) {
-                const currentRemoteSessionId = getCodexRemoteRuntime()?.getSessionId();
+                const currentRemoteSessionId = getCodexRemoteResumeId();
                 if (currentRemoteSessionId) {
                     storedSessionIdForResume = currentRemoteSessionId;
                     storedSessionIdFromLocalControl = false;
@@ -1599,8 +1678,9 @@ export async function runCodex(opts: {
 
     // Start Happier MCP server (HTTP) and prepare STDIO bridge config for Codex
     const directory = workspaceDirFromMetadata ?? requestedDirectory;
+    const codexProviderProcessEnv = withCurrentHappierSessionId(process.env, session.sessionId);
     let mcpServers: Awaited<ReturnType<typeof resolveRunnerMcpServers>>['mcpServers'] = {};
-    let codexAppServerProcessEnv = process.env;
+    let codexAppServerProcessEnv = codexProviderProcessEnv;
     let codexAppServerConfigOverrides: string[] = [];
     const mcpSession = applyRunnerMcpSessionContext(session, {
         getPermissionMode: () => currentPermissionMode ?? initialPermissionMode,
@@ -1614,7 +1694,7 @@ export async function runCodex(opts: {
     const happierBridge = await resolveRunnerMcpServers({
         session: mcpSession,
         credentials: opts.credentials,
-        accountSettings,
+        accountSettings: loadedAccountSettings,
         machineId,
         directory,
         sessionMetadata: mcpSession.getMetadataSnapshot?.() ?? null,
@@ -1623,7 +1703,9 @@ export async function runCodex(opts: {
     happierMcpServer = happierBridge.happierMcpServer;
     mcpServers = happierBridge.mcpServers;
     if (useCodexAppServer) {
-        codexAppServerConfigOverrides = buildCodexAppServerConfigOverrides(mcpServers);
+        codexAppServerConfigOverrides = buildCodexAppServerConfigOverrides(mcpServers, {
+            happierSessionId: codexProviderProcessEnv.HAPPIER_SESSION_ID,
+        });
     }
     const resolveFreshSessionSystemPrompt = async (baseOverride?: string | null): Promise<string> =>
         await resolveEffectiveCodingPromptText({
@@ -1642,7 +1724,11 @@ export async function runCodex(opts: {
     if (!useCodexAcp && !useCodexAppServer) {
         const codexMcpServer = await resolveCodexMcpServerSpawn();
         const { CodexMcpClient: CodexMcpClientClass } = await import('./codexMcpClient');
-        client = new CodexMcpClientClass({ mode: codexMcpServer.mode, command: codexMcpServer.command });
+        client = new CodexMcpClientClass({
+            mode: codexMcpServer.mode,
+            command: codexMcpServer.command,
+            env: codexProviderProcessEnv,
+        });
     }
 
             // NOTE: Codex resume support varies by build; forks may seed `codex-reply` with a stored session id.
@@ -1713,6 +1799,7 @@ export async function runCodex(opts: {
     if (useCodexAcp) {
         codexAcpRuntime = createCodexAcpRuntime({
             directory,
+            processEnv: codexProviderProcessEnv,
             session,
             messageBuffer,
             mcpServers,
@@ -1920,14 +2007,18 @@ export async function runCodex(opts: {
             }
         });
         session.setSessionRuntimeControls?.(codexAppServerRuntime);
-        codexAppServerDaemonReportReadiness.resolve?.();
-        codexAppServerDaemonReportReadiness.resolve = null;
+        if (!storedSessionIdForResume?.trim() && !readAttachedCodexAppServerThreadId()) {
+            codexAppServerDaemonReportReadiness.resolve?.();
+            codexAppServerDaemonReportReadiness.resolve = null;
+        }
         try {
             publishInFlightSteerCapability({ session, runtime: codexAppServerRuntime });
         } catch (e) {
             logger.debug('[codex] Failed to publish in-flight steer capability (non-fatal)', e);
         }
     }
+
+    await initializedSession.commitPendingFirstInputAfterRuntimeReady?.();
 
     const callbackMetadata = session.getMetadataSnapshot?.();
     if ((!useCodexAppServer || startedInLocalMode) && callbackMetadata && session.sessionId?.trim()) {
@@ -2159,9 +2250,11 @@ export async function runCodex(opts: {
                 if (resumeId && (useCodexAppServer || isStrictExplicit || isStrictLocalControl)) {
                     messageBuffer.addMessage('Resuming previous context…', 'status');
                     const resumeSignal = startOrLoadAbortController.signal;
+                    await clearTrackedNativeReturnBeforeProviderOpen(resumeId);
                     await seedCodexAppServerOverridesBeforeStartOrLoad();
                     const startOrLoadPromise = Promise.resolve(codexRuntime.startOrLoad({
                         resumeId,
+                        strictNativeResumeIdentity: isTrackedNativeReturnResume(resumeId),
                         // Avoid importing ACP replay history into Happier on resume; Happier transcript is the source of truth.
                         importHistory: false,
                         ...consumeInitialGoalForStartOrLoad(),
@@ -2182,6 +2275,7 @@ export async function runCodex(opts: {
                             // Ensure any late rejection from the in-flight resume attempt is handled.
                             void startOrLoadPromise.catch(() => undefined);
                         } else {
+                            await invalidateTrackedNativeReturnOnMismatch(e);
                             const reason = formatErrorForUi(e);
                             const message = isStrictLocalControl
                                 ? `Failed to switch this Codex session from local → remote.\n` +
@@ -2195,9 +2289,7 @@ export async function runCodex(opts: {
                                   `Note: Happier refuses to start a new Codex session when --resume was requested.`;
                             messageBuffer.addMessage(message, 'status');
                             session.sendSessionEvent({ type: 'message', message });
-                            const err = new Error(message);
-                            err.name = 'CodexAcpResumeError';
-                            throw err;
+                            throw createCodexResumeError(message, e);
                         }
                     }
 
@@ -2210,6 +2302,9 @@ export async function runCodex(opts: {
                             success: true,
                         });
                         storedSessionIdFromLocalControl = false;
+
+                        codexAppServerDaemonReportReadiness.resolve?.();
+                        codexAppServerDaemonReportReadiness.resolve = null;
 
                         if (useCodexAcp) {
                             try {
@@ -2257,6 +2352,8 @@ export async function runCodex(opts: {
                         }
                         wasCreated = true;
                         first = false;
+                        codexAppServerDaemonReportReadiness.resolve?.();
+                        codexAppServerDaemonReportReadiness.resolve = null;
                         await sessionModeSync?.flushPendingAfterStart();
                         await configOptionSync?.flushPendingAfterStart();
                         await modelSync?.flushPendingAfterStart();
@@ -2351,28 +2448,10 @@ export async function runCodex(opts: {
                 // left an accepted-then-aborted turn with a live seed that prefixed the entire
                 // carry-over context onto the next message. Declared outside the try so the
                 // `finally` can drain a retirement started by a turn that then failed.
-                let pendingReplaySeedSettlement: (() => Promise<unknown>) | null = null;
-                let replaySeedSettlement: Promise<unknown> | null = null;
+                const replaySeedRetirement = createProviderPromptAcceptanceSettlement();
                 // Unambiguous confirmed delivery only: a send that throws before any acceptance
                 // evidence never reaches this, so the seed stays live for the retry.
-                const retireReplaySeedOnConfirmedDelivery = (): void => {
-                    const settle = pendingReplaySeedSettlement;
-                    if (!settle) return;
-                    pendingReplaySeedSettlement = null;
-                    // The seed owner reports its own failures and never rejects; the promise is
-                    // drained below so retirement is durable before the next prompt resolves.
-                    replaySeedSettlement = settle();
-                };
-                const confirmProviderAcceptedPromptForTurn = (appliedModelId?: string | null): void => {
-                    retireReplaySeedOnConfirmedDelivery();
-                    confirmProviderAcceptedPrompt(message, appliedModelId);
-                };
-                const awaitReplaySeedSettlement = async (): Promise<void> => {
-                    const settlement = replaySeedSettlement;
-                    if (!settlement) return;
-                    replaySeedSettlement = null;
-                    await settlement;
-                };
+                const awaitReplaySeedSettlement = replaySeedRetirement.drain;
             try {
                 const localId =
                     typeof message.mode.localId === 'string' && message.mode.localId
@@ -2382,6 +2461,13 @@ export async function runCodex(opts: {
                     ...(message.userMessageLocalIds ?? []),
                     localId,
                 ]);
+                const retireReplaySeedOnConfirmedDelivery = (): void => {
+                    replaySeedRetirement.confirmProviderAccepted(localIds);
+                };
+                const confirmProviderAcceptedPromptForTurn = (appliedModelId?: string | null): void => {
+                    retireReplaySeedOnConfirmedDelivery();
+                    confirmProviderAcceptedPrompt(message, appliedModelId);
+                };
                 providerDeliveryLocalIds = localIds;
                 const startSeqExclusive = session.getLastObservedMessageSeq();
                 const turnToken = session.beginTurnAssistantTextSnapshot({ startSeqExclusive });
@@ -2403,9 +2489,12 @@ export async function runCodex(opts: {
                         catalogs: codexDispatchCatalogReaders(),
                     });
                     didReplaySeedBootstrap = dispatchResolution.didBootstrap;
-                    if (dispatchResolution.seedApplied) {
-                        pendingReplaySeedSettlement = dispatchResolution.settleReplaySeedOnProviderAcceptance;
-                    }
+                    replaySeedRetirement.register(
+                        localIds.length === 1 ? localIds[0] : null,
+                        dispatchResolution.seedApplied
+                            ? dispatchResolution.settleReplaySeedOnProviderAcceptance
+                            : null,
+                    );
                     resolvedProviderDispatch = { text: dispatchResolution.text, metadata: dispatchResolution.metadata };
                     return resolvedProviderDispatch;
                 };
@@ -2450,6 +2539,7 @@ export async function runCodex(opts: {
                                 localIds,
                                 reason: 'steering_unavailable',
                                 userMessageSeq: message.maxUserMessageSeq ?? null,
+                                providerEffect: 'none',
                             });
                             continue;
                         }
@@ -2469,10 +2559,12 @@ export async function runCodex(opts: {
                         if (resumeId) {
                             messageBuffer.addMessage('Resuming previous context…', 'status');
                             const resumeSignal = startOrLoadAbortController.signal;
+                            await clearTrackedNativeReturnBeforeProviderOpen(resumeId);
                             await seedCodexAppServerOverridesBeforeStartOrLoad();
                             const initialGoal = consumeInitialGoalForStartOrLoad();
                             const startOrLoadPromise = Promise.resolve(codexRuntime.startOrLoad({
                                 resumeId,
+                                strictNativeResumeIdentity: isTrackedNativeReturnResume(resumeId),
                                 // Avoid importing ACP replay history into Happier on resume; Happier transcript is the source of truth.
                                 importHistory: false,
                                 ...initialGoal,
@@ -2500,9 +2592,10 @@ export async function runCodex(opts: {
                                     void startOrLoadPromise.catch(() => undefined);
                                     throw e;
                                 }
+                                const nativeIdentityMismatch = await invalidateTrackedNativeReturnOnMismatch(e);
                                 const isStrictExplicit = Boolean(strictResumeIdForRun && resumeId === strictResumeIdForRun);
                                 const isStrictLocalControl = storedSessionIdFromLocalControl === true;
-                                const isStrict = isStrictExplicit || isStrictLocalControl;
+                                const isStrict = isStrictExplicit || isStrictLocalControl || nativeIdentityMismatch;
                                 if (isStrict) {
                                     const reason = formatErrorForUi(e);
                                     const message = isStrictLocalControl
@@ -2517,9 +2610,7 @@ export async function runCodex(opts: {
                                           `Note: Happier refuses to start a new Codex session when --resume was requested.`;
                                     messageBuffer.addMessage(message, 'status');
                                     session.sendSessionEvent({ type: 'message', message });
-                                    const err = new Error(message);
-                                    err.name = 'CodexAcpResumeError';
-                                    throw err;
+                                    throw createCodexResumeError(message, e);
                                 }
 
                                 logger.debug('[Codex ACP] Resume failed; starting a new session instead', e);
@@ -2855,43 +2946,54 @@ export async function runCodex(opts: {
                     const runtimeAuthClassification = readRuntimeAuthClassification(error);
                     let runtimeAuthRecoveryStatusEmitted = false;
                     if (runtimeAuthClassification) {
-                        logger.warn(
-                            '[Codex] Runtime auth failure reported to daemon',
-                            summarizeRuntimeAuthClassificationForLog(runtimeAuthClassification),
-                        );
-                        const runtime = useCodexAcp || useCodexAppServer
-                            ? getCodexRemoteRuntime()
-                            : null;
-                        if (runtime) {
-                            // The exact provider turn has already failed. Publish its terminal
-                            // boundary before Connected Services attempts refresh/switch/continuation
-                            // so recovery cannot wait on the turn that is waiting on recovery.
-                            await runtime.flushTurn();
+                        const appServerTerminalOwnsRecovery = useCodexAppServer
+                            && isAppServerTerminalOwnedUsageLimitGroupRecovery(runtimeAuthClassification);
+                        if (appServerTerminalOwnsRecovery) {
+                            // The app-server terminal notification owns this exact group-bound
+                            // usage-limit report. It settles the provider turn before delegating to
+                            // the shared reporter, including when the outer prompt await has already
+                            // failed through a different error path. Do not report or flush it twice.
                             providerTurnSettledBeforeRuntimeAuthRecovery = true;
+                            runtimeAuthRecoveryStatusEmitted = true;
+                        } else {
+                            logger.warn(
+                                '[Codex] Runtime auth failure reported to daemon',
+                                summarizeRuntimeAuthClassificationForLog(runtimeAuthClassification),
+                            );
+                            const runtime = useCodexAcp || useCodexAppServer
+                                ? getCodexRemoteRuntime()
+                                : null;
+                            if (runtime) {
+                                // The exact provider turn has already failed. Publish its terminal
+                                // boundary before Connected Services attempts refresh/switch/continuation
+                                // so recovery cannot wait on the turn that is waiting on recovery.
+                                await runtime.flushTurn();
+                                providerTurnSettledBeforeRuntimeAuthRecovery = true;
+                            }
+                            const recoveryReport = await reportConnectedServiceRuntimeAuthFailureToDaemon({
+                                sessionId: session.sessionId,
+                                switchesThisTurn: 0,
+                                classification: runtimeAuthClassification,
+                                logPrefix: '[Codex]',
+                            });
+                            runtimeAuthRecoveryStatusEmitted = projectConnectedServiceRuntimeAuthRecoveryReport({
+                                report: recoveryReport,
+                                classification: runtimeAuthClassification,
+                                addStatusMessage: (message) => {
+                                    messageBuffer.addMessage(message, 'status');
+                                },
+                                sendGenericStatusMessage: (message) => {
+                                    session.sendSessionEvent({ type: 'message', message });
+                                },
+                                commitTypedProjection: (projection) => {
+                                    if (projection.transcriptEvent) {
+                                        session.sendSessionEvent(projection.transcriptEvent);
+                                        return true;
+                                    }
+                                    return false;
+                                },
+                            }).emitted;
                         }
-                        const recoveryReport = await reportConnectedServiceRuntimeAuthFailureToDaemon({
-                            sessionId: session.sessionId,
-                            switchesThisTurn: 0,
-                            classification: runtimeAuthClassification,
-                            logPrefix: '[Codex]',
-                        });
-                        runtimeAuthRecoveryStatusEmitted = projectConnectedServiceRuntimeAuthRecoveryReport({
-                            report: recoveryReport,
-                            classification: runtimeAuthClassification,
-                            addStatusMessage: (message) => {
-                                messageBuffer.addMessage(message, 'status');
-                            },
-                            sendGenericStatusMessage: (message) => {
-                                session.sendSessionEvent({ type: 'message', message });
-                            },
-                            commitTypedProjection: (projection) => {
-                                if (projection.transcriptEvent) {
-                                    session.sendSessionEvent(projection.transcriptEvent);
-                                    return true;
-                                }
-                                return false;
-                            },
-                        }).emitted;
                     } else {
                         logger.warn('Error in codex session:', error);
                     }
@@ -2903,7 +3005,7 @@ export async function runCodex(opts: {
                     }
                     // For unexpected errors, keep the ACP session id (best-effort) so a subsequent start can attempt resume.
                     if (useCodexAcp || useCodexAppServer) {
-                        const currentRemoteSessionId = getCodexRemoteRuntime()?.getSessionId();
+                        const currentRemoteSessionId = getCodexRemoteResumeId();
                         if (currentRemoteSessionId) {
                             storedSessionIdForResume = currentRemoteSessionId;
                             storedSessionIdFromLocalControl = false;

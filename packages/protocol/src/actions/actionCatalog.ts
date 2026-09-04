@@ -18,9 +18,11 @@ export type SerializedActionSpec = Readonly<{
   slash: ActionSpec['slash'] | null;
   bindings: ActionSpec['bindings'] | null;
   examples: ActionSpec['examples'] | null;
+  operation: ActionSpec['operation'] | null;
   approval: ActionSpec['approval'];
   surfaces: ActionSpec['surfaces'];
   toolExposure: ActionSpec['toolExposure'] | null;
+  contextualDefaults: ActionSpec['contextualDefaults'] | null;
   inputHints: ActionSpec['inputHints'] | null;
 }>;
 
@@ -102,9 +104,11 @@ export function serializeActionSpec(spec: ActionSpec): SerializedActionSpec {
     slash: spec.slash ?? null,
     bindings: spec.bindings ?? null,
     examples: spec.examples ?? null,
+    operation: spec.operation ?? null,
     approval: spec.approval,
     surfaces: spec.surfaces,
     toolExposure: spec.toolExposure ?? null,
+    contextualDefaults: spec.contextualDefaults ?? null,
     inputHints: spec.inputHints ?? null,
   };
 }

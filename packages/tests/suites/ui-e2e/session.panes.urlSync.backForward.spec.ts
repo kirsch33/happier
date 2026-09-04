@@ -4,13 +4,12 @@ import { join, resolve } from 'node:path';
 
 import { createRunDirs } from '../../src/testkit/runDir';
 import { startServerLight, type StartedServer } from '../../src/testkit/process/serverLight';
-import { startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
-import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/daemon';
-import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
+import { resolveUiWebBeforeAllTimeoutMs, startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
+import { type StartedDaemon } from '../../src/testkit/daemon/daemon';
+import { authenticateAndStartDaemon } from '../../src/testkit/uiE2e/authenticateAndStartDaemon';
 import { fakeClaudeFixturePath } from '../../src/testkit/fakeClaude';
 import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { spawnSessionFromDaemon } from '../../src/testkit/uiE2e/spawnSessionFromDaemon';
-import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -38,7 +37,7 @@ test.describe('ui e2e: session multi-pane URL sync', () => {
   }
 
   test.beforeAll(async () => {
-    test.setTimeout(420_000);
+    test.setTimeout(resolveUiWebBeforeAllTimeoutMs(process.env));
     await mkdir(cliHomeDir, { recursive: true });
     await writeFile(resolve(join(cliHomeDir, 'AGENTS.md')), '# UI e2e fixture\n', 'utf8');
 
@@ -46,7 +45,7 @@ test.describe('ui e2e: session multi-pane URL sync', () => {
       testDir: suiteDir,
       dbProvider: 'sqlite',
       extraEnv: {
-        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys',
+        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,providers.claude.unifiedTerminal',
         HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
         HAPPIER_PRESENCE_SESSION_TIMEOUT_MS: '60000',
         HAPPIER_PRESENCE_MACHINE_TIMEOUT_MS: '60000',
@@ -79,48 +78,23 @@ test.describe('ui e2e: session multi-pane URL sync', () => {
     if (!server || !uiBaseUrl) throw new Error('missing server/ui fixtures');
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
-
-    await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
-
     const testDir = resolve(join(suiteDir, 't1-url-sync'));
     await mkdir(testDir, { recursive: true });
     await writeFile(resolve(join(testDir, 'AGENTS.md')), '# UI e2e fixture\n', 'utf8');
 
-    const cliLogin: StartedCliTerminalConnect = await startCliAuthLoginForTerminalConnect({
-      testDir,
-      cliHomeDir,
-      serverUrl: server.baseUrl,
-      webappUrl: uiBaseUrl,
-      env: {
-        ...process.env,
-        HOME: cliHomeDir,
-        CI: '1',
-        HAPPIER_DISABLE_CAFFEINATE: '1',
-        HAPPIER_VARIANT: 'dev',
-      },
-    });
-
-    await page.goto(cliLogin.connectUrl, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('terminal-connect-approve')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('terminal-connect-approve').click();
-    await cliLogin.waitForSuccess();
-
     const fakeClaudeLogPath = resolve(join(testDir, 'fake-claude.jsonl'));
     const fakeClaudePath = fakeClaudeFixturePath();
 
-    daemon = await startTestDaemon({
+    daemon = await authenticateAndStartDaemon({
+      page,
       testDir,
-      happyHomeDir: cliHomeDir,
-      env: {
+      cliHomeDir,
+      serverUrl: server.baseUrl,
+      uiBaseUrl,
+      daemonStartupTimeoutMs: 180_000,
+      extraEnv: {
         ...process.env,
         HOME: cliHomeDir,
-        CI: '1',
-        HAPPIER_HOME_DIR: cliHomeDir,
-        HAPPIER_SERVER_URL: server.baseUrl,
-        HAPPIER_WEBAPP_URL: uiBaseUrl,
-        HAPPIER_DISABLE_CAFFEINATE: '1',
-        HAPPIER_VARIANT: 'dev',
         // Machine-scoped RPC must be allowed to read within the e2e fixture directory so the machine
         // is considered fully online/usable by the UI (required for /new wizard flows).
         HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: testDir,
@@ -168,13 +142,11 @@ test.describe('ui e2e: session multi-pane URL sync', () => {
     await expect(rightPaneLocator(page)).toHaveCount(1, { timeout: 60_000 });
     await expect(detailsPaneLocator(page)).toHaveCount(0, { timeout: 60_000 });
 
-    // State -> URL: opening a linked file mention updates search params (details + path).
-    await expect(page.getByTestId('session-composer-input')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('session-composer-input').fill('open @AGENTS.md');
-    await page.getByTestId('session-composer-input').press('Enter');
-
-    await expect(page.getByTestId('linked-workspace-file:AGENTS.md')).toHaveCount(1, { timeout: 120_000 });
-    await page.getByTestId('linked-workspace-file:AGENTS.md').click();
+    // State -> URL: opening the existing file row updates search params (details + path).
+    // This URL contract must not depend on an unrelated agent reply rendering a file mention.
+    const agentsFileRow = page.getByTestId('repository-tree-row-AGENTS.md');
+    await expect(agentsFileRow).toHaveCount(1, { timeout: 120_000 });
+    await agentsFileRow.click();
 
     await expect(detailsPaneLocator(page)).toHaveCount(1, { timeout: 60_000 });
     await expect.poll(async () => page.url(), { timeout: 60_000 }).toContain('details=file');

@@ -7,6 +7,7 @@ import { resolveForkInheritedOverridesFromMetadata } from './resolveForkInherite
 describe('resolveForkInheritedOverridesFromMetadata', () => {
   it('returns spawn seeds plus metadata overrides for valid parent overrides', () => {
     const result = resolveForkInheritedOverridesFromMetadata({
+      summary: { text: '  Migrate Hermes Lite to Happier  ', updatedAt: 122 },
       permissionMode: 'yolo',
       permissionModeUpdatedAt: 123,
       modelOverrideV1: { v: 1, updatedAt: 456, modelId: 'gpt-test' },
@@ -124,8 +125,16 @@ describe('resolveForkInheritedOverridesFromMetadata', () => {
       },
       connectedServicesUpdatedAt: 459,
     });
+    expect(result.metadata.summary).toEqual({
+      text: 'Migrate Hermes Lite to Happier (fork 1)',
+      updatedAt: 122,
+    });
 
     expect(result.metadata).toEqual({
+      summary: {
+        text: 'Migrate Hermes Lite to Happier (fork 1)',
+        updatedAt: 122,
+      },
       permissionMode: 'yolo',
       permissionModeUpdatedAt: 123,
       modelOverrideV1: { v: 1, updatedAt: 456, modelId: 'gpt-test' },
@@ -224,8 +233,24 @@ describe('resolveForkInheritedOverridesFromMetadata', () => {
     });
   });
 
+  it('increments an existing fork suffix and accepts the legacy name field as read compatibility', () => {
+    expect(resolveForkInheritedOverridesFromMetadata({
+      summary: { text: 'Release hardening (fork 7)', updatedAt: 123 },
+    }).metadata.summary).toEqual({
+      text: 'Release hardening (fork 8)',
+      updatedAt: 123,
+    });
+
+    expect(resolveForkInheritedOverridesFromMetadata({
+      name: 'Legacy fork title',
+    }).metadata.summary).toMatchObject({
+      text: 'Legacy fork title (fork 1)',
+    });
+  });
+
   it('ignores invalid or cleared values while preserving valid override objects', () => {
     const result = resolveForkInheritedOverridesFromMetadata({
+      name: '   ',
       permissionMode: 'not-a-mode',
       permissionModeUpdatedAt: 123,
       modelOverrideV1: { v: 1, updatedAt: 456, modelId: 'default' },

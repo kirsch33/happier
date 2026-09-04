@@ -9,7 +9,7 @@ import {
   SessionUsageLimitWaitResumeEnableRequestV1Schema,
 } from '../sessionWorkState/sessionWorkStateRpc.js';
 import { serializeActionSpec } from './actionCatalog.js';
-import { ActionApprovalSchema, ActionSpecSchema, ActionSurfaceSchema, getActionSpec, isActionSpecSurfacedOn, listActionSpecs, listActionSpecsForSurface, listVoicePromptHotPathSpecs, resolveActionApprovalFlow } from './actionSpecs.js';
+import { ActionApprovalSchema, ActionOperationDeclarationV1Schema, ActionSpecSchema, ActionSurfaceSchema, getActionSpec, isActionSpecSurfacedOn, listActionSpecs, listActionSpecsForSurface, listVoicePromptHotPathSpecs, resolveActionApprovalFlow } from './actionSpecs.js';
 
 const RESULT_REQUIRED_BLOCKING_ACTION_IDS = [
   'action.spec.search',
@@ -97,7 +97,6 @@ const RESULT_OPTIONAL_DEFERRED_ACTION_IDS = [
 
 const EXTERNALLY_CONTROLLABLE_SESSION_AGENT_UNSUPPORTED_ACTIONS = {
   'voice_agent.start': 'voice-agent launches are a separate user-facing runtime surface, not an in-session self-control primitive.',
-  'execution.run.get': 'execution run reads are available through session-scoped run list/wait/status paths; direct external get remains outside session-agent by policy.',
   'session.spawn_picker': 'the interactive spawn picker remains UI/external-client only; in-session agents use session.spawn_new.',
   'session.terminalComposer.clear': 'clearing a human terminal composer is an explicit human/UI decision.',
   'session.pendingInput.interruptAndRun': 'interrupting a human-visible live provider turn is an explicit human/UI decision.',
@@ -111,6 +110,19 @@ function sorted(values: readonly string[]): string[] {
 }
 
 describe('Action Spec Registry', () => {
+  it('recommends current-session omission in execution-run start examples', () => {
+    for (const actionId of [
+      'review.start',
+      'subagents.plan.start',
+      'subagents.delegate.start',
+      'voice_agent.start',
+      'execution.run.start',
+    ] as const) {
+      const example = getActionSpec(actionId).examples;
+      expect(JSON.stringify(example)).not.toContain('sessionId');
+    }
+  });
+
   it('supports session_agent as an action surface', () => {
     const parsed = ActionSurfaceSchema.parse({
       ui_button: false,
@@ -172,6 +184,49 @@ describe('Action Spec Registry', () => {
         session_agent: 'hidden',
       },
     }).success).toBe(false);
+  });
+
+  it('accepts only the exact v1 tracked-operation declaration', () => {
+    expect(ActionOperationDeclarationV1Schema.parse({
+      version: 1,
+      visibility: 'activity',
+      progress: 'reported',
+    })).toEqual({
+      version: 1,
+      visibility: 'activity',
+      progress: 'reported',
+    });
+    expect(ActionOperationDeclarationV1Schema.safeParse({
+      version: 1,
+      visibility: 'activity',
+      progress: 'indeterminate',
+    }).success).toBe(true);
+
+    for (const malformed of [
+      { version: 2, visibility: 'activity', progress: 'reported' },
+      { version: 1, visibility: 'private', progress: 'reported' },
+      { version: 1, visibility: 'activity', progress: 'synthetic' },
+      { version: 1, visibility: 'activity', progress: 'reported', terminalize: true },
+    ]) {
+      expect(ActionOperationDeclarationV1Schema.safeParse(malformed).success).toBe(false);
+    }
+  });
+
+  it('declares and serializes the tracked core session actions', () => {
+    const expected = {
+      'session.fork': { version: 1, visibility: 'activity', progress: 'indeterminate' },
+      'session.spawn_new': { version: 1, visibility: 'activity', progress: 'reported' },
+      'session.handoff': { version: 1, visibility: 'activity', progress: 'reported' },
+    } as const;
+
+    for (const [actionId, operation] of Object.entries(expected)) {
+      const spec = getActionSpec(actionId as keyof typeof expected);
+      expect(spec.operation).toEqual(operation);
+      expect(serializeActionSpec(spec).operation).toEqual(operation);
+    }
+
+    expect(getActionSpec('session.rollback').operation).toBeUndefined();
+    expect(serializeActionSpec(getActionSpec('session.rollback')).operation).toBeNull();
   });
 
   it('declares approval result metadata for every action spec', () => {
@@ -498,6 +553,15 @@ describe('Action Spec Registry', () => {
     expect(recent.description).toContain('DEPRECATED: use session_transcript_get. Returns semantic transcript items with cleaner pagination.');
   });
 
+  it('requires sidechain scope when session events specify a sidechain id', () => {
+    const schema = getActionSpec('session.events.get').inputSchema;
+    expect(() => schema.parse({ sessionId: 'session_1', sidechainId: 'side_1' })).toThrow();
+    expect(schema.parse({ sessionId: 'session_1', scope: 'sidechain', sidechainId: 'side_1' })).toMatchObject({
+      scope: 'sidechain',
+      sidechainId: 'side_1',
+    });
+  });
+
   it('registers work-state, goal, vendor plugin, and skill catalog actions', () => {
     expect(getActionSpec('session.work_state.get' as any).bindings?.mcpToolName).toBe('session_work_state_get');
     expect(getActionSpec('session.goal.get' as any).approval).toEqual({ result: 'required' });
@@ -573,6 +637,16 @@ describe('Action Spec Registry', () => {
     const spec = getActionSpec('execution.run.start' as any);
     expect(spec.surfaces.cli).toBe(true);
     expect(spec.surfaces.mcp).toBe(true);
+    expect(spec.inputSchema.parse({
+      intent: 'delegate',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      permissionMode: 'default',
+      retentionPolicy: 'ephemeral',
+      runClass: 'bounded',
+      ioMode: 'request_response',
+      waitForCompletion: true,
+      waitTimeoutSeconds: 5,
+    })).toMatchObject({ waitForCompletion: true, waitTimeoutSeconds: 5 });
   });
 
   it('exposes execution.run.wait for cli and external mcp surfaces', () => {
@@ -589,6 +663,12 @@ describe('Action Spec Registry', () => {
       runId: 'run_1',
       timeoutSeconds: 7_200,
     });
+  });
+
+  it('keeps the execution-run observation/control surface coherent for session agents', () => {
+    for (const id of ['execution.run.start', 'execution.run.list', 'execution.run.get', 'execution.run.wait', 'execution.run.stop', 'execution.run.send'] as const) {
+      expect(getActionSpec(id).surfaces.session_agent, id).toBe(true);
+    }
   });
 
   it('exposes session.spawn_new as an MCP tool', () => {
@@ -696,21 +776,21 @@ describe('Action Spec Registry', () => {
     expect(spec.inputSchema.safeParse({ permissionMode: 'surprise-me' }).success).toBe(false);
   });
 
-  it('rejects daemon-internal session.spawn_new plumbing fields', () => {
+  it('rejects daemon authority and outer-workflow session.spawn_new fields', () => {
     const spec = getActionSpec('session.spawn_new');
     const internalFields = [
-      'spawnNonce',
       'accountSettingsVersionHint',
       'sessionId',
       'existingSessionId',
       'existingSessionAttachPayload',
       'initialTranscriptAfterSeq',
       'initialGoal',
-      'resume',
+      'executionAuthorization',
       'attachMetadataIdentityPolicy',
       'connectedServiceMaterializationIdentityV1',
       'materializationDiagnostics',
-      'approvedNewDirectoryCreation',
+      'attachments',
+      'afterCreated',
     ] as const;
 
     for (const field of internalFields) {
@@ -827,6 +907,27 @@ describe('Action Spec Registry', () => {
     const spec = getActionSpec('memory.search');
     expect(spec.id).toBe('memory.search');
     expect(spec.surfaces.voice_tool).toBe(true);
+    expect(spec.surfaces.session_agent).toBe(true);
+    expect(spec.surfaces.cli).toBe(false);
+  });
+
+  it('declares only semantically valid session-bound contextual defaults', () => {
+    expect(getActionSpec('session.title.set').contextualDefaults).toEqual({
+      sessionId: 'current_session',
+    });
+    expect(getActionSpec('session.status.get').contextualDefaults).toEqual({
+      sessionId: 'current_session',
+    });
+    expect(getActionSpec('memory.search').contextualDefaults).toEqual({
+      machineId: 'current_session_machine',
+    });
+    expect(getActionSpec('memory.get_window').contextualDefaults).toEqual({
+      machineId: 'current_session_machine',
+    });
+    expect(getActionSpec('memory.get_window').contextualDefaults).not.toHaveProperty('sessionId');
+    expect(serializeActionSpec(getActionSpec('memory.get_window')).contextualDefaults).toEqual({
+      machineId: 'current_session_machine',
+    });
   });
 
   it('exposes session fork action spec', () => {
@@ -834,6 +935,29 @@ describe('Action Spec Registry', () => {
     expect(spec.id).toBe('session.fork');
     expect(spec.surfaces.ui_button).toBe(true);
     expect(spec.placements).toContain('session_action_menu');
+  });
+
+  it('validates the canonical optional session fork recipe while preserving legacy input', () => {
+    const schema = getActionSpec('session.fork').inputSchema;
+    expect(schema.safeParse({ sessionId: 'parent-session' }).success).toBe(true);
+    expect(schema.safeParse({
+      sessionId: 'parent-session',
+      forkPoint: { type: 'seq', upToSeqInclusive: 42 },
+      strategy: 'replay',
+      replaySummaryRunner: {
+        v: 1,
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        modelId: 'default',
+        permissionMode: 'no_tools',
+      },
+      replayMaxSeedChars: 40_000,
+      requestId: 'fork-request-1',
+    }).success).toBe(true);
+    expect(schema.safeParse({ sessionId: 'parent-session', strategy: 'invented' }).success).toBe(false);
+    expect(schema.safeParse({
+      sessionId: 'parent-session',
+      forkPoint: { type: 'seq', upToSeqInclusive: -1 },
+    }).success).toBe(false);
   });
 
   it('exposes session rollback action spec', () => {
@@ -1083,13 +1207,13 @@ describe('Action Spec Registry', () => {
     expect(instructionsField?.required).not.toBe(true);
   });
 
-  it('defaults delegate start permission mode to workspace_write', () => {
+  it('preserves omitted delegate permission mode for causal admission', () => {
     const spec = getActionSpec('subagents.delegate.start');
     const parsed = (spec.inputSchema as any).parse({
       backendTargetKeys: ['agent:codex'],
       instructions: 'Do it.',
     });
-    expect(parsed.permissionMode).toBe('workspace_write');
+    expect(parsed.permissionMode).toBeUndefined();
   });
 
   it('advertises and validates the canonical delegate permission modes at the tool boundary', () => {

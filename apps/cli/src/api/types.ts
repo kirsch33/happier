@@ -330,6 +330,7 @@ export const MachineMetadataSchema = z.object({
   happyHomeDir: z.string(),
   happyLibDir: z.string(),
   daemonTerminalSessionAttachSupported: z.boolean().optional(),
+  daemonSessionGoalControlsSupported: z.boolean().optional(),
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
@@ -363,6 +364,8 @@ export const DaemonStateSchema = z.object({
   pid: z.number().optional(),
   httpPort: z.number().optional(),
   startedAt: z.number().optional(),
+  startedWithCliVersion: z.string().optional(),
+  daemonPendingSessionActivationSupported: z.boolean().optional(),
   shutdownRequestedAt: z.number().optional(),
   shutdownSource:
     z.union([

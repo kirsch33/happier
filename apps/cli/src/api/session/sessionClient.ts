@@ -8,7 +8,7 @@ import { backoff, delayUnrefAbortable } from '@/utils/time';
 import { LruSet } from '@/utils/collections/lru';
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 import { createSerializedWorkQueueDiagnostics, type SerializedWorkDiagnosticContext } from '@/utils/serializedWorkQueueDiagnostics';
-import { readPendingLocalId } from '@happier-dev/protocol';
+import { isConditionalPendingSteerClaim, readPendingLocalId } from '@happier-dev/protocol';
 import { inferAgentIdFromSessionMetadata } from '@happier-dev/agents';
 import { configuration } from '@/configuration';
 import type { RawJSONLines } from '@/backends/claude/types';
@@ -268,7 +268,9 @@ import { updateAgentStateBestEffort, updateMetadataBestEffort } from './sessionW
 import { readCliClientUpgradeRequired } from '@/api/clientCompatibility/cliClientCompatibility';
 import { normalizeAgentPromptPayload } from '@/agent/core/AgentPromptPayload';
 import type {
+    MaterializeNextPendingOptions,
     MaterializeNextPendingResult,
+    PendingMaterializationDiagnosticPhase,
     SessionUserMessageDeliveryInfo,
 } from './sessionClientPort';
 import {
@@ -310,6 +312,17 @@ import {
     type PendingQueueRuntimeActivityProjection,
 } from '@/agent/runtime/sessionInput/pendingQueueDrainPolicy';
 import type { ProviderOwnedUserMessageEchoClassifier } from './providerOwnedUserMessageEcho';
+
+function reportPendingMaterializationDiagnosticPhase(
+    observer: ((phase: PendingMaterializationDiagnosticPhase) => void) | undefined,
+    phase: PendingMaterializationDiagnosticPhase,
+): void {
+    try {
+        observer?.(phase);
+    } catch {
+        // Diagnostics must never alter materialization or provider-custody behavior.
+    }
+}
 
 export type SessionProviderInputOutcomeProducer = Readonly<{
     providerId: CatalogAgentId;
@@ -578,10 +591,18 @@ export class ApiSessionClient extends EventEmitter {
     private readonly pendingMaterializedLocalIds = new Set<string>();
     private readonly committedLocalIdsAwaitingEcho = new Set<string>();
     private readonly pendingQueueMaterializedLocalIds = new Set<string>();
-    private readonly canonicalPendingDeliveryByLocalId = new Map<string, PendingMaterializationDeliveryState>();
+    private readonly canonicalPendingDeliveryByLocalId = new Map<string, Readonly<{
+        state: PendingMaterializationDeliveryState;
+        requestedAction?: PendingRequestedActionV1;
+        providerAction?: import('@happier-dev/protocol').PendingProviderAction;
+    }>>();
     // Generic reversible provider-path blocks retain identity so exact late provider evidence can
     // still settle the row. A proven pre-provider lifecycle failure retires it after durable block.
     private readonly serverBlockedCanonicalPendingDeliveryLocalIds = new Set<string>();
+    // The provider can report a precise rejection while a terminal turn observer reports only
+    // ambiguity. Serialize those writes per exact claim so a later weaker report observes the
+    // already-settled claim instead of overwriting the durable reason.
+    private readonly canonicalPendingDeliveryBlockWritesByLocalId = new Map<string, Promise<boolean>>();
     // A source-cutover deferral has proven no Provider effect. Preserve the server's delivering
     // claim through predecessor shutdown so the successor can rejoin its ordinary first delivery.
     private readonly sourceCutoverDeferredPendingLocalIds = new Set<string>();
@@ -1306,6 +1327,12 @@ export class ApiSessionClient extends EventEmitter {
                         error: serializeAxiosErrorForLog(error),
                     });
                 });
+
+                // A reconnect can restore the negotiated materialization contract without
+                // changing the pending projection. Publish the canonical eligibility wake so
+                // a consumer that previously observed retryable transport re-runs against the
+                // healthy session generation instead of waiting for another queue mutation.
+                this.publishPendingEligibilityWake();
             },
             onDisconnected: async ({ event }) => {
                 logger.debug('[API] Socket disconnected:', event.reason ?? 'unknown');
@@ -1676,13 +1703,19 @@ export class ApiSessionClient extends EventEmitter {
     async blockPendingMessageDelivery(params: Readonly<{
         localIds: readonly string[] | null | undefined;
         reason: PendingQueueDeliveryBlockedReason;
+        providerEffect?: 'none';
     }>): Promise<boolean> {
-        return await this.blockCanonicalPendingDeliveries(params.localIds, params.reason);
+        return await this.blockCanonicalPendingDeliveries(
+            params.localIds,
+            params.reason,
+            params.providerEffect,
+        );
     }
 
     private async blockCanonicalPendingDeliveries(
         localIds: readonly string[] | null | undefined,
         reason: PendingQueueDeliveryBlockedReason,
+        providerEffect?: 'none',
     ): Promise<boolean> {
         if (this.closed) return false;
         const pendingLocalIds = this.normalizeProviderAcceptedUserMessageLocalIds(localIds)
@@ -1693,19 +1726,54 @@ export class ApiSessionClient extends EventEmitter {
         for (const localId of pendingLocalIds) {
             didBlock = await this.blockPendingQueueDeliveryLocalId(localId, reason, {
                 canonicalOnly: true,
+                ...(providerEffect ? { providerEffect } : {}),
             }) || didBlock;
         }
         return didBlock;
     }
 
-    private async blockPendingQueueDeliveryLocalId(
+    private blockPendingQueueDeliveryLocalId(
         localId: string,
         reason: PendingQueueDeliveryBlockedReason,
-        opts: Readonly<{ canonicalOnly: boolean }>,
+        opts: Readonly<{ canonicalOnly: boolean; providerEffect?: 'none' }>,
+    ): Promise<boolean> {
+        const precedingWrite = this.canonicalPendingDeliveryBlockWritesByLocalId.get(localId);
+        const write = (async () => {
+            if (precedingWrite) {
+                await precedingWrite;
+            }
+            return await this.blockPendingQueueDeliveryLocalIdNow(localId, reason, opts);
+        })();
+        this.canonicalPendingDeliveryBlockWritesByLocalId.set(localId, write);
+        const clearWrite = () => {
+            if (this.canonicalPendingDeliveryBlockWritesByLocalId.get(localId) === write) {
+                this.canonicalPendingDeliveryBlockWritesByLocalId.delete(localId);
+            }
+        };
+        void write.then(clearWrite, clearWrite);
+        return write;
+    }
+
+    private async blockPendingQueueDeliveryLocalIdNow(
+        localId: string,
+        reason: PendingQueueDeliveryBlockedReason,
+        opts: Readonly<{ canonicalOnly: boolean; providerEffect?: 'none' }>,
     ): Promise<boolean> {
         if (this.closed) return false;
-        const wasCanonical = this.canonicalPendingDeliveryByLocalId.has(localId);
+        const canonicalClaim = this.canonicalPendingDeliveryByLocalId.get(localId);
+        const wasCanonical = canonicalClaim !== undefined;
         if (opts.canonicalOnly && !wasCanonical) return false;
+
+        const settlementReason =
+            reason === 'steering_unavailable'
+            && opts.providerEffect === 'none'
+            && canonicalClaim
+            && isConditionalPendingSteerClaim({
+                requestedAction: canonicalClaim.requestedAction,
+                providerAction: canonicalClaim.providerAction,
+            })
+                ? 'conditional_steer_unavailable'
+                : reason;
 
         const supervisor = this.sessionConnectionSupervisor;
         try {
@@ -1713,7 +1781,7 @@ export class ApiSessionClient extends EventEmitter {
                 token: this.token,
                 sessionId: this.sessionId,
                 localId,
-                reason,
+                reason: settlementReason,
             });
             const result = supervisor
                 ? await runSupervisedRequest({
@@ -1725,11 +1793,17 @@ export class ApiSessionClient extends EventEmitter {
                 })
                 : await request();
 
-            if (wasCanonical && this.canonicalPendingDeliveryByLocalId.has(localId)) {
+            const didRequeueConditionalSteer =
+                settlementReason === 'conditional_steer_unavailable'
+                && result.usedLegacySteeringUnavailableFallback !== true;
+            if (didRequeueConditionalSteer) {
+                this.clearCanonicalPendingDeliveryLocalState(localId);
+                this.clearAgentQueueDeliveryAttempt(localId);
+            } else if (wasCanonical && this.canonicalPendingDeliveryByLocalId.has(localId)) {
                 if (
-                    reason !== 'ambiguous_terminal_delivery'
-                    && reason !== 'delivery_outcome_uncertain'
-                    && !isReversibleProviderInputBlockReason(reason)
+                    settlementReason !== 'ambiguous_terminal_delivery'
+                    && settlementReason !== 'delivery_outcome_uncertain'
+                    && !isReversibleProviderInputBlockReason(settlementReason)
                 ) {
                     this.clearCanonicalPendingDeliveryLocalState(localId);
                 } else {
@@ -1746,8 +1820,9 @@ export class ApiSessionClient extends EventEmitter {
             logger.debug('[pendingQueue] provider delivery block succeeded', {
                 sessionId: this.sessionId,
                 localId,
-                reason,
+                reason: settlementReason,
                 canonical: wasCanonical,
+                conditionalSteerRequeued: didRequeueConditionalSteer,
                 ...(result.pendingQueueState
                     ? {
                         pendingCount: result.pendingQueueState.pendingCount,
@@ -1761,7 +1836,7 @@ export class ApiSessionClient extends EventEmitter {
             logger.debug('[pendingQueue] provider delivery block failed', {
                 sessionId: this.sessionId,
                 localId,
-                reason,
+                reason: settlementReason,
                     error: serializeAxiosErrorForLog(error),
                 });
             if (await this.retireStaleCanonicalPendingDeliveryAfterTerminalMiss(localId, 'block', error)) {
@@ -2248,6 +2323,18 @@ export class ApiSessionClient extends EventEmitter {
         }, configuration.transcriptRecoveryMaxWaitMs);
         timer.unref?.();
         this.agentQueueDeliveredLocalIdCleanupTimers.set(localId, timer);
+    }
+
+    private clearAgentQueueDeliveryAttempt(localId: string): void {
+        this.pendingQueueMaterializedLocalIds.delete(localId);
+        this.agentQueueEchoSuppressedLocalIds.delete(localId);
+        this.agentQueueDeliveredLocalIds.delete(localId);
+        const echoTimer = this.agentQueueEchoSuppressedLocalIdCleanupTimers.get(localId);
+        if (echoTimer) clearTimeout(echoTimer);
+        this.agentQueueEchoSuppressedLocalIdCleanupTimers.delete(localId);
+        const deliveryTimer = this.agentQueueDeliveredLocalIdCleanupTimers.get(localId);
+        if (deliveryTimer) clearTimeout(deliveryTimer);
+        this.agentQueueDeliveredLocalIdCleanupTimers.delete(localId);
     }
 
     private retainExplicitUserRecoveryDecision(localId: string, decision: Promise<ExplicitUserRecoveryDecision>): void {
@@ -2828,7 +2915,7 @@ export class ApiSessionClient extends EventEmitter {
                 replayPreviouslyObservedMessageIdsForObservation:
                     this.startupMessageCatchUpExplicitAfterSeq !== null,
             })
-                .catch((error) => {
+                .then(() => true, (error) => {
                     if (isAuthenticationError(error)) {
                         logger.debug('[API] Startup transcript catch-up retry failed with terminal auth', {
                             error: serializeAxiosErrorForLog(error),
@@ -2841,7 +2928,7 @@ export class ApiSessionClient extends EventEmitter {
                     return true;
                 })
                 .then((shouldContinue) => {
-                    if (shouldContinue !== false) {
+                    if (shouldContinue) {
                         this.scheduleNextStartupMessageCatchUpRetry();
                     }
                 });
@@ -3180,7 +3267,7 @@ export class ApiSessionClient extends EventEmitter {
                 replayPreviouslyObservedMessageIdsForObservation:
                     startupCursor.replayPreviouslyObservedMessageIdsForObservation,
             })
-                .catch((error) => {
+                .then(() => true, (error) => {
                     if (isAuthenticationError(error)) {
                         logger.debug('[API] Initial transcript catch-up failed with terminal auth', {
                             error: serializeAxiosErrorForLog(error),
@@ -3193,7 +3280,7 @@ export class ApiSessionClient extends EventEmitter {
                     return true;
                 })
                 .then((shouldContinue) => {
-                    if (shouldContinue !== false) {
+                    if (shouldContinue) {
                         this.scheduleNextStartupMessageCatchUpRetry();
                     }
                 });
@@ -3830,7 +3917,14 @@ export class ApiSessionClient extends EventEmitter {
         // through the pending claim/accept path. The direct materialize attempt keeps the
         // existing immediacy while leaving the row durable if the runtime cannot accept it yet.
         if (!await this.reconcileCanonicalPendingDeliveriesBeforeMaterialization()) return;
-        await this.runMaterializeNextPendingMessageInner();
+        const materialization = await this.runMaterializeNextPendingMessageInner();
+        if (materialization.result.type === 'retryable_transport') {
+            // The durable row is now present, but startup/reconnect may have raced the
+            // negotiated contract or session socket. Reuse the canonical wake path so it
+            // performs an authoritative reconciliation and wakes the shared input consumer;
+            // do not add a second enqueue-specific retry loop here.
+            this.wakePendingMaterialization();
+        }
     }
 
     private async persistPendingQueueUserMessageBody(
@@ -5272,6 +5366,7 @@ export class ApiSessionClient extends EventEmitter {
         void this.blockPendingMessageDelivery({
             localIds: [localId],
             reason: outcome.reason,
+            providerEffect: 'none',
         });
     }
 
@@ -5614,6 +5709,7 @@ export class ApiSessionClient extends EventEmitter {
         this.pendingQueueMaterializedLocalIds.clear();
         this.canonicalPendingDeliveryByLocalId.clear();
         this.serverBlockedCanonicalPendingDeliveryLocalIds.clear();
+        this.canonicalPendingDeliveryBlockWritesByLocalId.clear();
         this.sourceCutoverDeferredPendingLocalIds.clear();
         this.committedUserMessageSeqTracker.clear();
         this.agentQueueEchoSuppressedLocalIds.clear();
@@ -5940,6 +6036,7 @@ export class ApiSessionClient extends EventEmitter {
         expectedRuntimeActivityRevision?: number;
         pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
         foregroundState?: 'ready' | 'active_steerable' | 'active_unsteerable';
+        onDiagnosticPhase?: (phase: PendingMaterializationDiagnosticPhase) => void;
     } = {}): Promise<{
         didMaterialize: boolean;
         result: MaterializeNextPendingResult;
@@ -5979,6 +6076,7 @@ export class ApiSessionClient extends EventEmitter {
             return { didMaterialize: false, result: { type: 'retryable_transport' } };
         }
         let materializeResult: PendingQueueMaterializeNextResult;
+        reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.server_claim');
         if (serverContract.pendingInput === 'released_server_v0_2_1') {
             const releasedResult = await continuePendingQueueV2OnReleasedServer({
                 contract: serverContract,
@@ -5990,6 +6088,9 @@ export class ApiSessionClient extends EventEmitter {
                 getSocket: () => this.socket,
                 hasCurrentLocalRuntimeAuthority: () => !this.closed && !this.runtimeTerminationStarted,
                 decodeStoredContent: (content) => this.decodeStoredSessionMessageContent(content),
+                reportDiagnosticPhase: (phase) => {
+                    reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, phase);
+                },
             });
             if (releasedResult.type === 'auth_failed') {
                 return {
@@ -6175,6 +6276,7 @@ export class ApiSessionClient extends EventEmitter {
                 messageSeq: materializedMessage?.seq ?? null,
             });
             if (materializedLocalId) {
+                reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.delivery_settlement');
                 await this.blockPendingQueueDeliveryLocalId(materializedLocalId, 'unknown', {
                     canonicalOnly: false,
                 });
@@ -6197,7 +6299,15 @@ export class ApiSessionClient extends EventEmitter {
             }
             this.canonicalPendingDeliveryByLocalId.set(
                 materializedMessage.localId,
-                unresolvedProviderDeliveryState,
+                {
+                    state: unresolvedProviderDeliveryState,
+                    ...(materializedMessage.requestedAction
+                        ? { requestedAction: materializedMessage.requestedAction }
+                        : {}),
+                    ...(materializedMessage.providerAction
+                        ? { providerAction: materializedMessage.providerAction }
+                        : {}),
+                },
             );
         }
 
@@ -6213,6 +6323,7 @@ export class ApiSessionClient extends EventEmitter {
                 localId: materializedLocalId,
             });
             if (materializedLocalId) {
+                reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.delivery_settlement');
                 await this.blockPendingQueueDeliveryLocalId(materializedLocalId, 'unsupported_action', {
                     canonicalOnly: false,
                 });
@@ -6229,6 +6340,7 @@ export class ApiSessionClient extends EventEmitter {
             // server contract that carries no requested action at all (released-server v0.2.1,
             // whose materialize ack is exactly id/seq/localId). Notify unconditionally; the
             // wrapper attaches the action and the active-turn witness only when there is one.
+            reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.daemon_lifecycle');
             const lifecycleResult = await this.notifyDaemonConnectedServiceTurnLifecycle(
                 'prompt_or_steer',
                 undefined,
@@ -6246,13 +6358,15 @@ export class ApiSessionClient extends EventEmitter {
                     sessionId: this.sessionId,
                     localId: materializedLocalId,
                 });
-                const didBlock = materializedLocalId
-                    ? await this.blockPendingQueueDeliveryLocalId(
+                let didBlock = false;
+                if (materializedLocalId) {
+                    reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.delivery_settlement');
+                    didBlock = await this.blockPendingQueueDeliveryLocalId(
                         materializedLocalId,
                         'provider_unavailable_before_acceptance',
                         { canonicalOnly: false },
-                    )
-                    : false;
+                    );
+                }
                 // Only the durable block proves the server row is retryable again. Retire every
                 // process-local claim then so an explicit reopen of this exact localId can be
                 // materialized; a failed block keeps custody and therefore fails closed.
@@ -6315,6 +6429,7 @@ export class ApiSessionClient extends EventEmitter {
         if (materializedLocalId) {
             this.pendingQueueMaterializedLocalIds.add(materializedLocalId);
         }
+        reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.provider_handoff');
         const deliveredMaterializedMessage = await this.deliverPendingQueueMessage(materializedMessage, {
             providerAcceptancePending: isProviderDeliveryHandoff,
         });
@@ -6346,6 +6461,7 @@ export class ApiSessionClient extends EventEmitter {
             && materializedMessage?.localId
             && !deliveredMaterializedMessage
         ) {
+            reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.delivery_settlement');
             await this.blockCanonicalPendingDeliveries([materializedMessage.localId], 'invalid_prompt_text');
         }
 
@@ -6395,13 +6511,7 @@ export class ApiSessionClient extends EventEmitter {
         return { didMaterialize: true, result: { type: 'no_pending' } };
     }
 
-    async materializeNextPendingMessageSafely(opts: {
-        expectedPendingVersion?: number;
-        expectedRuntimeActivityRevision?: number;
-        reconcileWhenEmpty?: 'force' | 'throttled' | 'skip';
-        activeTurnSteerability?: PendingForegroundSteerability;
-        pendingQueueDeliveryTiming?: SessionPendingQueueDeliveryTiming;
-    } = {}): Promise<MaterializeNextPendingResult> {
+    async materializeNextPendingMessageSafely(opts: MaterializeNextPendingOptions = {}): Promise<MaterializeNextPendingResult> {
         const supervisorState = this.sessionConnectionSupervisor?.getState();
         if (supervisorState?.phase === 'auth_failed') {
             return { type: 'auth_failure', statusCode: 401 };
@@ -6418,17 +6528,21 @@ export class ApiSessionClient extends EventEmitter {
                 phase: supervisorState.phase,
             });
         }
+        reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.delivery_reconcile');
         if (!await this.reconcileCanonicalPendingDeliveriesBeforeMaterialization()) {
             return { type: 'no_pending' };
         }
 
         const policy = resolvePendingQueueReconcileWhenEmpty(opts, 'skip');
         if (!this.pendingQueueState.known) {
+            reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.pending_snapshot');
             await this.reconcilePendingQueueState({ force: true });
         } else if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             if (policy === 'force') {
+                reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.pending_snapshot');
                 await this.reconcilePendingQueueState({ force: true });
             } else if (policy === 'throttled') {
+                reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.pending_snapshot');
                 await this.reconcilePendingQueueState({ force: false });
             }
         }
@@ -6438,6 +6552,7 @@ export class ApiSessionClient extends EventEmitter {
         if (countMaterializablePendingRows(this.pendingQueueState) <= 0) {
             return { type: 'no_pending' };
         }
+        reportPendingMaterializationDiagnosticPhase(opts.onDiagnosticPhase, 'materialize.turn_status');
         const refreshedTurnStatus = await this.reconcileTurnStatusBeforePendingMaterializationIfNeeded({
             activeTurnSteerability: opts.activeTurnSteerability,
         });
@@ -6455,6 +6570,7 @@ export class ApiSessionClient extends EventEmitter {
             expectedRuntimeActivityRevision: opts.expectedRuntimeActivityRevision,
             pendingQueueDeliveryTiming: opts.pendingQueueDeliveryTiming,
             foregroundState: this.resolvePendingForegroundState(opts.activeTurnSteerability),
+            onDiagnosticPhase: opts.onDiagnosticPhase,
         });
         return inner.result;
     }

@@ -841,6 +841,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const {
         applyToolCallsGroupExpanded,
         expandedToolCallsAnchorMessageIds,
+        thinkingExpandedByMessageId,
         resolveThinkingExpanded,
         setExpandedToolCallsAnchorMessageIds,
         setThinkingExpanded,
@@ -869,12 +870,23 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const emitViewportChange = React.useCallback((state: TranscriptViewportChangeState): boolean => {
         const emit = props.onViewportChange;
         if (!emit) return false;
+        // Opening-phase virtual-list observations are not user intent. Persisting them before
+        // the initial transcript fill settles can stamp a synthetic first-row anchor (often
+        // seq:1) and make the next reopen restore the pre-materialization position. The same
+        // canonical viewport owner resumes persistence once initial fill has settled; explicit
+        // live-tail/jump writes already carry their own settled lifecycle state.
+        if (
+            state.shouldPersistViewport !== false
+            && sessionOpenLatch.initialFillStatus() !== 'done'
+        ) {
+            return false;
+        }
         emit({
             ...state,
             anchor: stampViewportAnchorForEmit(state.anchor),
         });
         return true;
-    }, [props.onViewportChange, stampViewportAnchorForEmit]);
+    }, [props.onViewportChange, sessionOpenLatch, stampViewportAnchorForEmit]);
     const { commitExplicitReturnToLiveTailState, handleRendererAtEndChange } = useTranscriptLiveTailIntentHost({
         commitBottomFollowModeState,
         commitJumpToBottomDistanceForVisibilityRef,
@@ -1153,8 +1165,15 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
     const tailContiguousFloorSeq = useSessionTailContiguousFloorSeq(props.sessionId);
     const transcriptListExtraData = React.useMemo(() => ({
         messagePins: props.messagePins,
+        rollbackActionsByMessageId: props.rollbackActionsByMessageId,
         selectionVersion: transcriptMessageSelection.selectionVersion,
-    }), [props.messagePins, transcriptMessageSelection.selectionVersion]);
+        thinkingExpandedByMessageId,
+    }), [
+        props.messagePins,
+        props.rollbackActionsByMessageId,
+        thinkingExpandedByMessageId,
+        transcriptMessageSelection.selectionVersion,
+    ]);
     const listOrientation: TranscriptListOrientation = resolveTranscriptListPresentation({
         platformIsWeb: Platform.OS === 'web',
     }).orientation;
@@ -2164,7 +2183,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         verifyNativeSliceEntryRestoreTransaction,
         verifyWebEntryRestoreTransaction,
     } = entryHost;
-    const onSuccessfulRouteJumpSettled = React.useCallback((settledSessionId: string): void => {
+    const onRouteJumpSettled = React.useCallback((settledSessionId: string): void => {
         if (!sessionOpenLatch.onJumpEntrySettled({ sessionId: settledSessionId })) return;
         observeCommittedProjectionLayoutRef.current();
     }, [sessionOpenLatch]);
@@ -2201,7 +2220,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         listRef,
         messagesById: props.messagesById,
         onJumpLanded: props.onJumpLanded,
-        onSuccessfulRouteJumpSettled,
+        onRouteJumpSettled,
         onViewportChangeRef,
         pendingJumpSeqViewportPromotionRef,
         pinThresholdPx,
@@ -2425,6 +2444,7 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         pinThresholdPx,
         pinThresholdPxRef,
         platformOS: Platform.OS,
+        preemptExplicitJumpForUserTakeover: jumpHost.preemptExplicitJumpForUserTakeover,
         preemptEntryRestoreTransaction,
         prepareNativeContentMaterializationAutoPin,
         prependHost,

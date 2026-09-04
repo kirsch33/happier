@@ -12,7 +12,6 @@ import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import {
   finalizeDarwinReleaseArchive,
@@ -61,24 +60,42 @@ test('Darwin payload Mach-O discovery is exhaustive, deterministic, inside-out, 
     chmodSync(javaClassPath, 0o755);
 
     assert.deepEqual(
-      listDarwinPayloadMachOCode(payloadDir).map(({ relativePath, executable, gatekeeperAssessable }) => ({
+      listDarwinPayloadMachOCode(payloadDir).map(({
         relativePath,
         executable,
         gatekeeperAssessable,
+        requiresJitEntitlement,
+      }) => ({
+        relativePath,
+        executable,
+        gatekeeperAssessable,
+        requiresJitEntitlement,
       })),
       [
         {
           relativePath: 'node_modules/esbuild/node_modules/@esbuild/darwin-arm64/bin/esbuild',
           executable: true,
           gatekeeperAssessable: true,
+          requiresJitEntitlement: false,
         },
         {
           relativePath: 'node_modules/native/addon.node',
           executable: true,
           gatekeeperAssessable: false,
+          requiresJitEntitlement: false,
         },
-        { relativePath: 'tools/rg', executable: true, gatekeeperAssessable: true },
-        { relativePath: 'happier', executable: true, gatekeeperAssessable: true },
+        {
+          relativePath: 'tools/rg',
+          executable: true,
+          gatekeeperAssessable: true,
+          requiresJitEntitlement: false,
+        },
+        {
+          relativePath: 'happier',
+          executable: true,
+          gatekeeperAssessable: true,
+          requiresJitEntitlement: true,
+        },
       ],
     );
   } finally {
@@ -96,18 +113,21 @@ test('Darwin payload notarization signs and strictly verifies every Mach-O leaf 
         relativePath: 'node_modules/@esbuild/darwin-arm64/bin/esbuild',
         executable: true,
         gatekeeperAssessable: true,
+        requiresJitEntitlement: false,
       },
       {
         path: '/tmp/happier-v1.2.3-darwin-arm64/node_modules/native/addon.node',
         relativePath: 'node_modules/native/addon.node',
         executable: true,
         gatekeeperAssessable: false,
+        requiresJitEntitlement: false,
       },
       {
         path: '/tmp/happier-v1.2.3-darwin-arm64/happier',
         relativePath: 'happier',
         executable: true,
         gatekeeperAssessable: true,
+        requiresJitEntitlement: true,
       },
     ],
     zipPath: '/tmp/notary/happier-payload.zip',
@@ -116,6 +136,7 @@ test('Darwin payload notarization signs and strictly verifies every Mach-O leaf 
     issuerId: 'ISSUER',
     submissionId: '00000000-0000-0000-0000-000000000000',
     logPath: '/tmp/notary/notary-log.json',
+    entitlementsPath: '/tmp/notary/bun-standalone.entitlements.plist',
   });
 
   assert.deepEqual(
@@ -130,13 +151,31 @@ test('Darwin payload notarization signs and strictly verifies every Mach-O leaf 
     args.includes('--options')
     && args.includes('runtime')
     && args.includes('--timestamp')
-    && args.includes('--preserve-metadata=identifier,entitlements,launch-constraints,library-constraints')
+  )), true);
+  const rootExecutableSign = commands.codesign.find(([, args]) => args.at(-1).endsWith('/happier'));
+  assert.deepEqual(rootExecutableSign?.[1].slice(-3), [
+    '--entitlements',
+    '/tmp/notary/bun-standalone.entitlements.plist',
+    '/tmp/happier-v1.2.3-darwin-arm64/happier',
+  ]);
+  assert.equal(rootExecutableSign?.[1].some((arg) => arg.includes('preserve-metadata') && arg.includes('entitlements')), false);
+  assert.equal(commands.codesign.filter(([, args]) => args.at(-1) !== rootExecutableSign?.[1].at(-1)).every(([, args]) => (
+    args.includes('--preserve-metadata=identifier,entitlements,launch-constraints,library-constraints')
+    && !args.includes('--entitlements')
   )), true);
   assert.deepEqual(
     commands.verify.map(([, args]) => args.at(-1)),
     commands.codesign.map(([, args]) => args.at(-1)),
   );
   assert.equal(commands.verify.every(([, args]) => args.includes('--strict=all')), true);
+  const rootExecutableVerify = commands.verify.find(([, args]) => args.at(-1).endsWith('/happier'));
+  assert.equal(rootExecutableVerify?.[1].includes('-R'), true);
+  assert.equal(
+    rootExecutableVerify?.[1].includes('=entitlement["com.apple.security.cs.allow-jit"] exists'),
+    true,
+    'codesign must parse the quoted entitlement key and require it to exist',
+  );
+  assert.equal(commands.verify.filter(([, args]) => args.at(-1) !== rootExecutableVerify?.[1].at(-1)).every(([, args]) => !args.includes('-R')), true);
   assert.deepEqual(commands.archive, [
     'ditto',
     [
@@ -332,16 +371,25 @@ test('Darwin payload evidence binds every staged byte, mode, symlink, and discov
       },
     }, null, 2)}\n`, 'utf8');
 
+    const verifiedCode = [];
     const assessedPaths = [];
     assert.equal(
       verifyDarwinPayloadNotarizationEvidence({
         payloadPath: payloadDir,
         evidencePath,
-        verifyCode: () => {},
+        verifyCode: (entryPath, entry) => verifiedCode.push({
+          path: path.relative(payloadDir, entryPath),
+          requiresJitEntitlement: entry.requiresJitEntitlement,
+        }),
         assessCode: (entryPath) => assessedPaths.push(path.relative(payloadDir, entryPath)),
       }).payloadSha256,
       snapshot.payloadSha256,
     );
+    assert.deepEqual(verifiedCode, [
+      { path: 'node_modules/native/addon.node', requiresJitEntitlement: false },
+      { path: 'tools/nested', requiresJitEntitlement: false },
+      { path: 'happier', requiresJitEntitlement: true },
+    ]);
     assert.deepEqual(assessedPaths, ['tools/nested', 'happier']);
 
     writeFileSync(path.join(payloadDir, 'scripts', 'run.sh'), '#!/bin/sh\nexit 9\n', 'utf8');
@@ -452,6 +500,13 @@ test('Darwin payload execution completes every sign and strict verification befo
       path.join(payloadDir, 'tools', 'nested'),
       path.join(payloadDir, 'happier'),
     ]);
+    const rootSignArgs = signInvocations.find(({ args }) => args.at(-1) === path.join(payloadDir, 'happier'))?.args;
+    const entitlementsFlagIndex = rootSignArgs?.indexOf('--entitlements') ?? -1;
+    assert.notEqual(entitlementsFlagIndex, -1);
+    const entitlementKeys = [...readFileSync(rootSignArgs[entitlementsFlagIndex + 1], 'utf8')
+      .matchAll(/<key>([^<]+)<\/key>/gu)]
+      .map((match) => match[1]);
+    assert.deepEqual(entitlementKeys, ['com.apple.security.cs.allow-jit']);
     assert.equal(signInvocations.length, evidence.machO.length);
     assert.equal(verifyInvocations.length, evidence.machO.length);
     assert.equal(refreshIndex > invocations.lastIndexOf(verifyInvocations.at(-1)), true);
@@ -601,22 +656,16 @@ test('local payload repair signs every nested Mach-O while preserving executable
   const workDir = mkdtempSync(path.join(os.tmpdir(), 'happier-payload-adhoc-signature-'));
   const payloadDir = path.join(workDir, 'happier-v0.0.0-darwin-local');
   const binaryPath = path.join(payloadDir, 'happier');
-  const nestedBinaryPath = path.join(payloadDir, 'tools', 'nested-bun');
+  const nestedBinaryPath = path.join(payloadDir, 'tools', 'nested-binary');
   const scriptPath = path.join(payloadDir, 'scripts', 'run.sh');
   try {
-    const bunTarget = process.arch === 'x64' ? 'bun-darwin-x64' : 'bun-darwin-arm64';
     mkdirSync(path.dirname(nestedBinaryPath), { recursive: true });
     mkdirSync(path.dirname(scriptPath), { recursive: true });
     for (const outputPath of [binaryPath, nestedBinaryPath]) {
-      execFileSync('bun', [
-        'build',
-        '--compile',
-        '--no-cache',
-        `--target=${bunTarget}`,
-        fileURLToPath(new URL('./notarize-standalone-binary.mjs', import.meta.url)),
-        '--outfile',
-        outputPath,
-      ], { stdio: 'pipe' });
+      execFileSync('xcrun', ['clang', '-x', 'c', '-', '-o', outputPath], {
+        input: 'int main(void) { return 0; }\n',
+        stdio: 'pipe',
+      });
     }
     writeFileSync(scriptPath, '#!/bin/sh\nexit 0\n', 'utf8');
     chmodSync(scriptPath, 0o755);
@@ -627,7 +676,7 @@ test('local payload repair signs every nested Mach-O while preserving executable
     assert.equal(evidence.signatureType, 'adhoc');
     assert.equal(evidence.payload, path.basename(payloadDir));
     assert.deepEqual(evidence.machO.map((entry) => entry.path), [
-      'tools/nested-bun',
+      'tools/nested-binary',
       'happier',
     ]);
     for (const outputPath of [binaryPath, nestedBinaryPath]) {

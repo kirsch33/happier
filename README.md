@@ -1,18 +1,12 @@
 <div align="center">
-  <img src="/.github/logotype-dark.png" title="Happier Dev" alt="Happier Dev" width="280" />
+  <img src="/.github/hero.png" title="Happier Dev" alt="Happier Dev - Mobile, Web and Desktop client for Claude Code, Codex, OpenCode, Pi, Cursor" width="850" />
 
   ### Mobile, Web and Desktop client for Claude Code, Codex, OpenCode, Pi, Cursor, ...
   
-  Run Claude Code, Codex, Gemini, OpenCode (and more) on your computer<br />and continue seamlessly from your phone, browser, or desktop app.
-
-  <p><img src="/.github/supported-ai-providers.png" title="Happier Dev" alt="Happier Dev" width="320" /></p>
+  Run Claude Code, Codex, Gemini, OpenCode (and more) on your computer and continue seamlessly from your phone, browser, or desktop app.
 
   **End-to-end encrypted. Self-hostable.<br />
   Built by developers, for developers.**
-  <br /><br />
-
-  <p><img src="/.github/mobile-2000.png" title="Happier Dev" alt="Happier Dev" width="640" /></p>
-  <p><img src="/.github/desktop-2000.png" title="Happier Dev" alt="Happier Dev" width="850" /></p>
 </div>
 
 ## What is Happier?

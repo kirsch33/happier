@@ -14,7 +14,7 @@ function workflow(name) {
 test('the Ubuntu slow gate prepares and runs the two exact server-v0.2.1 regression scenarios', () => {
   const testsWorkflow = workflow('tests.yml');
   const job = testsWorkflow.jobs['e2e-core-slow'];
-  assert.equal(job['runs-on'], 'ubuntu-22.04');
+  assert.equal(job['runs-on'], '${{ needs.trusted_ref_guard.outputs.ubuntu_2204 }}');
 
   const prepareStep = job.steps.find((step) => step.name === 'Prepare immutable server-v0.2.1 artifact');
   assert.ok(prepareStep, 'slow gate must prepare the pinned immutable server artifact');
@@ -78,7 +78,7 @@ test('normal release orchestration does not present the two exact regressions as
   const releaseWorkflow = workflow('release.yml');
   const candidateVerification = releaseWorkflow.jobs.verify_release_candidates;
 
-  assert.ok(releaseWorkflow.jobs.ci.needs.includes('resolve_validation_profile'));
+  assert.ok(releaseWorkflow.jobs.ci.needs.includes('release_preflight'));
   assert.doesNotMatch(JSON.stringify(releaseWorkflow.jobs.ci), /run_e2e_core_slow/);
   assert.equal(releaseWorkflow.jobs.supported_old_relay_compatibility, undefined);
   assert.ok(!candidateVerification.needs.includes('supported_old_relay_compatibility'));

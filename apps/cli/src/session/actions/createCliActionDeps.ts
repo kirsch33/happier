@@ -32,7 +32,11 @@ import type { Credentials } from '@/persistence';
 import { readSettings } from '@/persistence';
 import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
 import { bootstrapAccountSettingsContext } from '@/settings/accountSettings/bootstrapAccountSettingsContext';
-import { createSpawnedSession, type CreateSpawnedSessionParams } from '@/session/services/createSpawnedSession';
+import {
+  createSpawnedSession,
+  type CreateSpawnedSessionParams,
+  type DirectSpawnedSessionTransport,
+} from '@/session/services/createSpawnedSession';
 import { buildReplaySeededSpawnRecipe } from '@/session/replay/buildReplaySeededSpawnRecipe';
 import { resolveReplaySourceContextAuthority } from '@/session/replay/resolveReplaySourceContextAuthority';
 import {
@@ -55,7 +59,10 @@ import { getSessionStatus } from '@/session/services/getSessionStatus';
 import { getSessionTranscript } from '@/session/services/getSessionTranscript';
 import { listSessions } from '@/session/services/listSessions';
 import { requestSessionStop } from '@/session/services/requestSessionStop';
-import { requestInactiveSessionResume } from '@/session/services/requestInactiveSessionResume';
+import {
+  ensureSessionRuntimeForPendingInput,
+  requestInactiveSessionResume,
+} from '@/session/services/requestInactiveSessionResume';
 import { sendSessionMessage } from '@/session/services/sendSessionMessage';
 import { setSessionArchivedState } from '@/session/services/setSessionArchivedState';
 import { setSessionModel } from '@/session/services/setSessionModel';
@@ -146,6 +153,15 @@ export type NotifyConnectedServiceRuntimeAuthFailure = NotifyRuntimeAuthFailure;
 export type RetryTemporaryThrottleNow = (input: Readonly<{
   sessionId: string;
 }>) => Promise<unknown> | unknown;
+
+type CliSessionTransportLookupResult =
+  | Awaited<ReturnType<typeof resolveSessionTransportContext>>
+  | Readonly<{
+      ok: false;
+      code: 'not_authenticated';
+      candidates?: undefined;
+      sessionId?: undefined;
+    }>;
 
 type CurrentMachineControlIdentity = Readonly<{
   machineId: string | null;
@@ -435,6 +451,9 @@ export function createCliActionInventoryDeps(params: Readonly<{
   ctx: SessionEncryptionContext;
   mode?: SessionStoredContentEncryptionMode;
   rawSession?: Readonly<{ metadata?: unknown; path?: unknown }> | null;
+  resolveTransportForSession?: (
+    idOrPrefix: string,
+  ) => Promise<CliSessionTransportLookupResult>;
 }>): Pick<ActionExecutorDeps, 'reviewEnginesList' | 'agentsBackendsList' | 'agentsModelsList' | 'agentsConfigOptionsList' | 'agentsSessionModesList' | 'sessionModesList'> {
   const metadataCache = new Map<string, Record<string, unknown> | null>();
   const seededMetadata = readSessionMetadata({
@@ -442,7 +461,9 @@ export function createCliActionInventoryDeps(params: Readonly<{
     mode: params.mode,
     ctx: params.ctx,
   });
-  metadataCache.set(params.sessionId, seededMetadata);
+  if (seededMetadata) {
+    metadataCache.set(params.sessionId, seededMetadata);
+  }
   const rawPath = typeof params.rawSession?.path === 'string' ? params.rawSession.path.trim() : '';
   const metadataPath = typeof seededMetadata?.path === 'string' ? seededMetadata.path.trim() : '';
   const createOptionRegistry = async () => createCliActionOptionProviderRegistry({
@@ -460,6 +481,23 @@ export function createCliActionInventoryDeps(params: Readonly<{
     }
 
     try {
+      if (params.credentials) {
+        const transport = params.resolveTransportForSession
+          ? await params.resolveTransportForSession(normalizedSessionId)
+          : await resolveSessionTransportContext({
+              credentials: params.credentials,
+              idOrPrefix: normalizedSessionId,
+            });
+        if (!transport.ok) {
+          metadataCache.set(normalizedSessionId, null);
+          return null;
+        }
+        const metadata = readSessionMetadata(transport);
+        metadataCache.set(normalizedSessionId, metadata);
+        metadataCache.set(transport.sessionId, metadata);
+        return metadata;
+      }
+
       const rawSession = await fetchSessionById({ token: params.token, sessionId: normalizedSessionId });
       const mode =
         normalizedSessionId === params.sessionId && params.mode
@@ -575,6 +613,7 @@ export function createCliActionDeps(params: Readonly<{
     machineId?: unknown;
   }> | null;
   getCallerPermissionMode?: (() => string | null | undefined) | null;
+  currentSessionPermissionAuthority?: 'trusted_runtime' | 'ambient_context';
   getCurrentSessionBackendTarget?: (() => BackendTargetRefV1 | null | undefined) | null;
   resumeInactiveSessionWhenUsageLimitReady?: ResumeInactiveSessionWhenUsageLimitReady;
   scheduleInactiveSessionUsageLimitRecoveryCheck?: ScheduleInactiveSessionUsageLimitRecoveryCheck;
@@ -582,8 +621,8 @@ export function createCliActionDeps(params: Readonly<{
   cancelConnectedServiceRuntimeAuthRecovery?: CancelConnectedServiceRuntimeAuthRecovery;
   notifyConnectedServiceRuntimeAuthFailure?: NotifyConnectedServiceRuntimeAuthFailure;
   retryTemporaryThrottleNow?: RetryTemporaryThrottleNow;
+  directSpawnTransport?: DirectSpawnedSessionTransport;
 }>): ActionExecutorDeps {
-  const inventoryDeps = createCliActionInventoryDeps(params);
   const approvalsStore = params.credentials ? createCliApprovalsArtifactStore({ credentials: params.credentials }) : null;
   let currentSessionMetadata = readSessionMetadata({
     rawSession: params.rawSession,
@@ -630,11 +669,26 @@ export function createCliActionDeps(params: Readonly<{
 
   const fetchCurrentSessionMetadata = async (): Promise<Record<string, unknown> | null> => {
     try {
-      const rawSession = await fetchSessionById({ token: params.token, sessionId: params.sessionId });
+      const transport = params.credentials
+        ? await resolveSessionTransportContext({
+            credentials: params.credentials,
+            idOrPrefix: params.sessionId,
+          })
+        : null;
+      if (transport && !transport.ok) {
+        currentSessionMetadata = null;
+        return null;
+      }
+      const rawSession = transport?.rawSession
+        ?? await fetchSessionById({ token: params.token, sessionId: params.sessionId });
+      const mode = transport?.mode
+        ?? params.mode
+        ?? resolveSessionStoredContentEncryptionMode(rawSession ?? undefined);
+      const ctx = transport?.ctx ?? params.ctx;
       currentSessionMetadata = readSessionMetadata({
         rawSession,
-        mode: params.mode,
-        ctx: params.ctx,
+        mode,
+        ctx,
       });
       return currentSessionMetadata;
     } catch {
@@ -682,7 +736,11 @@ export function createCliActionDeps(params: Readonly<{
       return buildInvalidParametersResult();
     }
 
-    const callerMode = readLiveCallerPermissionMode()
+    const liveCallerMode = readLiveCallerPermissionMode();
+    if (!liveCallerMode && params.currentSessionPermissionAuthority === 'ambient_context') {
+      return null;
+    }
+    const callerMode = liveCallerMode
       ?? resolvePermissionPrivilegeFromSessionMetadata(await readFreshCurrentSessionMetadata()).mode;
     const permissionDecision = assertNonEscalatingPermissionMode({
       requestedMode: normalizedRequestedMode,
@@ -704,17 +762,9 @@ export function createCliActionDeps(params: Readonly<{
       : null;
   };
 
-  const resolveTransportForSession = async (idOrPrefix: string): Promise<Readonly<{
-    ok: true;
-    sessionId: string;
-    rawSession: RawSessionRecord;
-    ctx: SessionEncryptionContext;
-    mode: SessionStoredContentEncryptionMode;
-  }> | Readonly<{
-    ok: false;
-    code: string;
-    candidates?: string[];
-  }>> => {
+  const resolveTransportForSession = async (
+    idOrPrefix: string,
+  ): Promise<CliSessionTransportLookupResult> => {
     if (!params.credentials) {
       return { ok: false, code: 'not_authenticated' };
     }
@@ -728,11 +778,7 @@ export function createCliActionDeps(params: Readonly<{
 
     const resolved = await resolveSessionTransportContext({ credentials: params.credentials, idOrPrefix: normalized });
     if (!resolved.ok) {
-      return {
-        ok: false,
-        code: resolved.code,
-        ...(resolved.candidates ? { candidates: resolved.candidates } : {}),
-      };
+      return resolved;
     }
 
     const cached = {
@@ -746,6 +792,11 @@ export function createCliActionDeps(params: Readonly<{
     sessionTransportCache.set(normalized, cached);
     return { ok: true, ...cached };
   };
+
+  const inventoryDeps = createCliActionInventoryDeps({
+    ...params,
+    resolveTransportForSession,
+  });
 
   const callSessionRpcForTransport = async (
     transport: ResolvedSessionTransport,
@@ -938,6 +989,7 @@ export function createCliActionDeps(params: Readonly<{
         result: { ok: false, errorCode: 'not_authenticated', error: 'not_authenticated' },
       });
     }
+    const credentials = params.credentials;
 
     const transport = await resolveTransportForSession(sessionId);
     if (!transport.ok) {
@@ -971,13 +1023,25 @@ export function createCliActionDeps(params: Readonly<{
       ctx: transport.ctx,
       mode: transport.mode,
       resumePromptTierSources: buildRoutedResumePromptTierSources({
-        credentials: params.credentials,
+        credentials,
         metadata,
         rawSession: transport.rawSession,
       }),
       ...(params.resumeInactiveSessionWhenUsageLimitReady
         ? { resumeInactiveSessionWhenReady: params.resumeInactiveSessionWhenUsageLimitReady }
         : {}),
+      ensureSessionRuntimeForPendingInput: async (input: Readonly<{
+        sessionId: string;
+        rawSession: RawSessionRecord;
+        metadata: Record<string, unknown>;
+        requestId: string;
+      }>) => (await ensureSessionRuntimeForPendingInput({
+        credentials,
+        sessionId: input.sessionId,
+        localId: input.requestId,
+        rawSession: input.rawSession,
+        metadata: input.metadata,
+      })).ok,
       ...(params.retryTemporaryThrottleNow
         ? { retryTemporaryThrottleNow: params.retryTemporaryThrottleNow }
         : {}),
@@ -1265,13 +1329,19 @@ export function createCliActionDeps(params: Readonly<{
       title,
       path,
       directory,
+      approvedNewDirectoryCreation,
       host,
       machineId,
+      spawnNonce: requestedSpawnNonce,
+      pendingFirstInput,
       prompt,
       initialPrompt,
       initialMessage,
       permissionMode,
+      permissionModeUpdatedAt,
       agentModeId,
+      agentModeUpdatedAt,
+      modelUpdatedAt,
       sessionConfigOptionOverrides,
       configOptions,
       profileId,
@@ -1284,14 +1354,17 @@ export function createCliActionDeps(params: Readonly<{
       windowsRemoteSessionLaunchMode,
       windowsRemoteSessionConsole,
       windowsTerminalWindowName,
+      experimentalCodexAcp,
       codexBackendMode,
       agentRuntimeDescriptorV1,
+      resume,
       sourceContext,
       surface,
       callerSurface,
       callerPermissionMode,
-      actionRequestId,
+      actionRequestId: requestedActionRequestId,
       resumeActionRequest,
+      signal,
     }) => {
       if (!params.credentials) {
         notSupported();
@@ -1352,10 +1425,9 @@ export function createCliActionDeps(params: Readonly<{
       });
       if (!normalized.ok) return normalized.result;
 
-      const normalizedActionRequestId = readNonBlankSessionControlIdentifier(actionRequestId);
-      const spawnNonce = normalizedActionRequestId
-        ? `session.spawn_new:${params.sessionId}:${normalizedActionRequestId}`
-        : null;
+      const actionRequestId = readNonBlankSessionControlIdentifier(requestedActionRequestId);
+      const spawnNonce = readNonBlankSessionControlIdentifier(requestedSpawnNonce)
+        ?? (actionRequestId ? `session.spawn_new:${params.sessionId}:${actionRequestId}` : undefined);
       const resumeOnly = Boolean(
         spawnNonce
         && (resumeActionRequest === true || ambiguousSpawnActionRequestIds.has(spawnNonce)),
@@ -1363,80 +1435,101 @@ export function createCliActionDeps(params: Readonly<{
       if (spawnNonce && !resumeOnly) {
         ambiguousSpawnActionRequestIds.add(spawnNonce);
       }
+      const releaseUnsubmittedSpawnAttempt = () => {
+        if (spawnNonce) ambiguousSpawnActionRequestIds.delete(spawnNonce);
+      };
 
       // A source-context spawn is required semantics: the Replay seed is
       // resolved before any Session row exists, and a failure creates no child.
       // Creation still runs through the one canonical creator, in its
       // Replay-seeded mode, so this ingress adds no second row creator.
       let replaySeededCreation: CreateSpawnedSessionParams['replaySeededCreation'];
-      if (sourceContext) {
-        const sourceAuthority = await resolveReplaySourceContextAuthority({
-          credentials: params.credentials,
-          sourceSessionId: sourceContext.sourceSessionId,
-        });
-        if (sourceAuthority.status !== 'owned') {
-          return sourceAuthority.status === 'not_owned'
-            ? {
-              type: 'error',
-              errorCode: 'permission_denied',
-              errorMessage: 'permission_denied',
-            }
-            : {
+      if (sourceContext && !resumeOnly) {
+        try {
+          const sourceAuthority = await resolveReplaySourceContextAuthority({
+            credentials: params.credentials,
+            sourceSessionId: sourceContext.sourceSessionId,
+          });
+          if (sourceAuthority.status !== 'owned') {
+            releaseUnsubmittedSpawnAttempt();
+            return sourceAuthority.status === 'not_owned'
+              ? {
+                type: 'error',
+                errorCode: 'permission_denied',
+                errorMessage: 'permission_denied',
+              }
+              : {
+                type: 'error',
+                errorCode: 'invalid_parameters',
+                errorMessage: 'source_context_unavailable',
+              };
+          }
+          const spawnAgentId = normalized.createParams.backendTarget.kind === 'builtInAgent'
+            ? normalized.createParams.backendTarget.agentId
+            : null;
+          if (!spawnAgentId) {
+            releaseUnsubmittedSpawnAttempt();
+            return {
               type: 'error',
               errorCode: 'invalid_parameters',
-              errorMessage: 'source_context_unavailable',
+              errorMessage: 'invalid_parameters',
             };
-        }
-        const spawnAgentId = normalized.createParams.backendTarget.kind === 'builtInAgent'
-          ? normalized.createParams.backendTarget.agentId
-          : null;
-        if (!spawnAgentId) {
-          return {
-            type: 'error',
-            errorCode: 'invalid_parameters',
-            errorMessage: 'invalid_parameters',
+          }
+          const recipe = await buildReplaySeededSpawnRecipe({
+            credentials: params.credentials,
+            cwd: normalized.createParams.directory,
+            source: {
+              sourceSessionId: sourceContext.sourceSessionId,
+              forkPoint: sourceContext.forkPoint,
+            },
+            providerHintAgentId: spawnAgentId,
+            strategy: 'recent_messages',
+          });
+          if (!recipe.ok) {
+            releaseUnsubmittedSpawnAttempt();
+            return {
+              type: 'error',
+              errorCode: recipe.errorCode,
+              errorMessage: recipe.errorMessage,
+            };
+          }
+          replaySeededCreation = {
+            // Retry identity stays this tree's existing per-attempt `tag`: the
+            // caller-supplied tag when there is one, otherwise the durable
+            // action-request spawn identity this ingress already owns.
+            tag: normalized.createParams.tag
+              ?? spawnNonce
+              ?? `sourceContext:${sourceContext.sourceSessionId}:${recipe.recipe.cutoffSeqInclusive}:${randomUUID()}`,
+            agentId: spawnAgentId,
+            metadata: recipe.recipe.metadata,
+            sourceRecipe: {
+              sourceSessionId: sourceContext.sourceSessionId,
+              cutoffSeqInclusive: recipe.recipe.cutoffSeqInclusive,
+            },
           };
+        } catch (error) {
+          releaseUnsubmittedSpawnAttempt();
+          throw error;
         }
-        const recipe = await buildReplaySeededSpawnRecipe({
-          credentials: params.credentials,
-          cwd: normalized.createParams.directory,
-          source: {
-            sourceSessionId: sourceContext.sourceSessionId,
-            forkPoint: sourceContext.forkPoint,
-          },
-          providerHintAgentId: spawnAgentId,
-          strategy: 'recent_messages',
-        });
-        if (!recipe.ok) {
-          return {
-            type: 'error',
-            errorCode: recipe.errorCode,
-            errorMessage: recipe.errorMessage,
-          };
-        }
-        replaySeededCreation = {
-          // Retry identity stays this tree's existing per-attempt `tag`: the
-          // caller-supplied tag when there is one, otherwise the durable
-          // action-request spawn identity this ingress already owns.
-          tag: normalized.createParams.tag
-            ?? spawnNonce
-            ?? `sourceContext:${sourceContext.sourceSessionId}:${recipe.recipe.cutoffSeqInclusive}:${randomUUID()}`,
-          agentId: spawnAgentId,
-          metadata: recipe.recipe.metadata,
-          sourceRecipe: {
-            sourceSessionId: sourceContext.sourceSessionId,
-            cutoffSeqInclusive: recipe.recipe.cutoffSeqInclusive,
-          },
-        };
       }
 
       let created: Awaited<ReturnType<typeof createSpawnedSession>>;
       try {
         created = await createSpawnedSession({
           ...normalized.createParams,
+          ...(typeof approvedNewDirectoryCreation === 'boolean' ? { approvedNewDirectoryCreation } : {}),
+          ...(pendingFirstInput ? { pendingFirstInput } : {}),
+          ...(resume ? { resume } : {}),
+          ...(typeof permissionModeUpdatedAt === 'number' ? { permissionModeUpdatedAt } : {}),
+          ...(typeof agentModeUpdatedAt === 'number' ? { agentModeUpdatedAt } : {}),
+          ...(typeof modelUpdatedAt === 'number' ? { modelUpdatedAt } : {}),
+          ...(typeof experimentalCodexAcp === 'boolean' ? { experimentalCodexAcp } : {}),
           ...(spawnNonce ? { spawnNonce } : {}),
           ...(resumeOnly ? { resumeOnly: true } : {}),
           ...(replaySeededCreation ? { replaySeededCreation } : {}),
+          ...(sourceContext ? { sourceContext } : {}),
+          ...(params.directSpawnTransport ? { directTransport: params.directSpawnTransport } : {}),
+          ...(signal ? { signal } : {}),
         });
       } catch (error) {
         const details = error && typeof error === 'object'

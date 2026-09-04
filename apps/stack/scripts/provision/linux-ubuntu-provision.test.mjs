@@ -100,11 +100,24 @@ test('linux provision (happier profile) runs corepack enable as root', async () 
   const scriptPath = join(__dirname, 'linux-ubuntu-provision.sh');
   const res = spawnSync('bash', [scriptPath, '--profile=happier'], {
     cwd: root,
-    env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` },
+    env: { ...process.env, HOME: root, PATH: `${binDir}:${process.env.PATH ?? ''}` },
     encoding: 'utf-8',
   });
 
   assert.equal(res.status, 0, `expected exit 0\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  const userSystemdUnitDir = join(root, '.config', 'systemd', 'user');
+  const happierSliceUnit = await readFile(join(userSystemdUnitDir, 'happier.slice'), 'utf8');
+  const happierCriticalSliceUnit = await readFile(join(userSystemdUnitDir, 'happier-critical.slice'), 'utf8');
+  const happierJobsSliceUnit = await readFile(join(userSystemdUnitDir, 'happier-jobs.slice'), 'utf8');
+  assert.match(happierSliceUnit, /^\[Unit\]$/m);
+  assert.match(happierCriticalSliceUnit, /^\[Slice\]$/m);
+  assert.match(happierCriticalSliceUnit, /^MemoryLow=4G$/m);
+  assert.match(happierJobsSliceUnit, /^\[Slice\]$/m);
+  assert.match(happierJobsSliceUnit, /^CPUWeight=50$/m);
+  assert.match(happierJobsSliceUnit, /^IOWeight=50$/m);
+  assert.match(happierJobsSliceUnit, /^MemoryHigh=80%$/m);
+  assert.doesNotMatch(happierJobsSliceUnit, /^(?:MemoryMax|TasksMax|OOM\w*)=/mu);
 
   const corepackOut = await readIfExists(corepackLog);
   assert.match(corepackOut, /corepack enable root=1/, 'expected corepack enable to be invoked via sudo/as_root');
@@ -113,6 +126,17 @@ test('linux provision (happier profile) runs corepack enable as root', async () 
   const aptOut = await readIfExists(aptLog);
   assert.match(aptOut, /apt-get update/, 'expected apt-get update to run');
   assert.match(aptOut, /apt-get install/, 'expected apt-get install to run');
+  assert.match(aptOut, /(?:^|\s)gh(?:\s|$)/, 'expected the GitHub CLI to be installed');
+
+  const secondResult = spawnSync('bash', [scriptPath, '--profile=happier'], {
+    cwd: root,
+    env: { ...process.env, HOME: root, PATH: `${binDir}:${process.env.PATH ?? ''}` },
+    encoding: 'utf-8',
+  });
+  assert.equal(secondResult.status, 0, `expected second exit 0\nstdout:\n${secondResult.stdout}\nstderr:\n${secondResult.stderr}`);
+  assert.equal(await readFile(join(userSystemdUnitDir, 'happier.slice'), 'utf8'), happierSliceUnit);
+  assert.equal(await readFile(join(userSystemdUnitDir, 'happier-critical.slice'), 'utf8'), happierCriticalSliceUnit);
+  assert.equal(await readFile(join(userSystemdUnitDir, 'happier-jobs.slice'), 'utf8'), happierJobsSliceUnit);
 });
 
 test('linux provision (installer profile) does not touch node/corepack', async () => {

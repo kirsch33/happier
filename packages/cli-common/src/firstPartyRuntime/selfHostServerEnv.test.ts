@@ -8,6 +8,8 @@ import {
   renderSelfHostServerEnvText,
   resolvePrismaSqliteDatabaseUrlOptionsFromEnv,
   resolveConfiguredSelfHostBaseUrl,
+  resolveServerMigrationsEnabled,
+  resolveSelfHostServerMigrationPlan,
 } from './selfHostServerEnv.js';
 
 type RenderSqliteUrl = (params: Readonly<{
@@ -29,6 +31,52 @@ describe('applyEnvOverridesToEnvText', () => {
   });
 });
 
+describe('resolveSelfHostServerMigrationPlan', () => {
+  it('routes install-time migrations by provider independently of server presets', () => {
+    expect(resolveSelfHostServerMigrationPlan({
+      serverBinaryPath: '/opt/happier/server/happier-server',
+      env: { HAPPIER_DB_PROVIDER: 'postgres', DATABASE_URL: 'postgresql://db/happier' },
+      platform: 'linux',
+    })).toEqual({ command: '/opt/happier/server/happier-server-migrate', args: [] });
+
+    expect(resolveSelfHostServerMigrationPlan({
+      serverBinaryPath: 'C:\\Happier\\happier-server.exe',
+      env: { HAPPIER_DB_PROVIDER: 'mysql', DATABASE_URL: 'mysql://db/happier' },
+      platform: 'win32',
+    })).toEqual({ command: 'C:\\Happier\\happier-server-migrate.exe', args: [] });
+
+    expect(resolveSelfHostServerMigrationPlan({
+      serverBinaryPath: '/opt/happier/server/happier-server',
+      env: { HAPPIER_DB_PROVIDER: 'pglite' },
+      platform: 'linux',
+    })).toEqual({ command: '/opt/happier/server/happier-server-migrate', args: [] });
+  });
+
+  it('keeps ordinary sqlite migration at server startup unless auto-migrate is disabled', () => {
+    expect(resolveSelfHostServerMigrationPlan({
+      serverBinaryPath: '/opt/happier/server/happier-server',
+      env: { HAPPIER_DB_PROVIDER: 'sqlite', HAPPIER_SQLITE_AUTO_MIGRATE: '1' },
+      platform: 'linux',
+    })).toBeNull();
+    expect(resolveSelfHostServerMigrationPlan({
+      serverBinaryPath: '/opt/happier/server/happier-server',
+      env: { HAPPIER_DB_PROVIDER: 'sqlite', HAPPIER_SQLITE_AUTO_MIGRATE: '0' },
+      platform: 'linux',
+    })).toEqual({ command: '/opt/happier/server/happier-server', args: ['--migrate-only'] });
+  });
+
+  it('uses one migration opt-out contract for managed and stack runtimes', () => {
+    expect(resolveServerMigrationsEnabled({})).toBe(true);
+    expect(resolveServerMigrationsEnabled({ RUN_MIGRATIONS: '0' })).toBe(false);
+    expect(resolveServerMigrationsEnabled({ HAPPIER_STACK_PRISMA_MIGRATE: 'false' })).toBe(false);
+    expect(resolveSelfHostServerMigrationPlan({
+      serverBinaryPath: '/opt/happier/server/happier-server',
+      env: { HAPPIER_DB_PROVIDER: 'postgres', RUN_MIGRATIONS: '0' },
+      platform: 'linux',
+    })).toBeNull();
+  });
+});
+
 describe('resolveConfiguredSelfHostBaseUrl', () => {
   it('prefers env overrides over the fallback baseUrl', () => {
     expect(resolveConfiguredSelfHostBaseUrl({
@@ -46,6 +94,21 @@ describe('resolveConfiguredSelfHostBaseUrl', () => {
 });
 
 describe('mergeSelfHostServerEnvText', () => {
+  it('preserves the operator-selected database provider and authority across idempotent updates', () => {
+    const merged = mergeSelfHostServerEnvText({
+      baseEnvText: 'HAPPIER_DB_PROVIDER=sqlite\nDATABASE_URL=file:/managed.sqlite\nHAPPIER_FILES_BACKEND=local\n',
+      existingEnvText: [
+        'HAPPIER_DB_PROVIDER=postgres',
+        'DATABASE_URL=postgresql://operator:secret@db.example.test/happier',
+        'HAPPIER_FILES_BACKEND=s3',
+        '',
+      ].join('\n'),
+    });
+    expect(merged).toContain('HAPPIER_DB_PROVIDER=postgres');
+    expect(merged).toContain('DATABASE_URL=postgresql://operator:secret@db.example.test/happier');
+    expect(merged).toContain('HAPPIER_FILES_BACKEND=s3');
+  });
+
   it('preserves user-owned overrides while regenerating managed runtime keys', () => {
     const merged = mergeSelfHostServerEnvText({
       baseEnvText: [
@@ -60,6 +123,8 @@ describe('mergeSelfHostServerEnvText', () => {
       existingEnvText: [
         'PORT=4010',
         'HAPPIER_PUBLIC_SERVER_URL=https://relay.example.test',
+        'HAPPIER_WEBAPP_URL=https://web.example.test',
+        'HAPPY_WEBAPP_URL=https://legacy-web.example.test',
         'NODE_PATH=/old/node_modules',
         'HAPPIER_SQLITE_MIGRATIONS_DIR=/old/migrations',
         'HAPPIER_SERVER_UI_DIR=/old/ui',
@@ -70,6 +135,8 @@ describe('mergeSelfHostServerEnvText', () => {
 
     expect(merged).toContain('PORT=4010');
     expect(merged).toContain('HAPPIER_PUBLIC_SERVER_URL=https://relay.example.test');
+    expect(merged).toContain('HAPPIER_WEBAPP_URL=https://web.example.test');
+    expect(merged).toContain('HAPPY_WEBAPP_URL=https://legacy-web.example.test');
     expect(merged).toContain('CUSTOM_RUNTIME_FLAG=enabled');
     expect(merged).toContain('NODE_PATH=/new/node_modules');
     expect(merged).toContain('HAPPIER_SQLITE_MIGRATIONS_DIR=/new/migrations');
@@ -77,6 +144,19 @@ describe('mergeSelfHostServerEnvText', () => {
     expect(merged).not.toContain('NODE_PATH=/old/node_modules');
     expect(merged).not.toContain('HAPPIER_SQLITE_MIGRATIONS_DIR=/old/migrations');
     expect(merged).not.toContain('HAPPIER_SERVER_UI_DIR=/old/ui');
+  });
+
+  it('lets an explicit web app URL override replace the preserved value', () => {
+    const merged = mergeSelfHostServerEnvText({
+      baseEnvText: 'PORT=3005\nHAPPIER_SERVER_HOST=127.0.0.1\n',
+      existingEnvText: 'HAPPIER_WEBAPP_URL=https://old-web.example.test\n',
+      overrides: {
+        HAPPIER_WEBAPP_URL: 'https://new-web.example.test',
+      },
+    });
+
+    expect(merged).toContain('HAPPIER_WEBAPP_URL=https://new-web.example.test');
+    expect(merged).not.toContain('HAPPIER_WEBAPP_URL=https://old-web.example.test');
   });
 
   it('rejects explicit UI-dir overrides owned by the relay runtime installer', () => {

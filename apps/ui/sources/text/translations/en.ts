@@ -527,6 +527,17 @@ export const en = {
         permissions: 'Permissions',
         unreadSessions: 'Unread sessions',
         updates: 'Activity',
+        actionOperations: {
+            sections: { inProgress: 'In progress', needsAttention: 'Needs attention', recent: 'Recent' },
+            clearRecent: 'Clear recent',
+            status: { accepted: 'Accepted', running: 'Running', succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled', reconnecting: 'Reconnecting', unavailable: 'Status unavailable', setupNeedsAttention: 'Session created; setup needs attention' },
+            empty: 'Long-running actions will appear here.',
+            openHint: 'Opens operation details',
+            stop: 'Stop',
+            dismiss: 'Dismiss',
+            stopFailed: 'Couldn’t stop this operation. It may still be running.',
+            detail: { status: 'Status', progress: 'Progress', error: 'Error', warning: 'Warning', result: 'Result', recoveryReference: 'Recovery reference' },
+        },
     },
 
     approvals: {
@@ -1646,13 +1657,14 @@ export const en = {
                   backendsSubtitle: 'Configured backends and custom launch targets.',
               },
               enableInjection: {
-                  title: 'Enable guidance injection',
+                  title: 'Happier run instructions',
+                  subtitle: 'Turning this off removes native-first routing and Happier run mechanics from coding-agent system prompts.',
               },
               characterBudget: {
-                  title: 'Character budget',
+                  title: 'Custom-rules budget',
                   subtitle: ({ value }: { value: string }) => `${value} chars`,
-                  promptTitle: 'Character budget',
-                  promptBody: 'Max characters to inject into the system prompt.',
+                  promptTitle: 'Custom-rules budget',
+                  promptBody: 'Maximum characters for custom execution-run rules in the system prompt.',
               },
               rules: {
                   groupTitle: 'Guidance rules',
@@ -4015,8 +4027,8 @@ export const en = {
         showLineNumbersInDiffsDescription: 'Display line numbers in code diffs',
         showLineNumbersInToolViews: 'Show Line Numbers in Tool Views',
         showLineNumbersInToolViewsDescription: 'Display line numbers in tool view diffs',
-        wrapLinesInDiffs: 'Wrap Lines in Diffs',
-        wrapLinesInDiffsDescription: 'Wrap long lines instead of horizontal scrolling in diff views',
+        wrapLinesInDiffs: 'Wrap Lines in Code Views',
+        wrapLinesInDiffsDescription: 'Wrap long lines instead of horizontal scrolling in code previews and editors',
         alwaysShowContextSize: 'Always Show Context Size',
         alwaysShowContextSizeDescription: 'Display context usage even when not near limit',
         agentInputActionBarLayout: 'Input Action Bar',
@@ -4435,6 +4447,9 @@ export const en = {
         launchStillPendingTitle: 'Launch still in progress',
         launchStillPendingBody:
             'Happier hasn’t confirmed the new session yet. Your launch request is still saved. Retry to continue the same launch without creating a duplicate session.',
+        createdWithSetupIssueTitle: 'Session created',
+        createdWithSetupIssueBody:
+            'The session was created, but its initial setup did not finish. You can retry from this screen without creating another session.',
         connectedServiceSwitchUnavailable: {
             title: 'Switch unavailable',
             body: ({ reason, agentId }: { reason: string; agentId: string }) =>
@@ -4937,9 +4952,14 @@ export const en = {
         },
         resuming: 'Resuming...',
         resumeFailed: 'Failed to resume session',
-        pendingQueuedResumeFailedTitle: 'Message queued',
-        pendingQueuedResumeFailedBody:
-            'Your message was saved in the pending queue, but Happier couldn’t resume this session. Retry to start it.',
+        pendingActivation: {
+            waiting_offline: { title: 'Message queued for this machine', body: 'It will be processed when this machine and its daemon are back online.' },
+            waiting: { title: 'Waiting to resume', body: 'Your message is safely queued while the daemon resumes this session.' },
+            failed: { title: 'Could not resume session', body: 'Your message is still safely queued. Retry when you are ready.' },
+            queued: { title: 'Message queued', body: 'This inactive session has queued input. Resume it when you are ready.' },
+            queued_offline: { title: 'Message waiting for manual resume', body: 'It will stay queued until you resume this session.' },
+            actions: { retry: 'Retry', resume: 'Resume', process_when_online: 'Process when online', keepQueued: 'Keep queued', autoResumeOptions: 'Auto-resume options' },
+        },
         composerBanners: {
             showBannerAction: 'Show banner',
             hideBannerAction: 'Hide banner',
@@ -4961,6 +4981,18 @@ export const en = {
             errorTitle: 'Runner restart unavailable',
             errorBody: 'The daemon could not restart this session runner. The session is still available.',
         },
+        mcpRestartRequired: {
+            title: 'Restart to apply MCP server changes',
+            body: 'MCP servers are applied when a session starts. Restart this session runner to use your updated selection.',
+            failureBody: 'Happier could not restart this session runner. Your MCP selection is saved and will apply the next time it starts.',
+            restartAction: 'Restart session',
+            restartPendingAction: 'Restarting...',
+            badgeLabel: 'MCP changes',
+            showBannerAction: 'Show MCP restart notice',
+            hideBannerAction: 'Hide MCP restart notice',
+            errorTitle: 'Session restart unavailable',
+            errorBody: 'The runner could not restart. Your MCP selection is saved and will apply on the next session start.',
+        },
         invalidLinkTitle: 'Invalid session link',
         invalidLinkDescription: 'The session link is missing or invalid. Please check the URL and try again.',
         resumeSupportNoteChecking: 'Note: Happier is still checking whether this machine can resume the provider session.',
@@ -4979,7 +5011,7 @@ export const en = {
             `This session ended and can’t be resumed because ${provider} doesn’t support restoring its context here. Start a new session to continue.`,
         machineOfflineNoticeTitle: 'Machine is offline',
         machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-            `“${machine}” is offline, so Happier can’t resume this session yet. Bring it online to continue.`,
+            `“${machine}” is offline. You can queue a message now; Happier will continue when the machine comes back online.`,
         machineOfflineCannotResume: 'Machine is offline. Bring it online to resume this session.',
         openRuns: 'Open session runs',
         openAutomations: 'Open session automations',
@@ -5721,6 +5753,17 @@ export const en = {
         newTagConfirm: 'Add',
     },
 
+    sessionDrafts: {
+        sectionTitle: 'Drafts', badge: 'Draft', untitled: 'Untitled draft', continueEditing: 'Continue editing', startAnother: 'Start another',
+        status: { offline: 'Offline', syncing: 'Syncing', conflict: 'Conflict', machineUnavailable: 'Machine unavailable', attachmentNeedsAttention: 'Attachment needs attention', startInterrupted: 'Start interrupted' },
+        new: { action: 'New draft' },
+        delete: { action: 'Delete draft', confirmTitle: 'Delete draft?', confirmDescription: 'This draft will be removed from your devices.' },
+        conflict: {
+            title: 'Draft conflict', description: 'This field changed on another device.', mine: 'On this device', synced: 'Synced',
+            useSynced: 'Use synced', keepDevice: 'Keep device', copyMine: 'Copy mine', copied: 'Copied', copyFailed: 'Could not copy',
+            field: { text: 'Text', mentions: 'Mentions', attachments: 'Attachments', recipient: 'Recipient', agentContinuation: 'Agent continuation', executionRunDelivery: 'Run delivery' },
+        },
+    },
     sessionsList: {
         serverHeader: ({ server }: { server: string }) => `Server: ${server}`,
         storagePersistedTab: 'Happier',
@@ -5836,6 +5879,7 @@ export const en = {
         browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} connected services`,
         browseSourceClaudeDefault: 'Default Claude config',
         browseSourceOpenCodeDefault: 'Default OpenCode server',
+        browseSourcePiDefault: 'Default Pi agent directory',
         browseCandidates: 'Available sessions',
         browseNoMachines: 'No machines are available for direct sessions yet.',
         browseNoCandidates: 'No provider sessions were found for this machine and provider.',
@@ -5931,6 +5975,7 @@ export const en = {
         viewSessionLogSubtitle: 'Open live log tail for this session',
         pinSession: 'Pin session',
         unpinSession: 'Unpin session',
+        pinLimitExceeded: ({ count }: { count: number }) => `You can pin up to ${count.toLocaleString()} sessions. Unpin another session and try again.`,
         copyResumeCommand: 'Copy resume command',
         resumeCommand: ({ sessionId }: { sessionId: string }) => `happier resume ${sessionId}`,
         viewMachine: 'View Machine',
@@ -7083,6 +7128,14 @@ export const en = {
                 runClass: 'Run class',
                 ioMode: 'I/O mode',
             },
+            launchOrigin: {
+                crossSession: ({ sessionId }: { sessionId: string }) => `Started from session ${sessionId}`,
+                externalCli: 'Started externally from the CLI',
+                externalMcp: 'Started externally through MCP',
+                externalAction: 'Started externally through a Happier action',
+                externalUnknown: 'Started externally (origin unknown)',
+                legacyUnknown: 'Launch origin unknown',
+            },
             timestamps: {
                 started: 'Started',
                 finished: 'Finished',
@@ -7314,6 +7367,14 @@ export const en = {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: 'New session drafts',
+        footer: 'Choose whether New session continues this device’s draft or opens a fresh one.',
+        resumeTitle: 'Resume previous draft',
+        resumeSubtitle: 'Continue the draft started from New session on this device.',
+        freshTitle: 'Always start fresh',
+        freshSubtitle: 'Open a new draft whenever you choose New session.',
+    },
 	          sessionList: {
 	              title: 'Session List',
 	              footer: 'Appearance and behavior of the session sidebar list.',
@@ -7495,6 +7556,16 @@ settingsSession: {
               title: 'Advanced',
           },
           messageSending: {
+              inactiveResumePolicyTitle: 'Automatic resume after sending',
+              inactiveResumePolicySubtitle: 'Choose what Happier should do after you send to an inactive session.',
+              inactiveResumePolicy: {
+                  whenAvailableTitle: 'Now or when machine returns',
+                  whenAvailableSubtitle: 'Resume immediately if reachable; otherwise process when the daemon reconnects.',
+                  onlineOnlyTitle: 'Only if machine is online',
+                  onlineOnlySubtitle: 'Try once when you send. If unavailable, keep the message queued.',
+                  manualTitle: 'Never automatically',
+                  manualSubtitle: 'Always keep messages queued until you resume the session.',
+              },
               title: 'Message sending',
               footer: 'Controls what happens when you send a message while the agent is running.',
               queueInAgentTitle: 'Queue in agent (current)',
@@ -7896,6 +7967,9 @@ settingsSession: {
               wizardColumnsTitle: 'Two-column layout',
               wizardColumnsEnabledSubtitle: 'Place related selectors side by side on wide screens.',
               wizardColumnsDisabledSubtitle: 'Stack every wizard selector in one column.',
+              defaultWorktreeTitle: 'Create a worktree for new sessions',
+              defaultWorktreeEnabledSubtitle: 'Start each new Git session in a fresh worktree.',
+              defaultWorktreeDisabledSubtitle: 'Start new Git sessions in the selected folder.',
               wizardPresentationTitle: 'Wizard selector layout',
               wizardPresentationFooter: 'Auto keeps short sections as lists and switches long sections to searchable dropdowns.',
               wizardPresentationAutoTitle: 'Auto',

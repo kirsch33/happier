@@ -58,6 +58,16 @@ export {
   type SessionPendingQueueWakeResponseV1,
 } from './sessionControl/sessionPendingQueueWakeV1.js';
 export {
+  PendingActivationAuthorizationV1Schema,
+  PendingActivationFailureCodeV1Schema,
+  PendingActivationFailureRequestV1Schema,
+  PendingActivationFailureResponseV1Schema,
+  type PendingActivationAuthorizationV1,
+  type PendingActivationFailureCodeV1,
+  type PendingActivationFailureRequestV1,
+  type PendingActivationFailureResponseV1,
+} from './sessionControl/pendingActivationAuthorizationV1.js';
+export {
   computeCanonicalDomainSeparatedDigest,
   encodeCanonicalLengthDelimited,
 } from './crypto/canonicalDigest.js';
@@ -368,23 +378,29 @@ export type {
   SessionAuthoringFieldArtifacts,
   SessionAuthoringFieldDefinition,
   SessionAuthoringFieldDefinitionMap,
+  SessionAuthoringDraftStorage,
   SessionAuthoringFieldEditability,
   SessionAuthoringFieldId,
   SessionAuthoringFieldStorageClass,
   SessionAuthoringFieldSurface,
   SessionAuthoringTerminalV1,
   SessionAuthoringValueV1,
+  SyncedSessionAuthoringFieldIdV1,
+  SyncedSessionAuthoringValueV1,
 } from './sessionAuthoring/index.js';
 export {
   SESSION_AUTHORING_CONTEXT_KINDS,
   SESSION_AUTHORING_FIELD_CATALOG,
   SESSION_AUTHORING_FIELD_DESCRIPTORS,
   SESSION_AUTHORING_FIELD_IDS,
+  SYNCED_SESSION_AUTHORING_FIELD_IDS_V1,
   SessionAuthoringAutomationV1Schema,
   SessionAuthoringCheckoutCreationDraftV1Schema,
   SessionAuthoringCodexBackendModeSchema,
   SessionAuthoringTerminalV1Schema,
   SessionAuthoringValueV1Schema,
+  SyncedSessionAuthoringFieldIdV1Schema,
+  SyncedSessionAuthoringValueV1Schema,
   buildSessionAuthoringFieldArtifacts,
   defineSessionAuthoringFields,
 } from './sessionAuthoring/index.js';
@@ -859,6 +875,7 @@ export {
 export {
   PENDING_DELIVERY_BLOCKED_REASONS,
   PendingDeliveryBlockedReasonSchema,
+  isConditionalPendingSteerClaim,
   isPendingDeliveryBlockedReason,
   normalizePendingDeliveryBlockedReason,
   type PendingDeliveryBlockedReason,
@@ -1028,6 +1045,7 @@ export {
   StoredJsonContentEnvelopeSchema,
   type StoredJsonContentEnvelope,
 } from './storage/storedJsonContentEnvelope.js';
+export * from './drafts/index.js';
 
 export {
   SESSION_ORGANIZATION_FOLDER_DELETE_ASSIGNMENT_BEHAVIORS,
@@ -1206,9 +1224,13 @@ export {
   type ResolvedMcpServerV1,
 } from './mcpServers/resolveEffectiveServersV1.js';
 export {
+  areSessionMcpSelectionsEquivalent,
   parseSessionMcpSelectionV1Json,
+  readSessionMcpSelectionRestartRequiredV1FromMetadata,
   readSessionMcpSelectionV1FromMetadata,
+  SessionMcpSelectionRestartRequiredV1Schema,
   SessionMcpSelectionV1Schema,
+  type SessionMcpSelectionRestartRequiredV1,
   type SessionMcpSelectionV1,
 } from './mcpServers/sessionSelectionV1.js';
 export {
@@ -2294,6 +2316,7 @@ export {
   ExecutionRunIntentSchema,
   ExecutionRunTransportErrorCodeSchema,
   ExecutionRunDisplaySchema,
+  ExecutionRunLaunchOriginSchema,
   ExecutionRunPublicStateSchema,
   ExecutionRunReplaySeedRequestSchema,
   ExecutionRunStartRequestSchema,
@@ -2334,6 +2357,7 @@ export {
   type ExecutionRunIntent,
   type ExecutionRunTransportErrorCode,
   type ExecutionRunDisplay,
+  type ExecutionRunLaunchOrigin,
   type ExecutionRunPublicState,
   type ExecutionRunReplaySeedRequest,
   type ExecutionRunStartRequest,
@@ -3060,6 +3084,13 @@ export {
   type CodingPromptSessionTitleUpdatesModeV1,
   type CodingPromptBehaviorV1,
 } from './prompts/codingPromptBehaviorV1.js';
+
+export {
+  CodingPromptBehaviorOverrideV1Schema,
+  resolveCodingPromptBehaviorV1WithOverride,
+  applyCodingPromptBehaviorOverrideToSettings,
+  type CodingPromptBehaviorOverrideV1,
+} from './prompts/codingPromptBehaviorV1.js';
 export {
   CHANGE_TITLE_INSTRUCTION_V1,
   buildChangeTitleInstructionV1,
@@ -3244,6 +3275,8 @@ export {
   AccountEncryptionMigrateKeyProofSchema,
   AccountEncryptionMigrateConnectedServicesDirectiveSchema,
   AccountEncryptionMigrateAutomationsDirectiveSchema,
+  AccountEncryptionMigrateSessionDraftItemSchema,
+  AccountEncryptionMigrateSessionDraftsDirectiveSchema,
   AccountEncryptionMigrateRequestSchema,
   AccountEncryptionMigrateSuccessResponseSchema,
   AccountEncryptionMigrateInvalidParamsReasonSchema,
@@ -3257,6 +3290,8 @@ export {
   type AccountEncryptionMigrateKeyProof,
   type AccountEncryptionMigrateConnectedServicesDirective,
   type AccountEncryptionMigrateAutomationsDirective,
+  type AccountEncryptionMigrateSessionDraftItem,
+  type AccountEncryptionMigrateSessionDraftsDirective,
   type AccountEncryptionMigrateRequest,
   type AccountEncryptionMigrateSuccessResponse,
   type AccountEncryptionMigrateInvalidParamsReason,

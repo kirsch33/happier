@@ -29,7 +29,12 @@ import { DEFAULT_AGENT_ID, getAgentCore, type AgentId } from '@/agents/catalog/c
 import { AgentIcon } from '@/agents/registry/AgentIcon';
 import { getResolvedBackendCatalogEntries, type ResolvedBackendCatalogEntry } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { buildBackendTargetKey } from '@happier-dev/protocol';
+import {
+    buildBackendTargetKey,
+    resolveCodingPromptBehaviorV1,
+    type CodingPromptBehaviorModeV1,
+    type CodingPromptSessionTitleUpdatesModeV1,
+} from '@happier-dev/protocol';
 import { supportsDirectTranscriptStorageForNewSession } from '@/components/sessions/new/modules/newSessionTranscriptStorage';
 import { readAccountTranscriptStorageDefaults, type SessionTranscriptStorageMode } from '@/sync/domains/session/transcriptStorageDefaults';
 import { MachinePreviewModal } from './MachinePreviewModal';
@@ -41,6 +46,10 @@ import {
 } from './profileBackendEntryStorage';
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Icon } from '@/components/ui/icons/Icon';
+import {
+    getCodingPromptResponseOptionsModeItems,
+    getCodingPromptTitleUpdatesModeItems,
+} from '@/components/settings/session/codingPromptBehaviorOptions';
 
 function stripUndefinedRecordValues<TValue>(
     record: Readonly<Record<string, TValue | undefined>>,
@@ -62,7 +71,7 @@ export interface ProfileEditFormProps {
      * Return true when the profile was successfully saved.
      * Return false when saving failed (e.g. validation error).
      */
-    onSave: (profile: AIBackendProfile) => boolean;
+    onSave: (profile: AIBackendProfile, secretBindings: Readonly<Record<string, string>>) => boolean;
     onCancel: () => void;
     onDirtyChange?: (isDirty: boolean) => void;
     containerStyle?: ViewStyle;
@@ -88,10 +97,14 @@ export function ProfileEditForm({
     const enabledAgentIds = useEnabledAgentIds();
     const machines = useAllMachines();
     const settings = useSettings();
+    const accountCodingPromptBehavior = React.useMemo(
+        () => resolveCodingPromptBehaviorV1(settings),
+        [settings],
+    );
     const directSessionsEnabled = useFeatureEnabled('sessions.direct');
     const [favoriteMachines, setFavoriteMachines] = useSettingMutable('favoriteMachines');
     const [secrets, setSecrets] = useSettingMutable('secrets');
-    const [secretBindingsByProfileId, setSecretBindingsByProfileId] = useSettingMutable('secretBindingsByProfileId');
+    const secretBindingsByProfileId = useSetting('secretBindingsByProfileId');
     const routeMachine = machineId;
     const [previewMachineId, setPreviewMachineId] = React.useState<string | null>(routeMachine);
 
@@ -179,6 +192,12 @@ export function ProfileEditForm({
     );
 
     const [name, setName] = React.useState(profile.name || '');
+    const [sessionTitleUpdatesOverride, setSessionTitleUpdatesOverride] = React.useState<CodingPromptSessionTitleUpdatesModeV1 | null>(
+        profile.codingPromptBehaviorV1?.sessionTitleUpdates ?? null,
+    );
+    const [responseOptionsOverride, setResponseOptionsOverride] = React.useState<CodingPromptBehaviorModeV1 | null>(
+        profile.codingPromptBehaviorV1?.responseOptions ?? null,
+    );
     const sessionDefaultPermissionModeByTargetKey = useSetting('sessionDefaultPermissionModeByTargetKey');
     const newSessionDefaultPersistenceModeV1 = useSetting('newSessionDefaultPersistenceModeV1');
     const newSessionDefaultPersistenceModeByTargetKeyV1 = useSetting('newSessionDefaultPersistenceModeByTargetKeyV1');
@@ -276,6 +295,9 @@ export function ProfileEditForm({
         }
         return map;
     });
+    const [secretBindingsDraft, setSecretBindingsDraft] = React.useState<Record<string, string>>(() => ({
+        ...(secretBindingsByProfileId[profile.id] ?? {}),
+    }));
 
     const usedRequirementVarNames = React.useMemo(() => {
         const set = new Set<string>();
@@ -303,36 +325,23 @@ export function ProfileEditForm({
         });
     }, [usedRequirementVarNames]);
 
-    // Prune default secret bindings when the requirement var name is no longer used or no longer uses the vault.
+    // Prune draft default secret bindings when the requirement var name is no longer used or no longer uses the vault.
     React.useEffect(() => {
-        const existing = secretBindingsByProfileId[profile.id];
-        if (!existing) return;
-
-        let changed = false;
-        const nextBindings: Record<string, string> = {};
-        for (const [envVarName, secretId] of Object.entries(existing)) {
-            const req = sourceRequirementsByName[envVarName];
-            const keep = usedRequirementVarNames.has(envVarName) && Boolean(req?.useSecretVault);
-            if (keep) {
-                if (typeof secretId === 'string') {
+        setSecretBindingsDraft((existing) => {
+            let changed = false;
+            const nextBindings: Record<string, string> = {};
+            for (const [envVarName, secretId] of Object.entries(existing)) {
+                const req = sourceRequirementsByName[envVarName];
+                const keep = usedRequirementVarNames.has(envVarName) && Boolean(req?.useSecretVault);
+                if (keep) {
                     nextBindings[envVarName] = secretId;
                 } else {
                     changed = true;
                 }
-            } else {
-                changed = true;
             }
-        }
-        if (!changed) return;
-
-        const out = { ...secretBindingsByProfileId };
-        if (Object.keys(nextBindings).length === 0) {
-            delete out[profile.id];
-        } else {
-            out[profile.id] = nextBindings;
-        }
-        setSecretBindingsByProfileId(out);
-    }, [profile.id, secretBindingsByProfileId, setSecretBindingsByProfileId, sourceRequirementsByName, usedRequirementVarNames]);
+            return changed ? nextBindings : existing;
+        });
+    }, [sourceRequirementsByName, usedRequirementVarNames]);
 
     const derivedEnvVarRequirements = React.useMemo<NonNullable<AIBackendProfile['envVarRequirements']>>(() => {
         const out = Object.entries(sourceRequirementsByName)
@@ -347,10 +356,10 @@ export function ProfileEditForm({
     }, [sourceRequirementsByName, usedRequirementVarNames]);
 
     const getDefaultSecretNameForSourceVar = React.useCallback((sourceVarName: string): string | null => {
-        const id = secretBindingsByProfileId[profile.id]?.[sourceVarName] ?? null;
+        const id = secretBindingsDraft[sourceVarName] ?? null;
         if (!id) return null;
         return secrets.find((s: SavedSecret) => s.id === id)?.name ?? null;
-    }, [profile.id, secretBindingsByProfileId, secrets]);
+    }, [secretBindingsDraft, secrets]);
 
     const openDefaultSecretModalForSourceVar = React.useCallback((sourceVarName: string) => {
         const normalized = sourceVarName.trim().toUpperCase();
@@ -363,23 +372,18 @@ export function ProfileEditForm({
             envVarRequirements: derivedEnvVarRequirements,
         };
 
-        const defaultSecretId = secretBindingsByProfileId[profile.id]?.[normalized] ?? null;
+        const defaultSecretId = secretBindingsDraft[normalized] ?? null;
 
         const setDefaultSecretId = (id: string | null) => {
-            const existing = secretBindingsByProfileId[profile.id] ?? {};
-            const nextBindings = { ...existing };
-            if (!id) {
-                delete nextBindings[normalized];
-            } else {
-                nextBindings[normalized] = id;
-            }
-            const out = { ...secretBindingsByProfileId };
-            if (Object.keys(nextBindings).length === 0) {
-                delete out[profile.id];
-            } else {
-                out[profile.id] = nextBindings;
-            }
-            setSecretBindingsByProfileId(out);
+            setSecretBindingsDraft((existing) => {
+                const nextBindings = { ...existing };
+                if (!id) {
+                    delete nextBindings[normalized];
+                } else {
+                    nextBindings[normalized] = id;
+                }
+                return nextBindings;
+            });
         };
 
         const handleResolve = (result: SecretRequirementModalResult) => {
@@ -406,7 +410,7 @@ export function ProfileEditForm({
             onRequestClose: () => handleResolve({ action: 'cancel' } as SecretRequirementModalResult),
             closeOnBackdrop: true,
         });
-    }, [derivedEnvVarRequirements, name, profile, secretBindingsByProfileId, secrets, setSecretBindingsByProfileId, setSecrets]);
+    }, [derivedEnvVarRequirements, name, profile, secretBindingsDraft, secrets, setSecrets]);
 
     const updateSourceRequirement = React.useCallback((
         sourceVarName: string,
@@ -427,20 +431,14 @@ export function ProfileEditForm({
 
         // If the vault is disabled (or requirement removed), drop any default secret binding immediately.
         if (next === null || next.useSecretVault !== true) {
-            const existing = secretBindingsByProfileId[profile.id];
-            if (existing && (normalized in existing)) {
+            setSecretBindingsDraft((existing) => {
+                if (!(normalized in existing)) return existing;
                 const nextBindings = { ...existing };
                 delete nextBindings[normalized];
-                const out = { ...secretBindingsByProfileId };
-                if (Object.keys(nextBindings).length === 0) {
-                    delete out[profile.id];
-                } else {
-                    out[profile.id] = nextBindings;
-                }
-                setSecretBindingsByProfileId(out);
-            }
+                return nextBindings;
+            });
         }
-    }, [profile.id, secretBindingsByProfileId, setSecretBindingsByProfileId]);
+    }, []);
 
     const compatibleBackendEntries = React.useMemo(() => {
         return resolvedBackendEntries.filter((entry) => compatibilityByTargetKeyState[entry.targetKey] === true);
@@ -459,6 +457,9 @@ export function ProfileEditForm({
 
     const [openPermissionProvider, setOpenPermissionProvider] = React.useState<null | string>(null);
     const [openStorageProvider, setOpenStorageProvider] = React.useState<null | string>(null);
+    const [openPromptBehaviorMenu, setOpenPromptBehaviorMenu] = React.useState<null | 'title' | 'response'>(null);
+    const titleUpdatesModeItems = React.useMemo(getCodingPromptTitleUpdatesModeItems, []);
+    const responseOptionsModeItems = React.useMemo(getCodingPromptResponseOptionsModeItems, []);
 
     const canSelectMachineLogin = machineLoginRequirement.selectableTargetKey !== null;
     const effectiveAuthMode = authMode === 'machineLogin' && canSelectMachineLogin ? 'machineLogin' : undefined;
@@ -535,8 +536,10 @@ export function ProfileEditForm({
             authMode,
             requiresMachineLogin,
             derivedEnvVarRequirements,
+            sessionTitleUpdatesOverride,
+            responseOptionsOverride,
             // Bindings are settings-level but edited here; include for dirty tracking.
-            secretBindings: secretBindingsByProfileId[profile.id] ?? null,
+            secretBindings: secretBindingsDraft,
         });
     }
 
@@ -550,7 +553,9 @@ export function ProfileEditForm({
             authMode,
             requiresMachineLogin,
             derivedEnvVarRequirements,
-            secretBindings: secretBindingsByProfileId[profile.id] ?? null,
+            sessionTitleUpdatesOverride,
+            responseOptionsOverride,
+            secretBindings: secretBindingsDraft,
         });
         return currentSnapshot !== initialSnapshotRef.current;
     }, [
@@ -561,9 +566,10 @@ export function ProfileEditForm({
         environmentVariables,
         name,
         derivedEnvVarRequirements,
+        responseOptionsOverride,
         requiresMachineLogin,
-        secretBindingsByProfileId,
-        profile.id,
+        secretBindingsDraft,
+        sessionTitleUpdatesOverride,
     ]);
 
     React.useEffect(() => {
@@ -660,8 +666,15 @@ export function ProfileEditForm({
             defaultPersistenceModeByAgent: {},
             compatibilityByTargetKey,
             compatibility: {},
+            codingPromptBehaviorV1: sessionTitleUpdatesOverride || responseOptionsOverride
+                ? {
+                    v: 1,
+                    ...(sessionTitleUpdatesOverride ? { sessionTitleUpdates: sessionTitleUpdatesOverride } : {}),
+                    ...(responseOptionsOverride ? { responseOptions: responseOptionsOverride } : {}),
+                }
+                : undefined,
             updatedAt: Date.now(),
-        });
+        }, secretBindingsDraft);
     }, [
         compatibilityByTargetKeyState,
         defaultPermissionModesByTargetKey,
@@ -672,9 +685,12 @@ export function ProfileEditForm({
         name,
         onSave,
         profile,
+        responseOptionsOverride,
         authMode,
         effectiveAuthMode,
         machineLoginRequirement.selectableTargetKey,
+        secretBindingsDraft,
+        sessionTitleUpdatesOverride,
         supportedDirectBackendEntries,
     ]);
 
@@ -702,6 +718,86 @@ export function ProfileEditForm({
                         />
                     </View>
                 </React.Fragment>
+            </ItemGroup>
+
+            <ItemGroup
+                title={t('settingsSession.promptPersonalization.title')}
+                footer={t('settingsSession.promptPersonalization.footer')}
+            >
+                <DropdownMenu
+                    open={openPromptBehaviorMenu === 'title'}
+                    onOpenChange={(open) => setOpenPromptBehaviorMenu(open ? 'title' : null)}
+                    variant="selectable"
+                    search={false}
+                    showCategoryTitles={false}
+                    selectedId={sessionTitleUpdatesOverride ?? '__account__'}
+                    matchTriggerWidth={true}
+                    connectToTrigger={true}
+                    rowKind="item"
+                    popoverBoundaryRef={popoverBoundaryRef}
+                    itemTrigger={{
+                        title: t('settingsSession.promptPersonalization.askAgentToRenameSessionsTitle'),
+                        subtitle: sessionTitleUpdatesOverride
+                            ? titleUpdatesModeItems.find((item) => item.id === sessionTitleUpdatesOverride)?.title
+                            : t('profiles.defaultPermissions.accountDefaultSubtitle', {
+                                label: titleUpdatesModeItems.find((item) => item.id === accountCodingPromptBehavior.sessionTitleUpdates)?.title ?? '',
+                            }),
+                        showSelectedSubtitle: false,
+                        itemProps: { testID: 'profile-session-title-updates-mode-trigger' },
+                    }}
+                    items={[
+                        {
+                            id: '__account__',
+                            title: t('profiles.defaultPermissions.useAccountDefault'),
+                            subtitle: t('profiles.defaultPermissions.currently', {
+                                label: titleUpdatesModeItems.find((item) => item.id === accountCodingPromptBehavior.sessionTitleUpdates)?.title ?? '',
+                            }),
+                        },
+                        ...titleUpdatesModeItems,
+                    ]}
+                    onSelect={(id) => {
+                        setSessionTitleUpdatesOverride(
+                            id === 'disabled' || id === 'initial' || id === 'ongoing' ? id : null,
+                        );
+                        setOpenPromptBehaviorMenu(null);
+                    }}
+                />
+                <DropdownMenu
+                    open={openPromptBehaviorMenu === 'response'}
+                    onOpenChange={(open) => setOpenPromptBehaviorMenu(open ? 'response' : null)}
+                    variant="selectable"
+                    search={false}
+                    showCategoryTitles={false}
+                    selectedId={responseOptionsOverride ?? '__account__'}
+                    matchTriggerWidth={true}
+                    connectToTrigger={true}
+                    rowKind="item"
+                    popoverBoundaryRef={popoverBoundaryRef}
+                    itemTrigger={{
+                        title: t('settingsSession.promptPersonalization.askAgentToSuggestReplyOptionsTitle'),
+                        subtitle: responseOptionsOverride
+                            ? responseOptionsModeItems.find((item) => item.id === responseOptionsOverride)?.title
+                            : t('profiles.defaultPermissions.accountDefaultSubtitle', {
+                                label: responseOptionsModeItems.find((item) => item.id === accountCodingPromptBehavior.responseOptions)?.title ?? '',
+                            }),
+                        showSelectedSubtitle: false,
+                        itemProps: { testID: 'profile-response-options-mode-trigger' },
+                    }}
+                    items={[
+                        {
+                            id: '__account__',
+                            title: t('profiles.defaultPermissions.useAccountDefault'),
+                            subtitle: t('profiles.defaultPermissions.currently', {
+                                label: responseOptionsModeItems.find((item) => item.id === accountCodingPromptBehavior.responseOptions)?.title ?? '',
+                            }),
+                        },
+                        ...responseOptionsModeItems,
+                    ]}
+                    onSelect={(id) => {
+                        setResponseOptionsOverride(id === 'agent' || id === 'disabled' ? id : null);
+                        setOpenPromptBehaviorMenu(null);
+                    }}
+                />
             </ItemGroup>
 
             {profile.isBuiltIn && profileDocs?.setupGuideUrl && (

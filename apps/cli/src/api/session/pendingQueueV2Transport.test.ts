@@ -6,6 +6,7 @@ import {
     blockPendingQueueV2Delivery,
     enqueuePendingQueueV2MessageViaHttp,
     readBlockedPendingQueueV2DeliveryByLocalIdFromServer,
+    readPendingQueueV2ActivationEligibilityFromServer,
     listPendingQueueV2LocalIdsFromServer,
     listPendingQueueV2DeliveryStatusesFromServer,
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
@@ -16,18 +17,23 @@ import {
     PendingQueueMaterializationTransportAmbiguousError,
     readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
+    updatePendingQueueV2RequestedActionViaHttp,
 } from './pendingQueueV2Transport';
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockPatch } = vi.hoisted(() => ({
     mockGet: vi.fn(),
     mockPost: vi.fn(),
+    mockPatch: vi.fn(),
 }));
 
 vi.mock('axios', () => ({
     default: {
         get: mockGet,
         post: mockPost,
-        isAxiosError: () => false,
+        patch: mockPatch,
+        isAxiosError: (error: unknown) => Boolean(
+            error && typeof error === 'object' && (error as { isAxiosError?: unknown }).isAxiosError === true,
+        ),
     },
 }));
 
@@ -35,6 +41,24 @@ describe('pendingQueueV2Transport', () => {
     beforeEach(() => {
         mockGet.mockReset();
         mockPost.mockReset();
+        mockPatch.mockReset();
+    });
+
+    it('promotes one exact Pending request through the canonical requested-action endpoint', async () => {
+        mockPatch.mockResolvedValueOnce({ data: { ok: true } });
+
+        await expect(updatePendingQueueV2RequestedActionViaHttp({
+            token: 'token',
+            sessionId: 'session/one',
+            localId: 'pending/one',
+            requestedAction: { v: 1, kind: 'send_now' },
+        })).resolves.toBeUndefined();
+
+        expect(mockPatch).toHaveBeenCalledWith(
+            expect.stringContaining('/v2/sessions/session%2Fone/pending/pending%2Fone/action'),
+            { requestedAction: { v: 1, kind: 'send_now' } },
+            expect.objectContaining({ timeout: 10_000 }),
+        );
     });
 
     it('accepts a terminal enqueue rejoin only with the exact committed-message localId', async () => {
@@ -168,6 +192,37 @@ describe('pendingQueueV2Transport', () => {
         expect(socket.emitWithAck).not.toHaveBeenCalled();
         expect(mockGet).not.toHaveBeenCalled();
         expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('degrades a new conditional-steer settlement to a strict block on an older server', async () => {
+        mockPost
+            .mockRejectedValueOnce({
+                isAxiosError: true,
+                response: { status: 400, data: { error: 'Bad Request' } },
+            })
+            .mockResolvedValueOnce({
+                data: { ok: true, pendingCount: 1, pendingBlockedCount: 1, pendingVersion: 3 },
+            });
+
+        await expect(blockPendingQueueV2Delivery({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: 'conditional-steer-1',
+            reason: 'conditional_steer_unavailable',
+        })).resolves.toMatchObject({ usedLegacySteeringUnavailableFallback: true });
+
+        expect(mockPost).toHaveBeenNthCalledWith(
+            1,
+            expect.stringContaining('/delivery/block'),
+            { reason: 'conditional_steer_unavailable' },
+            expect.any(Object),
+        );
+        expect(mockPost).toHaveBeenNthCalledWith(
+            2,
+            expect.stringContaining('/delivery/block'),
+            { reason: 'steering_unavailable' },
+            expect.any(Object),
+        );
     });
 
     it('emits only the immutable released materialize payload and accepts its exact positive ACK', async () => {
@@ -1515,6 +1570,49 @@ describe('pendingQueueV2Transport', () => {
                 timeout: 10_000,
             }),
         );
+    });
+
+    it('requires the exact queued user send-now row for inactive-session activation', async () => {
+        mockGet.mockResolvedValueOnce({
+            data: {
+                pending: [
+                    {
+                        localId: 'eligible',
+                        messageRole: 'user',
+                        requestedAction: { v: 1, kind: 'send_now' },
+                        deliveryStatus: { status: 'queued' },
+                    },
+                    {
+                        localId: 'claimed',
+                        messageRole: 'user',
+                        requestedAction: { v: 1, kind: 'send_now' },
+                        deliveryStatus: { status: 'delivering' },
+                    },
+                ],
+            },
+        });
+        await expect(readPendingQueueV2ActivationEligibilityFromServer({
+            token: 'token', sessionId: 'session-1', requestId: 'eligible',
+        })).resolves.toBe('eligible');
+
+        mockGet.mockResolvedValueOnce({
+            data: {
+                pending: [{
+                    localId: 'wrong-action',
+                    messageRole: 'user',
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    deliveryStatus: { status: 'queued' },
+                }],
+            },
+        });
+        await expect(readPendingQueueV2ActivationEligibilityFromServer({
+            token: 'token', sessionId: 'session-1', requestId: 'wrong-action',
+        })).resolves.toBe('ineligible');
+
+        mockGet.mockResolvedValueOnce({ data: { pending: [] } });
+        await expect(readPendingQueueV2ActivationEligibilityFromServer({
+            token: 'token', sessionId: 'session-1', requestId: 'resolved',
+        })).resolves.toBe('missing');
     });
 
     it.each([

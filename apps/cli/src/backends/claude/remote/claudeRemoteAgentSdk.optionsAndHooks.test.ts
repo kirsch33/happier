@@ -193,8 +193,8 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
         });
 
-            await claudeRemoteAgentSdk({
-                sessionId: null,
+        await claudeRemoteAgentSdk({
+            sessionId: null,
                 transcriptPath: null,
                 path: '/tmp',
                 claudeArgs: [],
@@ -1292,8 +1292,8 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
         });
 
-            await claudeRemoteAgentSdk({
-                sessionId: null,
+        await claudeRemoteAgentSdk({
+            sessionId: null,
                 transcriptPath: null,
                 path: '/tmp',
                 claudeArgs: [],
@@ -1591,6 +1591,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
 
             await claudeRemoteAgentSdk({
                 sessionId: null,
+                happySessionId: 'managed-session-1',
                 transcriptPath: null,
                 path: '/tmp',
                 claudeArgs: [],
@@ -1607,6 +1608,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             expect(capturedOptions).toBeTruthy();
             expect(capturedOptions.env).toBeTruthy();
             expect(capturedOptions.env.GITHUB_TOKEN).toBe('ghp_test');
+            expect(capturedOptions.env.HAPPIER_SESSION_ID).toBe('managed-session-1');
             expect(capturedOptions.env.HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON).toBeUndefined();
         } finally {
             if (originalToken === undefined) delete process.env.GITHUB_TOKEN;
@@ -1615,6 +1617,62 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             else process.env.HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON = originalMarker;
         }
     });
+
+    it.each(['', '   ', 'offline-local-session'])(
+        'removes an inherited managed session id when the supplied id is unusable (%j)',
+        async (happySessionId: string) => {
+            const originalSessionId = process.env.HAPPIER_SESSION_ID;
+            const originalMarker = process.env.HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON;
+            process.env.HAPPIER_SESSION_ID = 'outer-session';
+            process.env.HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON = JSON.stringify(['HAPPIER_SESSION_ID']);
+
+            try {
+                let capturedOptions: any = null;
+                const createQuery = vi.fn((_params: any) => {
+                    capturedOptions = _params.options;
+                    return {
+                        async *[Symbol.asyncIterator]() {
+                            yield { type: 'result' } as any;
+                        },
+                        close: vi.fn(),
+                        setPermissionMode: vi.fn(),
+                        setModel: vi.fn(),
+                        setMaxThinkingTokens: vi.fn(),
+                        supportedCommands: vi.fn(async () => []),
+                        supportedModels: vi.fn(async () => []),
+                    } as any;
+                });
+                let didSendFirst = false;
+
+                await claudeRemoteAgentSdk({
+                    sessionId: null,
+                    happySessionId,
+                    transcriptPath: null,
+                    path: '/tmp',
+                    claudeArgs: [],
+                    claudeExecutablePath: '/tmp/claude',
+                    canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                    isAborted: () => false,
+                    nextMessage: async () => {
+                        if (didSendFirst) return null;
+                        didSendFirst = true;
+                        return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+                    },
+                    onReady: () => {},
+                    onSessionFound: () => {},
+                    onMessage: () => {},
+                    createQuery,
+                } as any);
+
+                expect(capturedOptions.env.HAPPIER_SESSION_ID).toBeUndefined();
+            } finally {
+                if (originalSessionId === undefined) delete process.env.HAPPIER_SESSION_ID;
+                else process.env.HAPPIER_SESSION_ID = originalSessionId;
+                if (originalMarker === undefined) delete process.env.HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON;
+                else process.env.HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON = originalMarker;
+            }
+        },
+    );
 
     it('does not forward Claude OAuth refresh material into the normal subprocess env allowlist', async () => {
         const originals = {
@@ -1734,10 +1792,12 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             expect(capturedOptions.env.CLAUDE_CODE_OAUTH_SCOPES).toBeUndefined();
             expect(capturedOptions.env.HAPPIER_CLAUDE_EXPLICIT_ENV_ALLOWED_TEST).toBe('allowed-explicit-value');
 
-            // Bash commands must reach Claude Code's permission layer unmodified: a PreToolUse
-            // rewrite (e.g. an `unset ...;` prelude) breaks Bash prefix allow rules and trips
-            // auto-mode classifiers. Auth isolation happens via the subprocess env instead.
-            expect(capturedOptions.hooks.PreToolUse).toBeUndefined();
+            // Bash commands must reach Claude Code's permission layer unmodified: the only
+            // PreToolUse hook is the provider-owned AskUserQuestion bridge. Auth isolation
+            // happens via the subprocess env instead of rewriting Bash input.
+            expect(capturedOptions.hooks.PreToolUse).toEqual([
+                expect.objectContaining({ matcher: 'AskUserQuestion' }),
+            ]);
         } finally {
             if (originals.refreshToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN;
             else process.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN = originals.refreshToken;
@@ -3211,7 +3271,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         }
     });
 
-    it('forwards Agent SDK permission requests through canUseTool without PermissionRequest hooks', async () => {
+    it('forwards unresolved Agent SDK permission requests through hooks without installing a prompt tool', async () => {
         let capturedOptions: any = null;
         const updatedInput = { file_path: '/tmp/file.txt' };
         const updatedPermissions = [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }];
@@ -3255,21 +3315,19 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             createQuery,
         } as any);
 
-        expect(typeof capturedOptions?.canUseTool).toBe('function');
-        expect(capturedOptions?.hooks?.PermissionRequest).toBeUndefined();
+        expect(capturedOptions?.canUseTool).toBeUndefined();
+        expect(capturedOptions?.hooks?.PermissionRequest).toHaveLength(1);
 
-        const output = await capturedOptions.canUseTool(
-            'Read',
-            { file_path: '/tmp/file.txt' },
-            {
-                signal: new AbortController().signal,
-                toolUseID: 'toolu_123',
-                agentID: 'agent_456',
-                suggestions,
-                blockedPath: '/tmp/blocked.txt',
-                decisionReason: 'requires approval',
-            },
-        );
+        const permissionHook = capturedOptions.hooks.PermissionRequest[0].hooks[0];
+        const output = await permissionHook({
+            hook_event_name: 'PermissionRequest',
+            tool_name: 'Read',
+            tool_input: { file_path: '/tmp/file.txt' },
+            permission_suggestions: suggestions,
+            blocked_path: '/tmp/blocked.txt',
+            decision_reason: 'requires approval',
+            agent_id: 'agent_456',
+        }, 'toolu_123', { signal: new AbortController().signal });
 
         expect(canCallTool).toHaveBeenCalledWith(
             'Read',
@@ -3283,9 +3341,14 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
                 decisionReason: 'requires approval',
             }),
         );
-        expect(output).toEqual(
-            { behavior: 'allow', updatedInput, updatedPermissions },
-        );
+        expect(output).toEqual({
+            continue: true,
+            suppressOutput: true,
+            hookSpecificOutput: {
+                hookEventName: 'PermissionRequest',
+                decision: { behavior: 'allow', updatedInput, updatedPermissions },
+            },
+        });
     });
 
     it('does not register a PreToolUse hook that rewrites Bash commands', async () => {
@@ -3327,12 +3390,12 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             createQuery,
         } as any);
 
-        // Bash `tool_input.command` must stay byte-identical to what the model produced:
-        // Claude Code's permission rules (`Bash(gh:*)`) and auto-mode classifier evaluate
-        // the post-hook command, so any rewrite (like an `unset ...;` auth prelude) breaks
-        // prefix allow rules and triggers "unsetting auth tokens" denials. Auth-token
-        // isolation is enforced through the scrubbed subprocess env instead.
-        expect(capturedHooks?.PreToolUse).toBeUndefined();
+        // Bash `tool_input.command` must stay byte-identical to what the model produced. The
+        // provider-owned AskUserQuestion bridge is the only PreToolUse hook, so it cannot rewrite
+        // Bash input or disturb Claude's prefix allow rules and Auto classifier.
+        expect(capturedHooks?.PreToolUse).toEqual([
+            expect.objectContaining({ matcher: 'AskUserQuestion' }),
+        ]);
     });
 
 });

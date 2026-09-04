@@ -24,6 +24,7 @@ import { getComponentDir, getRootDir, resolveStackEnvPath } from './utils/paths/
 import { parseEnvToObject } from './utils/env/dotenv.mjs';
 import { ensureEnvFileUpdated } from './utils/env/env_file.mjs';
 import { getCliHomeDirFromEnvOrDefault } from './utils/stack/dirs.mjs';
+import { buildStackServerProfileSetArgs } from './utils/stack/server_profile_reconciliation.mjs';
 import {
   isCliDirectExecutableCommand,
   probeCliDistRuntimeImport,
@@ -174,16 +175,11 @@ async function waitForConcurrentCliDistBuild({
   }
 
   const startedAt = Date.now();
-  while (Date.now() - startedAt <= timeoutMs) {
-    const integrity = readIntegrity();
-    if (integrity.ok) {
-      return integrity;
-    }
-    if (!isCliDistBuildLockActive(lockPath)) {
-      break;
-    }
+  while (isCliDistBuildLockActive(lockPath) && Date.now() - startedAt <= timeoutMs) {
     await delay(pollIntervalMs);
   }
+
+  if (isCliDistBuildLockActive(lockPath)) return null;
 
   const finalIntegrity = readIntegrity();
   return finalIntegrity.ok ? finalIntegrity : null;
@@ -879,13 +875,6 @@ export async function ensureHappierCliDistExists(
     };
   }
 
-  // Fast path: if dist exists and import graph is complete, never trigger rebuild here.
-  // Rebuilding inside daemon restart can race with live restarts and transiently remove dist/.
-  const before = readIntegrity();
-  if (before.ok) {
-    return { ok: true, current: true, distEntrypoint, built: false, reason: before.reason };
-  }
-
   const concurrentBuildReady = await waitForConcurrentCliDistBuild({
     cliDir,
     readIntegrity,
@@ -900,6 +889,13 @@ export async function ensureHappierCliDistExists(
     };
   }
 
+  // Fast path: if dist exists and import graph is complete, never trigger rebuild here.
+  // Rebuilding inside daemon restart can race with live restarts and transiently remove dist/.
+  const before = readIntegrity();
+  if (before.ok) {
+    return { ok: true, current: true, distEntrypoint, built: false, reason: before.reason };
+  }
+
   // Try to recover automatically: missing dist is a common first-run worktree issue.
   // We build in-place using the cliDir that owns this cliBin (../ from bin/).
   if (!buildCli) {
@@ -909,7 +905,7 @@ export async function ensureHappierCliDistExists(
   let buildRes = null;
   try {
     // In auto mode, ensureCliBuilt() is a fast no-op when nothing changed.
-    buildRes = await ensureCliBuilt(cliDir, { buildCli: true });
+    buildRes = await ensureCliBuilt(cliDir, { buildCli: true, env });
     if (buildRes?.built) {
       // eslint-disable-next-line no-console
       console.warn(`[local] happier-cli: rebuilt (${cliDir})`);
@@ -1760,6 +1756,19 @@ export async function startLocalDaemonWithAuth({
     }
   }
   if (!distCheck.ok) {
+    const existingAtAdmission = await checkDaemonStatePingAware(cliHomeDir, {
+      serverUrl: internalServerUrl,
+      env: daemonEnv,
+      stackName: resolvedStackName,
+    });
+    if (daemonStateHasLiveProcess(existingAtAdmission)) {
+      console.warn(
+        `[local] happier-cli dist is unavailable (${distCheck.reason ?? 'unknown'}); ` +
+          `preserving the already-live daemon instead of attempting an unsafe restart.`,
+      );
+      await syncRuntimeDaemonState({ runtimeDaemonPid: existingAtAdmission.pid });
+      return;
+    }
     const reason = String(distCheck.reason ?? '').trim();
     if (reason.startsWith('missing_runtime_launch_path:')) {
       const missingPath = reason.slice('missing_runtime_launch_path:'.length);
@@ -1770,6 +1779,38 @@ export async function startLocalDaemonWithAuth({
       );
     }
     throw new Error(formatCliDistUnavailableForDaemonStart({ distEntrypoint, reason: distCheck.reason }));
+  }
+
+  const canReconcileProfileWithAdmittedCli =
+    !distCheck.generationAdmissionRequired || distCheck.current === true;
+  if (canReconcileProfileWithAdmittedCli && existsSync(join(cliHomeDir, 'settings.json'))) {
+    const serverId = String(daemonEnv.HAPPIER_ACTIVE_SERVER_ID ?? '').trim();
+    if (serverId) {
+      const profileCommand = resolveDaemonCommandSpec({
+        cliBin,
+        cliEntrypoint:
+          explicitCommand || isCliDirectExecutableCommand(cliBin)
+            ? cliEntrypoint
+            : distEntrypoint,
+        cliNodeEntrypoint,
+        cliCommand,
+        cliCommandArgs,
+        env: daemonEnv,
+      });
+      await run(
+        profileCommand.command,
+        [
+          ...profileCommand.argsPrefix,
+          ...buildStackServerProfileSetArgs({ serverId, internalServerUrl, publicServerUrl }),
+        ],
+        {
+          env: { ...daemonEnv, HAPPIER_DEFER_SERVER_SELECTION_FOLLOW_UP: '1' },
+          stdio: 'ignore',
+          timeoutMs: 10_000,
+          captureFailureDiagnostic: { env: daemonEnv },
+        },
+      );
+    }
   }
 
   // If this is a migrated/new stack home dir, seed credentials from the user's existing login (best-effort)

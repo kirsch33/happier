@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { CONNECTED_SERVICE_BROKER_BRIDGE_FETCH_TIMEOUT_MS } from '../broker/brokerBridgeCallSource';
+
 import {
+  CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS,
   reportConnectedServiceRuntimeAuthFailureToDaemon,
   resetConnectedServiceRuntimeAuthFailureReportDedupeForTests,
 } from './reportConnectedServiceRuntimeAuthFailureToDaemon';
@@ -22,6 +25,11 @@ const classifiedFailure = {
 } as const;
 
 describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
+  it('keeps the local recovery report lifecycle-owned instead of imposing a wall-clock deadline', () => {
+    expect(CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS).toBeNull();
+    expect(CONNECTED_SERVICE_BROKER_BRIDGE_FETCH_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
   it('does not emit a legacy launcher-daemon incarnation from the runner environment', async () => {
     const outboxDir = await createTempDir('happier-runtime-auth-generation-bound-');
     const notify = vi.fn(async () => ({
@@ -575,7 +583,7 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
       switchesThisTurn: 2,
       classification,
     }, {
-      timeoutMs: 120_000,
+      timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS,
     });
   });
 
@@ -615,7 +623,7 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
       classification,
       resumePromptMode: 'custom',
     }, {
-      timeoutMs: 120_000,
+      timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS,
     });
   });
 
@@ -646,11 +654,11 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
     })).resolves.not.toHaveProperty('resumePromptMode');
     expect(notify).toHaveBeenCalledWith(
       expect.not.objectContaining({ resumePromptMode: expect.anything() }),
-      { timeoutMs: 120_000 },
+      { timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS },
     );
   });
 
-  it('uses a runtime-auth-specific daemon timeout so quota probing and switch application can finish', async () => {
+  it('does not abort a healthy runtime-auth recovery because its fan-out outlasts a fixed deadline', async () => {
     const notify = vi.fn(async () => ({
       ok: true,
       result: {
@@ -672,7 +680,7 @@ describe('reportConnectedServiceRuntimeAuthFailureToDaemon', () => {
     });
 
     expect(notify).toHaveBeenCalledWith(expect.any(Object), {
-      timeoutMs: 120_000,
+      timeoutMs: CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS,
     });
   });
 

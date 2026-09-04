@@ -32,7 +32,7 @@ type RuntimeAuthFailureNotifyBody = Readonly<{
 }>;
 
 type RuntimeAuthFailureNotifyOptions = Readonly<{
-  timeoutMs?: number;
+  timeoutMs?: number | null;
 }>;
 
 type RuntimeAuthFailureNotify = (
@@ -64,7 +64,11 @@ export type ConnectedServiceRuntimeAuthFailureDaemonReport = Readonly<{
   }>;
 }>;
 
-export const CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS = 120_000;
+// The local daemon owns recovery after the report is durably staged. A fixed
+// caller deadline can only manufacture an ambiguous failure while healthy
+// multi-session fan-out continues; process exit/caller cancellation still
+// settles the underlying local transport.
+export const CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS = null;
 
 // Incident Jun-11 H-C / FIX-2: one failed turn is observed by multiple independent triggers
 // (e.g. Claude's StopFailure hook, the SDK inbound loop, and the bridge transcript observer),

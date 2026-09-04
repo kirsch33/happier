@@ -9,7 +9,7 @@ import YAML from 'yaml';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
-test('release-verify resolves public validation profiles centrally while retaining legacy flags', async () => {
+test('release-verify resolves one public profile with explicit suite refinements', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'release-verify.yml'), 'utf8');
   const workflow = YAML.parse(raw, { prettyErrors: true });
 
@@ -30,23 +30,10 @@ test('release-verify resolves public validation profiles centrally while retaini
     'the nested reusable verification job must have exactly one condition key',
   );
 
-  for (const inputName of [
-    'run_cli_update_continuity',
-    'run_daemon_continuity',
-    'run_session_continuity',
-    'run_release_assets_docker',
-  ]) {
-    assert.match(
-      raw,
-      new RegExp(`${inputName}:\\n\\s+description: "Verify — .*"\\n\\s+required: true\\n\\s+default: true\\n\\s+type: boolean`),
-      `release-verify workflow_dispatch should expose ${inputName} with a release-verification default`,
-    );
-    assert.match(
-      raw,
-      new RegExp(`${inputName}:\\n\\s+required: false\\n\\s+default: true\\n\\s+type: boolean`),
-      `release-verify workflow_call should expose ${inputName}`,
-    );
-  }
+  assert.equal(workflow.on.workflow_dispatch.inputs.run_cli_update_continuity, undefined);
+  assert.equal(workflow.on.workflow_call.inputs.run_cli_update_continuity, undefined);
+  assert.ok(workflow.on.workflow_dispatch.inputs.include_validation_suites);
+  assert.ok(workflow.on.workflow_dispatch.inputs.waive_validation_suites);
 
   for (const inputName of [
     'run_installers_smoke',
@@ -68,6 +55,9 @@ test('release-verify resolves public validation profiles centrally while retaini
   }
 
   const resolver = workflow.jobs.resolve_validation_profile.steps.find((step) => step.id === 'profile');
+  assert.doesNotMatch(String(resolver.run), /legacy-run-/);
+  assert.match(String(resolver.run), /--include-suites/);
+  assert.match(String(resolver.run), /--waive-suites/);
   assert.equal(resolver.env.CANDIDATE_CLI_VERSION, '${{ inputs.candidate_cli_version }}');
   assert.equal(resolver.env.CANDIDATE_SERVER_VERSION, '${{ inputs.candidate_server_version }}');
   assert.equal(resolver.env.RELEASE_CHANNEL, '${{ inputs.channel }}');
@@ -143,6 +133,10 @@ test('release candidate verification runs trusted workflow control bytes under t
     /\$control_dir\/scripts\/pipeline\/release\/verify-release-candidate-identity\.mjs/,
   );
   assert.doesNotMatch(String(privileged.run ?? ''), /node\s+scripts\/pipeline\//);
+  assert.doesNotMatch(String(privileged.run ?? ''), /gh\s+release\s+download/);
+  assert.match(String(privileged.run ?? ''), /releases\/assets\/\$\{asset_id\}/);
+  assert.match(String(privileged.run ?? ''), /releases\/\$\{release_id\}/);
+  assert.match(String(privileged.run ?? ''), /current_snapshot.*release_snapshot/s);
   assert.doesNotMatch(String(privileged.run ?? ''), /\$\{\{\s*inputs\./);
 
   for (const [name, expression] of Object.entries({
@@ -162,6 +156,10 @@ test('release candidate verification runs trusted workflow control bytes under t
   assert.match(
     String(artifactVerification.run ?? ''),
     /\$control_dir\/scripts\/pipeline\/release\/verify-artifacts\.mjs/,
+  );
+  assert.match(
+    String(artifactVerification.run ?? ''),
+    /\$control_dir\/scripts\/pipeline\/release\/lib\/immutable-release-candidate\.mjs/,
   );
   assert.doesNotMatch(String(artifactVerification.run ?? ''), /\$\{\{\s*inputs\./);
 });

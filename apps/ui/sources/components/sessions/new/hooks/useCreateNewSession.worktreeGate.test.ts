@@ -92,12 +92,15 @@ const deleteWorkspaceCheckoutMock = vi.hoisted(() => vi.fn(async () => ({ succes
 const deleteWorkspaceMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const detachWorkspaceLocationMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const captureExceptionIfEnabledMock = vi.hoisted(() => vi.fn());
-const clearNewSessionDraftMock = vi.hoisted(() => vi.fn());
+const captureSessionDraftLaunchCurrentnessMock = vi.hoisted(() => vi.fn((params: Readonly<{ address: unknown }>) => ({
+    address: params.address,
+    mutationIds: {},
+})));
+const clearSessionDraftCurrentnessMock = vi.hoisted(() => vi.fn(async () => true));
 const loadSessionDraftsMock = vi.hoisted(() => vi.fn(() => ({})));
 const saveSessionDraftsMock = vi.hoisted(() => vi.fn());
 const saveNewSessionDraftMock = vi.hoisted(() => vi.fn());
 const storeTempDataMock = vi.hoisted(() => vi.fn(() => 'temp-recovery-1'));
-const updateSessionDraftMock = vi.hoisted(() => vi.fn());
 const updateSessionPermissionModeMock = vi.hoisted(() => vi.fn());
 const updateSessionModelModeMock = vi.hoisted(() => vi.fn());
 const storedSessionsState = vi.hoisted(() => ({ sessions: {} as Record<string, Session> }));
@@ -164,7 +167,6 @@ installNewSessionScreenModelCommonModuleMocks({
             storage: createStorageStoreMock({
                 settings: settingsDefaults,
                 sessions: storedSessionsState.sessions,
-                updateSessionDraft: updateSessionDraftMock,
                 updateSessionPermissionMode: updateSessionPermissionModeMock,
                 updateSessionModelMode: updateSessionModelModeMock,
             }),
@@ -200,6 +202,15 @@ vi.mock('@/sync/domains/server/selection/serverSelectionResolver', () => ({
     })),
 }));
 
+vi.mock('@/sync/domains/server/serverRuntime', () => ({
+    getActiveServerSnapshot: () => ({
+        serverId: 'api.happier.dev',
+        serverUrl: 'https://api.happier.dev',
+        kind: 'cloud',
+        generation: 1,
+    }),
+}));
+
 vi.mock('@/sync/domains/features/featureLocalPolicy', () => ({
     resolveLocalFeaturePolicyEnabled: vi.fn((featureId: string, settings: { featureToggles?: Record<string, boolean> }) => settings.featureToggles?.[featureId] === true),
 }));
@@ -220,6 +231,7 @@ vi.mock('@/sync/sync', () => ({
         refreshSessions: vi.fn(async () => {}),
         ensureSessionVisibleForMessageRoute: ensureSessionVisibleForMessageRouteMock,
         refreshMachines: vi.fn(async () => {}),
+        acquireUserRequestLease: () => () => {},
         enqueuePendingMessage: vi.fn(async (
             _sessionId: string,
             _message: string,
@@ -242,11 +254,20 @@ vi.mock('@/sync/store/settingsWriters', () => ({
     useApplySettings: () => vi.fn(),
 }));
 
+vi.mock('@/sync/ops/sessionDrafts/sessionDraftRepository', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/sync/ops/sessionDrafts/sessionDraftRepository')>();
+    return {
+        ...actual,
+        captureSessionDraftLaunchCurrentness: captureSessionDraftLaunchCurrentnessMock,
+        clearSessionDraftCurrentness: clearSessionDraftCurrentnessMock,
+        readSessionDraftLaunchCurrentness: () => null,
+    };
+});
+
 vi.mock('@/sync/domains/state/persistence', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/sync/domains/state/persistence')>();
     return {
         ...actual,
-        clearNewSessionDraft: clearNewSessionDraftMock,
         loadSettings: () => ({ settings: {}, version: null }),
         loadDeviceAnalyticsId: () => null,
         saveDeviceAnalyticsId: vi.fn(),
@@ -334,12 +355,12 @@ afterEach(() => {
             repositoryRootPath: '/tmp/worktree',
         };
     });
-    clearNewSessionDraftMock.mockClear();
+    captureSessionDraftLaunchCurrentnessMock.mockClear();
+    clearSessionDraftCurrentnessMock.mockClear();
     loadSessionDraftsMock.mockClear();
     saveSessionDraftsMock.mockClear();
     saveNewSessionDraftMock.mockClear();
     storeTempDataMock.mockClear();
-    updateSessionDraftMock.mockClear();
     updateSessionPermissionModeMock.mockClear();
     updateSessionModelModeMock.mockClear();
     ensureSessionVisibleForMessageRouteMock.mockClear();
@@ -375,6 +396,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -435,6 +457,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const routerReplace = vi.fn();
         const disableDraftPersistence = vi.fn();
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
@@ -475,7 +498,14 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         expect(disableDraftPersistence).toHaveBeenCalledTimes(1);
-        expect(clearNewSessionDraftMock).toHaveBeenCalledWith(draftScope);
+        expect(clearSessionDraftCurrentnessMock).toHaveBeenCalledWith({
+            scope: draftScope,
+            address: { kind: 'newSession', draftId: params.draftId },
+            currentness: {
+                address: { kind: 'newSession', draftId: params.draftId },
+                mutationIds: {},
+            },
+        });
         expect(routerReplace).toHaveBeenCalledWith('/session/session-created?serverId=api.happier.dev', expect.anything());
     });
 
@@ -504,6 +534,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -587,6 +618,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -654,6 +686,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -716,6 +749,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const disableDraftPersistence = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
@@ -775,7 +809,6 @@ describe('useCreateNewSession (worktree gating)', () => {
         expect(deleteWorkspaceMock).not.toHaveBeenCalled();
         expect(detachWorkspaceLocationMock).not.toHaveBeenCalled();
         expect(disableDraftPersistence).toHaveBeenCalledTimes(1);
-        expect(clearNewSessionDraftMock).toHaveBeenCalledTimes(1);
         expect(routerReplace).toHaveBeenCalledWith('/session/session-created?serverId=api.happier.dev', expect.anything());
         expect(setIsCreating).not.toHaveBeenCalledWith(false);
     });
@@ -787,6 +820,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const routerReplace = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
@@ -845,6 +879,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         } as any));
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -916,6 +951,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         } as any));
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -985,6 +1021,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const typecheck = useCreateNewSession;
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -1055,6 +1092,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         } as any));
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -1132,6 +1170,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         });
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -1191,6 +1230,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         saveWorkspaceLocationMock.mockRejectedValueOnce(new Error('attach failed'));
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -1260,6 +1300,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         machineSpawnNewSessionMock.mockRejectedValueOnce(new Error('spawn exploded'));
 
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: vi.fn() },
             selectedMachineId: 'machine-1',
@@ -1339,6 +1380,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const disableDraftPersistence = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
@@ -1395,10 +1437,8 @@ describe('useCreateNewSession (worktree gating)', () => {
         expect(spawnedOptions?.workspaceId).toBeUndefined();
         expect(spawnedOptions?.workspaceLocationId).toBeUndefined();
         expect(spawnedOptions?.workspaceCheckoutId).toBeUndefined();
-        expect(updateSessionDraftMock).not.toHaveBeenCalled();
         expect(routerReplace).toHaveBeenCalledWith('/session/session-created?serverId=api.happier.dev', expect.anything());
         expect(disableDraftPersistence).toHaveBeenCalledTimes(1);
-        expect(clearNewSessionDraftMock).toHaveBeenCalledTimes(1);
         expect(setIsCreating).not.toHaveBeenCalledWith(false);
         expect(vi.mocked(Modal.alert)).not.toHaveBeenCalled();
     });
@@ -1428,6 +1468,7 @@ describe('useCreateNewSession (worktree gating)', () => {
             agentState: null,
         } as Session;
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
@@ -1492,14 +1533,16 @@ describe('useCreateNewSession (worktree gating)', () => {
             });
         });
 
-        expect(updateSessionDraftMock).not.toHaveBeenCalled();
         expect(saveSessionDraftsMock).not.toHaveBeenCalled();
         expect(storeTempDataMock).not.toHaveBeenCalled();
         expect(disableDraftPersistence).not.toHaveBeenCalled();
-        expect(clearNewSessionDraftMock).not.toHaveBeenCalled();
+        expect(clearSessionDraftCurrentnessMock).not.toHaveBeenCalled();
         expect(routerReplace).not.toHaveBeenCalled();
         expect(setIsCreating).toHaveBeenCalledWith(false);
-        expect(vi.mocked(Modal.alert)).toHaveBeenCalledWith('common.error', expect.any(String));
+        expect(vi.mocked(Modal.alert)).toHaveBeenCalledWith(
+            'newSession.createdWithSetupIssueTitle',
+            expect.stringContaining('afterCreated failed'),
+        );
     });
 
     it('does not route created-session recovery with explicit server scope when follow-up fails', async () => {
@@ -1514,6 +1557,7 @@ describe('useCreateNewSession (worktree gating)', () => {
         const disableDraftPersistence = vi.fn();
         const setIsCreating = vi.fn();
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
@@ -1565,10 +1609,13 @@ describe('useCreateNewSession (worktree gating)', () => {
 
         expect(ensureSessionVisibleForMessageRouteMock).not.toHaveBeenCalled();
         expect(disableDraftPersistence).not.toHaveBeenCalled();
-        expect(clearNewSessionDraftMock).not.toHaveBeenCalled();
+        expect(clearSessionDraftCurrentnessMock).not.toHaveBeenCalled();
         expect(routerReplace).not.toHaveBeenCalled();
         expect(setIsCreating).toHaveBeenCalledWith(false);
-        expect(vi.mocked(Modal.alert)).toHaveBeenCalledWith('common.error', expect.any(String));
+        expect(vi.mocked(Modal.alert)).toHaveBeenCalledWith(
+            'newSession.createdWithSetupIssueTitle',
+            expect.stringContaining('Target server profile not found'),
+        );
     });
 
     it('retries afterCreated against the created session without spawning another session', async () => {
@@ -1614,6 +1661,7 @@ describe('useCreateNewSession (worktree gating)', () => {
             })
             .mockResolvedValueOnce(undefined);
         const params = {
+            draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
             launchIntentSignature: 'test-launch-intent',
             router: { push: vi.fn(), replace: routerReplace },
             selectedMachineId: 'machine-1',
@@ -1659,9 +1707,8 @@ describe('useCreateNewSession (worktree gating)', () => {
         expect(afterCreated).toHaveBeenCalledTimes(1);
         expect(saveSessionDraftsMock).not.toHaveBeenCalled();
         expect(saveNewSessionDraftMock).not.toHaveBeenCalled();
-        expect(updateSessionDraftMock).not.toHaveBeenCalled();
         expect(disableDraftPersistence).not.toHaveBeenCalled();
-        expect(clearNewSessionDraftMock).not.toHaveBeenCalled();
+        expect(clearSessionDraftCurrentnessMock).not.toHaveBeenCalled();
         expect(routerReplace).not.toHaveBeenCalled();
 
         await act(async () => {
@@ -1674,11 +1721,13 @@ describe('useCreateNewSession (worktree gating)', () => {
         expect(machineSpawnNewSessionMock).toHaveBeenCalledTimes(1);
         expect(afterCreated).toHaveBeenCalledTimes(2);
         expect(disableDraftPersistence).toHaveBeenCalledTimes(1);
-        expect(clearNewSessionDraftMock).toHaveBeenCalledTimes(1);
         expect(routerReplace).toHaveBeenCalledWith(
             '/session/session-created?serverId=api.happier.dev',
             expect.anything(),
         );
-        expect(vi.mocked(Modal.alert)).toHaveBeenCalledWith('common.error', 'Created session is not available locally yet');
+        expect(vi.mocked(Modal.alert)).toHaveBeenCalledWith(
+            'newSession.createdWithSetupIssueTitle',
+            expect.stringContaining('Created session is not available locally yet'),
+        );
     });
 });

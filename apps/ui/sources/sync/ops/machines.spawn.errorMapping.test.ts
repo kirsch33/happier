@@ -375,15 +375,23 @@ describe('machineSpawnNewSession error mapping', () => {
       .toEqual({ spawnNonce: 'spawn-nonce-transient-resolver' });
   });
 
-  it('rehydrates an unresolved semantic attempt and resolves it without a second spawn', async () => {
+  it('rehydrates an unresolved latest source-context attempt through the daemon source validator', async () => {
+    storage.setState((state) => ({
+      machines: {
+        ...state.machines,
+        'machine-1': {
+          ...state.machines['machine-1']!,
+          daemonState: { startedWithCliVersion: '0.2.10-dev.76' },
+        },
+      },
+    }));
     machineRpcWithServerScopeMock
       .mockResolvedValueOnce({
         type: 'success',
         spawnNonce: 'persisted-launch-nonce',
         sessionIdStatus: 'pending',
       })
-      .mockResolvedValueOnce({ status: 'unsupported' })
-      .mockResolvedValueOnce({ status: 'success', sessionId: 'session-from-persisted-launch' });
+      .mockResolvedValueOnce({ type: 'success', sessionId: 'session-from-persisted-launch' });
 
     const { machineSpawnNewSessionUntilResolved } = await import('./machines');
     const options = {
@@ -393,6 +401,12 @@ describe('machineSpawnNewSession error mapping', () => {
       serverId: 'server-b',
       spawnNonce: 'persisted-launch-nonce',
       userAttemptId: 'attempt-a',
+      sourceContext: {
+        v: 1,
+        kind: 'session_replay',
+        sourceSessionId: 'sess_source',
+        forkPoint: { type: 'latest' as const },
+      },
     } as const;
 
     await expect(machineSpawnNewSessionUntilResolved(options)).resolves.toMatchObject({
@@ -412,8 +426,76 @@ describe('machineSpawnNewSession error mapping', () => {
     const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
       ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     );
-    expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0]?.[0]?.payload?.spawnNonce).toBe('persisted-launch-nonce');
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.map(([call]) => call.payload.spawnNonce)).toEqual([
+      'persisted-launch-nonce',
+      'persisted-launch-nonce',
+    ]);
+    expect(spawnCalls.map(([call]) => call.payload.sourceContext)).toEqual([
+      options.sourceContext,
+      options.sourceContext,
+    ]);
+    expect(machineRpcWithServerScopeMock.mock.calls
+      .filter(([call]) => call.method === RPC_METHODS.DAEMON_SPAWN_SESSION_RESOLVE))
+      .toHaveLength(0);
+  });
+
+  it('routes a reused source-context custody record back to the daemon instead of returning its prior child', async () => {
+    storage.setState((state) => ({
+      machines: {
+        ...state.machines,
+        'machine-1': {
+          ...state.machines['machine-1']!,
+          daemonState: { startedWithCliVersion: '0.2.10-dev.76' },
+        },
+      },
+    }));
+    machineRpcWithServerScopeMock
+      .mockResolvedValueOnce({ type: 'success', sessionId: 'session-from-original-source' })
+      .mockResolvedValueOnce({
+        type: 'error',
+        errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
+        errorMessage: 'Existing Session was created from a different source recipe',
+      });
+    const { machineSpawnNewSession } = await import('./machines');
+    const base = {
+      machineId: 'machine-1',
+      directory: '/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      serverId: 'server-b',
+      userAttemptId: 'source-context-retry-attempt',
+    } as const;
+
+    await expect(machineSpawnNewSession({
+      ...base,
+      sourceContext: {
+        v: 1,
+        kind: 'session_replay',
+        sourceSessionId: 'sess_source_a',
+        forkPoint: { type: 'seq', upToSeqInclusive: 4 },
+      },
+    })).resolves.toMatchObject({ type: 'success', sessionId: 'session-from-original-source' });
+    await expect(machineSpawnNewSession({
+      ...base,
+      sourceContext: {
+        v: 1,
+        kind: 'session_replay',
+        sourceSessionId: 'sess_source_b',
+        forkPoint: { type: 'seq', upToSeqInclusive: 4 },
+      },
+    })).resolves.toMatchObject({
+      type: 'error',
+      errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
+    });
+
+    const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
+      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
+    );
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls.map(([call]) => call.payload.sourceContext.sourceSessionId)).toEqual([
+      'sess_source_a',
+      'sess_source_b',
+    ]);
   });
 
   it('resubmits the same semantic attempt when the current daemon proves a persisted nonce is absent', async () => {
@@ -1225,6 +1307,88 @@ describe('machineSpawnNewSession error mapping', () => {
       }),
     }));
     expect(machineRpcWithServerScopeMock.mock.calls[0]?.[0]?.payload).not.toHaveProperty('backendTarget');
+  });
+
+  it('reports when transport compatibility strips pending first input', async () => {
+    storage.getState().applyMachines([
+      {
+        id: 'machine-legacy-first-input',
+        seq: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        active: true,
+        activeAt: 1,
+        metadata: {
+          host: 'legacy-first-input-machine', platform: 'darwin', happyCliVersion: '0.2.10-dev.40',
+          happyHomeDir: '/Users/alice/.happier', homeDir: '/Users/alice',
+        },
+        metadataVersion: 0,
+        daemonState: {
+          startedWithCliVersion: '0.2.10-dev.40',
+        },
+        daemonStateVersion: 1,
+      },
+    ]);
+    machineRpcWithServerScopeMock.mockResolvedValueOnce({ type: 'success', sessionId: 'session-with-ui-follow-up' });
+
+    const { machineSpawnNewSession } = await import('./machines');
+    const result = await machineSpawnNewSession({
+      machineId: 'machine-legacy-first-input',
+      directory: '/tmp',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      serverId: 'server-b',
+      pendingFirstInput: { text: 'do not lose me', localId: 'first-turn-1' },
+    });
+
+    expect(result).toMatchObject({
+      type: 'success',
+      sessionId: 'session-with-ui-follow-up',
+      pendingFirstInputTransferred: false,
+    });
+    expect(machineRpcWithServerScopeMock.mock.calls[0]?.[0]?.payload).not.toHaveProperty('pendingFirstInput');
+  });
+
+  it('uses the daemon acknowledgement instead of inferring first-input custody from its version', async () => {
+    storage.getState().applyMachines([
+      {
+        id: 'machine-modern-first-input',
+        seq: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        active: true,
+        activeAt: 1,
+        metadata: {
+          host: 'modern-first-input-machine', platform: 'darwin', happyCliVersion: '0.2.10-dev.80',
+          happyHomeDir: '/Users/alice/.happier', homeDir: '/Users/alice',
+        },
+        metadataVersion: 0,
+        daemonState: {
+          startedWithCliVersion: '0.2.10-dev.80',
+        },
+        daemonStateVersion: 1,
+      },
+    ]);
+    machineRpcWithServerScopeMock.mockResolvedValueOnce({
+      type: 'success',
+      sessionId: 'session-with-daemon-rejection',
+      pendingFirstInputAccepted: false,
+    });
+
+    const { machineSpawnNewSession } = await import('./machines');
+    const result = await machineSpawnNewSession({
+      machineId: 'machine-modern-first-input',
+      directory: '/tmp',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      serverId: 'server-b',
+      pendingFirstInput: { text: 'do not lose me', localId: 'first-turn-2' },
+    });
+
+    expect(result).toMatchObject({
+      type: 'success',
+      sessionId: 'session-with-daemon-rejection',
+      pendingFirstInputTransferred: false,
+    });
+    expect(machineRpcWithServerScopeMock.mock.calls[0]?.[0]?.payload).toHaveProperty('pendingFirstInput');
   });
 
   it('keeps the modern spawn payload for compatible 0.1.0 dev daemon versions', async () => {

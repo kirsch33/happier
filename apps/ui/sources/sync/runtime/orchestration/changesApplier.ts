@@ -1,11 +1,13 @@
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 import {
     classifyChangeForCheckpoint,
+    getChangeSessionDraftHint,
     getChangeTargetMessageSeq,
     getChangeUpdatedMessageHint,
     type ChangeCheckpointBlockedReason,
     type PlannedChangeActions,
 } from './changesPlanner';
+import { canonicalSessionDraftAddressV1, type SessionDraftAddressV1 } from '@happier-dev/protocol';
 import { runTasksWithLimit } from './runTasksWithLimit';
 
 export type TodoSocketUpdate = Readonly<{
@@ -39,6 +41,7 @@ export async function applyPlannedChangeActions(params: {
     planned: PlannedChangeActions;
     credentials: AuthCredentials;
     isSessionMessagesLoaded: (sessionId: string) => boolean;
+    shouldCatchUpSessionMessages?: (sessionId: string) => boolean;
     getSessionMaterializedMaxSeq?: (sessionId: string) => number;
     concurrencyLimit?: number;
     invalidate: {
@@ -62,6 +65,7 @@ export async function applyPlannedChangeActions(params: {
     applyTodoSocketUpdates: (changes: TodoSocketUpdate[]) => Promise<void>;
     kvBulkGet: (credentials: AuthCredentials, keys: string[]) => Promise<{ values: TodoSocketUpdate[] }>;
     convergePendingForSession?: (sessionId: string) => Promise<void>;
+    materializeSessionDraft?: (address: SessionDraftAddressV1) => Promise<void>;
 }): Promise<PlannedChangesApplyResult> {
     const { planned } = params;
 
@@ -76,11 +80,17 @@ export async function applyPlannedChangeActions(params: {
     const failedTranscriptRepairSessionIds = new Set<string>();
     const completedPendingSessionIds = new Set<string>();
     const failedPendingSessionIds = new Set<string>();
+    const completedSessionDraftAddresses = new Set<string>();
+    const failedSessionDraftAddresses = new Set<string>();
     let sessionFolderAssignmentsRefreshFailed = false;
     let sessionOrganizationRefreshFailed = false;
-    const loadedCatchUpSessionIds = planned.sessionIdsToCatchUp.filter((sessionId) =>
+    const loadedSessionIds = planned.sessionIdsToCatchUp.filter((sessionId) =>
         params.isSessionMessagesLoaded(sessionId),
     );
+    const loadedCatchUpSessionIds = loadedSessionIds.filter((sessionId) =>
+        params.shouldCatchUpSessionMessages?.(sessionId) !== false,
+    );
+    const loadedCatchUpSessionIdSet = new Set(loadedCatchUpSessionIds);
     const transcriptRepairBySessionId = new Map(
         planned.sessionTranscriptRepairs.map((repair) => [repair.sessionId, repair] as const),
     );
@@ -156,24 +166,37 @@ export async function applyPlannedChangeActions(params: {
         });
     }
 
-    for (const sessionId of loadedCatchUpSessionIds) {
+    for (const sessionId of loadedSessionIds) {
+        const shouldCatchUpMessages = loadedCatchUpSessionIdSet.has(sessionId);
+        const repair = transcriptRepairBySessionId.get(sessionId);
+        if (!shouldCatchUpMessages && !repair) {
+            params.invalidateScmStatusForSession(sessionId);
+            continue;
+        }
         tasks.push(async () => {
-            try {
-                if (sessionsInvalidationDone) {
-                    const sessionsInvalidated = await sessionsInvalidationDone;
-                    if (!sessionsInvalidated) {
+            if (sessionsInvalidationDone) {
+                const sessionsInvalidated = await sessionsInvalidationDone;
+                if (!sessionsInvalidated) {
+                    if (shouldCatchUpMessages) {
                         failedMessageCatchUpSessionIds.add(sessionId);
-                        return;
                     }
+                    if (repair) {
+                        failedTranscriptRepairSessionIds.add(sessionId);
+                    }
+                    return;
                 }
-                await params.invalidateMessagesForSession(sessionId);
-                completedMessageCatchUpSessionIds.add(sessionId);
-            } catch {
-                failedMessageCatchUpSessionIds.add(sessionId);
-                return;
             }
 
-            const repair = transcriptRepairBySessionId.get(sessionId);
+            if (shouldCatchUpMessages) {
+                try {
+                    await params.invalidateMessagesForSession(sessionId);
+                    completedMessageCatchUpSessionIds.add(sessionId);
+                } catch {
+                    failedMessageCatchUpSessionIds.add(sessionId);
+                    return;
+                }
+            }
+
             if (repair) {
                 try {
                     if (!params.repairSessionTranscriptRevision) {
@@ -212,6 +235,22 @@ export async function applyPlannedChangeActions(params: {
                 completedPendingSessionIds.add(sessionId);
             } catch {
                 failedPendingSessionIds.add(sessionId);
+            }
+        });
+    }
+
+    for (const address of planned.sessionDraftAddresses) {
+        tasks.push(async () => {
+            const key = canonicalSessionDraftAddressV1(address);
+            try {
+                if (!params.materializeSessionDraft) {
+                    failedSessionDraftAddresses.add(key);
+                    return;
+                }
+                await params.materializeSessionDraft(address);
+                completedSessionDraftAddresses.add(key);
+            } catch {
+                failedSessionDraftAddresses.add(key);
             }
         });
     }
@@ -292,6 +331,25 @@ export async function applyPlannedChangeActions(params: {
             continue;
         }
 
+
+        if (classification.materializationProof === 'session-draft') {
+            const hint = getChangeSessionDraftHint(change);
+            const key = hint ? canonicalSessionDraftAddressV1(hint.address) : '';
+            if (!key || !completedSessionDraftAddresses.has(key) || failedSessionDraftAddresses.has(key)) {
+                return {
+                    status: 'partial',
+                    safeAdvanceCursor,
+                    blockedCursor: classification.cursor,
+                    blockedReason: 'partial-materialization',
+                    processedChanges,
+                    blockedChanges: planned.changes.length - processedChanges,
+                };
+            }
+            safeAdvanceCursor = classification.cursor;
+            processedChanges += 1;
+            continue;
+        }
+
         if (classification.materializationProof === 'session-folder-assignments') {
             if (sessionFolderAssignmentsRefreshFailed) {
                 return {
@@ -326,7 +384,7 @@ export async function applyPlannedChangeActions(params: {
 
         if (
             (classification.kind === 'session' || classification.kind === 'share')
-            && params.isSessionMessagesLoaded(classification.entityId)
+            && loadedCatchUpSessionIdSet.has(classification.entityId)
             && (!completedMessageCatchUpSessionIds.has(classification.entityId) || failedMessageCatchUpSessionIds.has(classification.entityId))
         ) {
             return {
@@ -360,7 +418,7 @@ export async function applyPlannedChangeActions(params: {
 
         if (
             (classification.kind === 'session' || classification.kind === 'share')
-            && params.isSessionMessagesLoaded(classification.entityId)
+            && loadedCatchUpSessionIdSet.has(classification.entityId)
         ) {
             const targetSeq = getChangeTargetMessageSeq(change);
             const materializedSeq = params.getSessionMaterializedMaxSeq?.(classification.entityId) ?? null;

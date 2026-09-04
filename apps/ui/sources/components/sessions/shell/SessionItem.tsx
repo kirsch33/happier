@@ -2,6 +2,7 @@ import React from 'react';
 import { Animated, Platform, Pressable, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
 import { GestureDetector, Swipeable, type ComposedGesture, type GestureType } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useRouter } from 'expo-router';
 
 import { Text, Text as RNText } from '@/components/ui/text/Text';
 import {
@@ -46,7 +47,14 @@ import {
     SESSION_LIST_ROW_HEIGHT_MINIMAL,
     SESSION_LIST_ROW_HEIGHT_MINIMAL_NATIVE_PHONE,
 } from './sessionListRowHeights';
-import { shouldUseReadableNativePhoneMinimalSessionRow } from './sessionListRowDensity';
+import {
+    SESSION_LIST_ROW_CORNER_RADIUS,
+    resolveSessionListRowIdentityMetrics,
+    SESSION_LIST_ROW_IDENTITY_METRICS,
+    SESSION_LIST_ROW_STATUS_TEXT_METRICS,
+    SESSION_LIST_ROW_TITLE_TEXT_METRICS,
+    shouldUseReadableNativePhoneMinimalSessionRow,
+} from './sessionListRowDensity';
 import { planSessionTagDisplay } from './sessionTagPlacement';
 import { useIsTablet } from '@/utils/platform/responsive';
 import type { SessionStatus } from '@/utils/sessions/sessionUtils';
@@ -69,18 +77,19 @@ import {
 } from '@/components/sessions/debug/sessionDebugInformation';
 import { copySessionDebugInformationToClipboard } from '@/components/sessions/debug/sessionDebugClipboard';
 import { Icon } from '@/components/ui/icons/Icon';
+import { Modal } from '@/modal';
 import {
     createCopySessionDebugInformationMenuItem,
     SESSION_COPY_DEBUG_INFORMATION_MENU_ITEM_ID,
 } from '@/components/sessions/debug/sessionDebugMenuItem';
+import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
+import { canForkConversation } from '@/sync/domains/sessionFork/forkUiSupport';
+import { deferOnWeb } from '@/utils/platform/deferOnWeb';
+import { resolveMachineTargetForSessionFromState } from '@/sync/ops/sessionMachineTarget';
+import { fireAndForget } from '@/utils/system/fireAndForget';
+import type { SessionForkReplaySettingsSource } from '@/sync/domains/sessionFork/resolveSessionForkReplayOptions';
 
-const AVATAR_SIZE_DEFAULT = 48;
-const AVATAR_SIZE_COMPACT = 30;
-const AVATAR_SIZE_MINIMAL = 18;
-const AVATAR_SIZE_MINIMAL_NATIVE_PHONE = 20;
 const SESSION_LIST_MINIMAL_IDENTITY_GAP = 8;
-const SESSION_LIST_AGENT_LOGO_SIZE_RATIO = 0.78;
-const SESSION_LIST_AGENT_LOGO_MIN_SIZE = 14;
 const CONTEXT_MENU_PRESS_SUPPRESSION_TIMEOUT_MS = 600;
 const CONTEXT_MENU_PRESS_IN_OPEN_DELAY_MS = 350;
 const CONTEXT_MENU_DEFERRED_ACTION_DELAY_MS = 0;
@@ -88,6 +97,7 @@ const SESSION_IDENTITY_SKELETON_ANIMATION_MS = 900;
 const SESSION_FOLDER_ROW_CHROME_INDENT_BASE = 38;
 const SESSION_FOLDER_ROW_CHROME_INDENT_STEP = 12;
 const SESSION_FOLDER_ROW_INDENT_CAP = 3;
+const SESSION_DELETE_DRAFT_MENU_ITEM_ID = 'session-draft.delete';
 
 type SessionItemActivityTimeMode = 'meaningful' | 'updatedAt';
 type SessionItemIdentityDisplay = 'avatar' | 'agentLogo' | 'none';
@@ -107,6 +117,7 @@ type SessionItemBaseProps = Readonly<{
     showServerBadge?: boolean;
     pinned?: boolean;
     onTogglePinned?: (() => void) | null;
+    onDeleteDraft?: (() => void | Promise<void>) | null;
     attentionStandingEnabled?: boolean;
     attentionStanding?: boolean;
     tags?: readonly string[];
@@ -135,6 +146,11 @@ type SessionItemBaseProps = Readonly<{
     onMoveToWorkspaceRoot?: () => void;
     onMoveUp?: () => void;
     onSelectFolderMoveMenuItem?: (itemId: string) => void;
+    forkActionContext?: Readonly<{
+        settings: SessionForkReplaySettingsSource | null;
+        replayEnabled: boolean;
+        executionRunsEnabled: boolean;
+    }>;
 }>;
 
 export type SessionItemProps = SessionItemBaseProps & Readonly<{
@@ -147,6 +163,7 @@ type SessionItemRenderProps = Omit<SessionItemBaseProps, 'activityTimeMode' | 's
     sessionNameResolved: string;
     sessionSubtitle: string;
     pendingCount: number;
+    draft: SessionListRowModel['draft'];
     /** Live agent work in this session, already named. `null` unless the person opted in (R-8). */
     agentActivityLabel: string | null;
     isSessionIdentityLoading: boolean;
@@ -160,10 +177,6 @@ type SessionItemRenderProps = Omit<SessionItemBaseProps, 'activityTimeMode' | 's
     sessionListActiveColorMode: SessionItemActiveColorMode;
     hideInactiveSessions: boolean;
 }>;
-
-function resolveSessionListAgentLogoSize(slotSize: number): number {
-    return Math.max(SESSION_LIST_AGENT_LOGO_MIN_SIZE, Math.round(slotSize * SESSION_LIST_AGENT_LOGO_SIZE_RATIO));
-}
 
 function normalizeSessionItemIdentityDisplay(value: unknown): SessionItemIdentityDisplay {
     return value === 'agentLogo' || value === 'none' ? value : 'avatar';
@@ -196,16 +209,16 @@ const stylesheet = StyleSheet.create((theme) => ({
         overflow: 'hidden',
     },
     sessionItemContainerFirst: {
-        borderTopLeftRadius: 12,
-        borderTopRightRadius: 12,
+        borderTopLeftRadius: SESSION_LIST_ROW_CORNER_RADIUS,
+        borderTopRightRadius: SESSION_LIST_ROW_CORNER_RADIUS,
     },
     sessionItemContainerLast: {
-        borderBottomLeftRadius: 12,
-        borderBottomRightRadius: 12,
+        borderBottomLeftRadius: SESSION_LIST_ROW_CORNER_RADIUS,
+        borderBottomRightRadius: SESSION_LIST_ROW_CORNER_RADIUS,
         marginBottom: 12,
     },
     sessionItemContainerSingle: {
-        borderRadius: 12,
+        borderRadius: SESSION_LIST_ROW_CORNER_RADIUS,
         marginBottom: 12,
     },
     sessionItem: {
@@ -219,13 +232,13 @@ const stylesheet = StyleSheet.create((theme) => ({
         borderColor: theme.colors.surface.base,
     },
     sessionItemFirst: {
-        borderTopLeftRadius: 12,
-        borderTopRightRadius: 12,
+        borderTopLeftRadius: SESSION_LIST_ROW_CORNER_RADIUS,
+        borderTopRightRadius: SESSION_LIST_ROW_CORNER_RADIUS,
         borderTopWidth: 2,
     },
     sessionItemLast: {
-        borderBottomLeftRadius: 12,
-        borderBottomRightRadius: 12,
+        borderBottomLeftRadius: SESSION_LIST_ROW_CORNER_RADIUS,
+        borderBottomRightRadius: SESSION_LIST_ROW_CORNER_RADIUS,
         borderBottomWidth: 2,
     },
     embeddedSeparator: {
@@ -253,44 +266,44 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     avatarContainer: {
         position: 'relative',
-        width: AVATAR_SIZE_DEFAULT,
-        height: AVATAR_SIZE_DEFAULT,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.default.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.default.slotSize,
         alignItems: 'center',
         justifyContent: 'center',
     },
     avatarContainerCompact: {
-        width: AVATAR_SIZE_COMPACT,
-        height: AVATAR_SIZE_COMPACT,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.compact.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.compact.slotSize,
     },
     avatarContainerMinimal: {
-        width: AVATAR_SIZE_MINIMAL,
-        height: AVATAR_SIZE_MINIMAL,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.minimal.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.minimal.slotSize,
     },
     avatarContainerMinimalNativePhone: {
-        width: AVATAR_SIZE_MINIMAL_NATIVE_PHONE,
-        height: AVATAR_SIZE_MINIMAL_NATIVE_PHONE,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.minimalNativePhone.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.minimalNativePhone.slotSize,
     },
     avatarLoading: {
-        width: AVATAR_SIZE_DEFAULT,
-        height: AVATAR_SIZE_DEFAULT,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.default.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.default.slotSize,
         borderRadius: 999,
         backgroundColor: theme.colors.surface.elevated,
     },
     avatarLoadingMinimal: {
-        width: AVATAR_SIZE_MINIMAL,
-        height: AVATAR_SIZE_MINIMAL,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.minimal.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.minimal.slotSize,
         borderRadius: 999,
         backgroundColor: theme.colors.surface.elevated,
     },
     avatarLoadingMinimalNativePhone: {
-        width: AVATAR_SIZE_MINIMAL_NATIVE_PHONE,
-        height: AVATAR_SIZE_MINIMAL_NATIVE_PHONE,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.minimalNativePhone.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.minimalNativePhone.slotSize,
         borderRadius: 999,
         backgroundColor: theme.colors.surface.elevated,
     },
     avatarLoadingCompact: {
-        width: AVATAR_SIZE_COMPACT,
-        height: AVATAR_SIZE_COMPACT,
+        width: SESSION_LIST_ROW_IDENTITY_METRICS.compact.slotSize,
+        height: SESSION_LIST_ROW_IDENTITY_METRICS.compact.slotSize,
         borderRadius: 999,
         backgroundColor: theme.colors.surface.elevated,
     },
@@ -333,6 +346,35 @@ const stylesheet = StyleSheet.create((theme) => ({
         bottom: -1,
         right: -1,
     },
+    draftBadge: {
+        alignItems: 'center',
+        borderRadius: 999,
+        backgroundColor: theme.colors.surface.elevated,
+        flexDirection: 'row',
+        gap: 3,
+        maxWidth: 88,
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+    },
+    draftBadgeCompact: {
+        maxWidth: 64,
+        paddingHorizontal: 4,
+        paddingVertical: 1,
+    },
+    draftBadgeMinimal: {
+        maxWidth: 22,
+        paddingHorizontal: 3,
+    },
+    draftBadgeText: {
+        color: theme.colors.text.secondary,
+        fontSize: 10,
+        ...Typography.default('semiBold'),
+    },
+    draftPreviewText: {
+        color: theme.colors.text.secondary,
+        fontSize: 12,
+        ...Typography.default(),
+    },
     sessionContent: {
         flex: 1,
         marginLeft: 14,
@@ -354,21 +396,19 @@ const stylesheet = StyleSheet.create((theme) => ({
         gap: 6,
     },
     sessionTitle: {
-        fontSize: 14,
+        ...SESSION_LIST_ROW_TITLE_TEXT_METRICS.default,
         flex: 1,
         ...Typography.default(),
         color: theme.colors.text.secondary,
     },
     sessionTitleCompact: {
-        fontSize: 14,
+        ...SESSION_LIST_ROW_TITLE_TEXT_METRICS.compact,
     },
     sessionTitleMinimal: {
-        fontSize: 12,
-        lineHeight: 16,
+        ...SESSION_LIST_ROW_TITLE_TEXT_METRICS.minimal,
     },
     sessionTitleMinimalNativePhone: {
-        fontSize: 14,
-        lineHeight: 18,
+        ...SESSION_LIST_ROW_TITLE_TEXT_METRICS.minimalNativePhone,
     },
     sessionTitleEmphasized: {
         ...Typography.default('semiBold'),
@@ -562,13 +602,11 @@ const stylesheet = StyleSheet.create((theme) => ({
         height: 12,
     },
     statusText: {
-        fontSize: 12,
-        lineHeight: 16,
+        ...SESSION_LIST_ROW_STATUS_TEXT_METRICS.default,
         ...Typography.default(),
     },
     statusTextCompact: {
-        fontSize: 11,
-        lineHeight: 11,
+        ...SESSION_LIST_ROW_STATUS_TEXT_METRICS.compact,
     },
     agentActivityCountText: {
         // Never truncated away by a long status: the count is the shortest thing on this line and
@@ -578,8 +616,7 @@ const stylesheet = StyleSheet.create((theme) => ({
         fontVariant: ['tabular-nums'],
     },
     statusTextMinimal: {
-        fontSize: 10,
-        lineHeight: 12,
+        ...SESSION_LIST_ROW_STATUS_TEXT_METRICS.minimal,
     },
     activityTime: {
         fontSize: 10,
@@ -618,6 +655,7 @@ const SessionItemContent = React.memo(
         showServerBadge,
         pinned,
         onTogglePinned,
+        onDeleteDraft,
         attentionStandingEnabled,
         attentionStanding,
         tags,
@@ -644,10 +682,12 @@ const SessionItemContent = React.memo(
         onMoveToWorkspaceRoot,
         onMoveUp,
         onSelectFolderMoveMenuItem,
+        forkActionContext,
         sessionStatus,
         sessionNameResolved,
         sessionSubtitle,
         pendingCount,
+        draft,
         agentActivityLabel,
         isSessionIdentityLoading,
         activityTimeLabel,
@@ -669,6 +709,11 @@ const SessionItemContent = React.memo(
         const attentionIndicatorAnimationEnabled = rowAttentionAnimationEnabled && workingIndicatorPaused !== true;
         const localDevModeEnabled = useLocalSetting('devModeEnabled');
         const devModeEnabled = isSessionDebugInformationEnabled(localDevModeEnabled);
+        const router = useRouter();
+        const agentSwitchingEnabled = useFeatureEnabled('sessions.agentSwitching', {
+            scopeKind: 'spawn',
+            serverId: serverId ?? null,
+        });
         const resolvedSelectionKey = selectionKey ?? '';
         const rowSelection = useOptionalSessionListSelectionRow(resolvedSelectionKey);
         const identitySkeletonOpacity = React.useRef(new Animated.Value(0.45)).current;
@@ -758,19 +803,106 @@ const SessionItemContent = React.memo(
                 providerSessionId,
             });
         }, [resolvedSession]);
-        const leadingMenuItems = React.useMemo(
-            () => devModeEnabled
-                ? [createCopySessionDebugInformationMenuItem({ iconColor: rowActionIconColor })]
-                : [],
-            [devModeEnabled, rowActionIconColor],
-        );
+        const confirmDeleteDraft = React.useCallback(async () => {
+            if (!draft || !onDeleteDraft) return;
+            const confirmed = await Modal.confirm(
+                t('sessionDrafts.delete.confirmTitle'),
+                t('sessionDrafts.delete.confirmDescription'),
+                {
+                    cancelText: t('common.cancel'),
+                    confirmText: t('common.delete'),
+                    destructive: true,
+                },
+            );
+            if (!confirmed) return;
+            try {
+                await onDeleteDraft();
+            } catch {
+                Modal.alert(t('common.error'), t('errors.unknownError'));
+            }
+        }, [draft, onDeleteDraft]);
+        const showForkAction = forkActionContext != null && canForkConversation({
+            session: resolvedSession,
+            replayEnabled: forkActionContext.replayEnabled,
+            agentSwitchingEnabled,
+        });
+        const openForkFlow = React.useCallback(() => {
+            deferOnWeb(() => {
+                fireAndForget((async () => {
+                    const { openSessionForkStrategyFlow } = await import(
+                        '@/components/sessions/fork/openSessionForkStrategyFlow'
+                    );
+                    const currentSession = storage.getState().sessions[resolvedSession.id] ?? resolvedSession;
+                    const reachableMachineTarget = resolveMachineTargetForSessionFromState(
+                        storage.getState(),
+                        resolvedSession.id,
+                    );
+                    openSessionForkStrategyFlow({
+                        sessionId: resolvedSession.id,
+                        forkSupportSource: currentSession,
+                        serverId: serverId ?? null,
+                        machineId: reachableMachineTarget?.machineId ?? currentSession.metadata?.machineId ?? null,
+                        forkPoint: { type: 'latest' },
+                        settings: forkActionContext?.settings ?? null,
+                        replayEnabled: forkActionContext?.replayEnabled === true,
+                        executionRunsEnabled: forkActionContext?.executionRunsEnabled === true,
+                        agentSwitchingEnabled,
+                        navigateToSession: (childSessionId, options) => {
+                            void navigateToSession(childSessionId, {
+                                serverId: options?.serverId ?? serverId ?? null,
+                            });
+                        },
+                        navigateToNewSession: (route) => {
+                            router.push(route as any);
+                        },
+                    });
+                })(), { tag: 'SessionItem.openSessionForkStrategyFlow' });
+            });
+        }, [
+            agentSwitchingEnabled,
+            forkActionContext,
+            navigateToSession,
+            resolvedSession,
+            router,
+            serverId,
+        ]);
+        const leadingMenuItems = React.useMemo(() => {
+            const items: DropdownMenuItem[] = [];
+            if (draft && onDeleteDraft) {
+                items.push({
+                    id: SESSION_DELETE_DRAFT_MENU_ITEM_ID,
+                    title: t('sessionDrafts.delete.action'),
+                    icon: <Icon name="trash" size={16} color={rowActionIconColor} />,
+                });
+            }
+            if (devModeEnabled) {
+                items.push(createCopySessionDebugInformationMenuItem({ iconColor: rowActionIconColor }));
+            }
+            if (showForkAction) {
+                items.push({
+                    id: 'session.fork',
+                    title: t('sessionInfo.forkSession'),
+                    subtitle: undefined,
+                    icon: <Icon name="git-branch" size={16} color={rowActionIconColor} />,
+                });
+            }
+            return items;
+        }, [devModeEnabled, draft, onDeleteDraft, rowActionIconColor, showForkAction]);
         const handleSelectLeadingMenuItem = React.useCallback(async (itemId: string) => {
+            if (itemId === SESSION_DELETE_DRAFT_MENU_ITEM_ID) {
+                await confirmDeleteDraft();
+                return;
+            }
+            if (itemId === 'session.fork') {
+                openForkFlow();
+                return;
+            }
             if (itemId !== SESSION_COPY_DEBUG_INFORMATION_MENU_ITEM_ID) return;
             const copied = await copySessionDebugInformationToClipboard(resolveSessionDebugInformation());
             if (copied) {
                 copyFeedback.markCopied(resolvedSession.id);
             }
-        }, [copyFeedback, resolvedSession.id, resolveSessionDebugInformation]);
+        }, [confirmDeleteDraft, copyFeedback, openForkFlow, resolvedSession.id, resolveSessionDebugInformation]);
         const supportsPin = typeof onTogglePinned === 'function';
         const supportsTag = tagsEnabled === true && typeof onSetTags === 'function';
         const handleTogglePinnedAction = React.useCallback(() => {
@@ -984,8 +1116,9 @@ const SessionItemContent = React.memo(
             if (onMoveDown) actions.push({ name: 'moveDown', label: t('common.moveDown') });
             if (onMoveToFolder) actions.push({ name: 'moveToFolder', label: t('sessionsList.moveToFolder') });
             if (onMoveToWorkspaceRoot) actions.push({ name: 'moveToWorkspaceRoot', label: t('sessionsList.moveToWorkspaceRoot') });
+            if (draft && onDeleteDraft) actions.push({ name: 'deleteDraft', label: t('sessionDrafts.delete.action') });
             return actions;
-        }, [onMoveDown, onMoveToFolder, onMoveToWorkspaceRoot, onMoveUp]);
+        }, [draft, onDeleteDraft, onMoveDown, onMoveToFolder, onMoveToWorkspaceRoot, onMoveUp]);
 
         const handleAccessibilityAction = React.useCallback((event: { nativeEvent?: { actionName?: string } }) => {
             switch (event.nativeEvent?.actionName) {
@@ -1001,8 +1134,11 @@ const SessionItemContent = React.memo(
                 case 'moveToWorkspaceRoot':
                     onMoveToWorkspaceRoot?.();
                     break;
+                case 'deleteDraft':
+                    void confirmDeleteDraft();
+                    break;
             }
-        }, [onMoveDown, onMoveToFolder, onMoveToWorkspaceRoot, onMoveUp]);
+        }, [confirmDeleteDraft, onMoveDown, onMoveToFolder, onMoveToWorkspaceRoot, onMoveUp]);
 
         const avatarId = React.useMemo(() => {
             return getSessionAvatarId(resolvedSession);
@@ -1083,14 +1219,12 @@ const SessionItemContent = React.memo(
         }, [clearContextMenuPressInTimer, enableLongPressContextMenu, setContextMenuOpen]);
 
         const shouldRenderAvatarMonochrome = resolvedSession.active !== true || !sessionStatus.isConnected;
-        const avatarSize = isMinimal
-            ? useReadableNativePhoneMinimalRow
-                ? AVATAR_SIZE_MINIMAL_NATIVE_PHONE
-                : AVATAR_SIZE_MINIMAL
-            : compact
-                ? AVATAR_SIZE_COMPACT
-                : AVATAR_SIZE_DEFAULT;
-        const agentLogoSize = resolveSessionListAgentLogoSize(avatarSize);
+        const identityMetrics = resolveSessionListRowIdentityMetrics({
+            density: isMinimal ? 'minimal' : compact ? 'compact' : 'default',
+            readableNativePhoneMinimal: useReadableNativePhoneMinimalRow,
+        });
+        const avatarSize = identityMetrics.slotSize;
+        const agentLogoSize = identityMetrics.agentLogoSize;
         const agentLogoId = resolveAgentIdFromFlavor(resolvedSession.metadata?.flavor) ?? DEFAULT_AGENT_ID;
         const normalizedFolderDepth = typeof folderDepth === 'number' && Number.isFinite(folderDepth)
             ? Math.max(0, Math.min(SESSION_FOLDER_ROW_INDENT_CAP, Math.trunc(folderDepth)))
@@ -1248,11 +1382,6 @@ const SessionItemContent = React.memo(
                                 </Text>
                             </View>
                         ) : null}
-                        {!isMinimal && shouldRenderSessionListAvatar && 'draft' in resolvedSession && resolvedSession.draft ? (
-                            <View style={[styles.draftIconContainer, compact ? styles.draftIconContainerCompact : null]}>
-                                <Icon name="pencil-simple" size={compact ? 10 : 11} color={theme.colors.text.secondary} />
-                            </View>
-                        ) : null}
                     </View>
                 ) : null}
                 <View
@@ -1287,9 +1416,38 @@ const SessionItemContent = React.memo(
                                 </Text>
                             </View>
                         ) : null}
+                        {draft ? (
+                            <View
+                                testID={`session-list-draft-indicator:${resolvedSession.id}`}
+                                accessible={true}
+                                accessibilityRole="text"
+                                accessibilityLabel={draft.preview ? `${t('sessionDrafts.badge')}, ${draft.preview}` : t('sessionDrafts.badge')}
+                                accessibilityHint={t('sessionDrafts.continueEditing')}
+                                style={[
+                                    styles.draftBadge,
+                                    compact ? styles.draftBadgeCompact : null,
+                                    isMinimal ? styles.draftBadgeMinimal : null,
+                                ]}
+                            >
+                                <Icon name="pencil-simple" size={compact ? 10 : 11} color={theme.colors.text.secondary} />
+                                {!isMinimal ? (
+                                    <Text style={styles.draftBadgeText} numberOfLines={1}>
+                                        {t('sessionDrafts.badge')}
+                                    </Text>
+                                ) : null}
+                            </View>
+                        ) : null}
                     </View>
 
-                    {showStandardSecondaryLine ? (
+                    {draft && !compact && draft.preview ? (
+                        <Text
+                            testID={`session-list-draft-preview:${resolvedSession.id}`}
+                            style={styles.draftPreviewText}
+                            numberOfLines={1}
+                        >
+                            {`${t('sessionDrafts.badge')} · ${draft.preview}`}
+                        </Text>
+                    ) : showStandardSecondaryLine ? (
                         shouldShowIdentitySubtitleSkeleton ? (
                             <Animated.View
                                 testID={`session-list-subtitle-loading-${resolvedSession.id}`}
@@ -1686,6 +1844,7 @@ function SessionItemFromRowModel(props: SessionItemProps & { rowModel: SessionLi
             sessionNameResolved={rowModel.title}
             sessionSubtitle={itemProps.subtitleOverride ?? rowModel.subtitle}
             pendingCount={rowModel.pendingCount}
+            draft={rowModel.draft}
             agentActivityLabel={rowModel.agentActivityLabel}
             isSessionIdentityLoading={rowModel.isIdentityLoading}
             activityTimeLabel={rowModel.activity.label}

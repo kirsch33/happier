@@ -18,7 +18,7 @@ import {
     type FilesystemAccessPolicy,
 } from '@/rpc/handlers/fileSystem/accessPolicy/filesystemAccessPolicy';
 import type { ScmConnectedAccountCredentialResolver } from '@/scm/types';
-import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
+import { encodeBase64, decodeBase64, encrypt, decrypt, getRandomBytes } from './encryption';
 import { backoff } from '@/utils/time';
 import { createConnectedServicesProjectionRetryScheduler } from './connectedServices/connectedServicesProjectionRetryScheduler';
 import { isConnectedServiceGenerationReconciliationNotAcknowledgeableError } from '@/daemon/connectedServices/accountGroups/generation/reconcileConnectedServiceAuthGroupGenerations';
@@ -26,6 +26,8 @@ import { RpcHandlerManager, type RpcHandlerRegistrationReadiness } from './rpc/R
 import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
 import { RPC_METHODS } from '@happier-dev/protocol/rpc';
 import {
+    sealAccountScopedBlobCiphertext,
+    type ActionOperationSnapshotV1,
     type DirectSessionTranscriptDeltaEphemeral,
     type MachineTransferReceiveEnvelope,
     type MachineTransferSendEnvelope,
@@ -114,6 +116,7 @@ const REQUIRED_MACHINE_CONTROL_RPC_METHODS = Object.freeze([
     RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     RPC_METHODS.DAEMON_SPAWN_SESSION_RESOLVE,
     RPC_METHODS.STOP_SESSION,
+    RPC_METHODS.DAEMON_SESSION_HANDOFF_CAPABILITY_V2_GET,
 ]);
 const MACHINE_CONTROL_RPC_REGISTRATION_TIMEOUT_MS = 10_000;
 
@@ -398,6 +401,7 @@ export class ApiMachineClient {
         spawnSession,
         spawnSessionForHandoff,
         resolveSpawnSessionByNonce,
+        abandonSpawnSessionByNonce,
         stopSession,
         isSessionActive,
         loadLocalSessionMetadata,
@@ -413,6 +417,7 @@ export class ApiMachineClient {
                 spawnSession,
                 ...(spawnSessionForHandoff ? { spawnSessionForHandoff } : {}),
                 ...(resolveSpawnSessionByNonce ? { resolveSpawnSessionByNonce } : {}),
+                ...(abandonSpawnSessionByNonce ? { abandonSpawnSessionByNonce } : {}),
                 stopSession,
                 ...(isSessionActive ? { isSessionActive } : {}),
                 ...(loadLocalSessionMetadata ? { loadLocalSessionMetadata } : {}),
@@ -429,6 +434,12 @@ export class ApiMachineClient {
                 emitDirectSessionTranscriptUpdate:
                     deps?.emitDirectSessionTranscriptUpdate
                     ?? ((payload) => this.emitDirectSessionTranscriptUpdate(payload)),
+                emitActionOperationRevision: (snapshot) => this.emitActionOperationRevision(snapshot),
+                getActionOperationScope: async () => {
+                    const accountId = await this.getAccountId();
+                    if (!accountId) throw new Error('Action operation account scope is unavailable');
+                    return { accountId, machineId: this.machine.id };
+                },
             },
         });
         this.rpcLifecycleRegistrations.push(machineRpcLifecycleRegistration);
@@ -551,6 +562,26 @@ export class ApiMachineClient {
     emitDirectSessionTranscriptUpdate(payload: DirectSessionTranscriptDeltaEphemeral): void {
         if (!this.socket) return;
         this.socket.emit('direct-session-transcript-delta', payload);
+    }
+
+    emitActionOperationRevision(snapshot: ActionOperationSnapshotV1): void {
+        if (!this.socket) return;
+        const material = this.machine.encryptionVariant === 'dataKey'
+            ? { type: 'dataKey' as const, machineKey: this.machine.encryptionKey }
+            : { type: 'legacy' as const, secret: this.machine.encryptionKey };
+        this.socket.emit('action-operation-updated', {
+            type: 'action-operation-updated',
+            machineId: this.machine.id,
+            content: {
+                t: 'encrypted',
+                c: sealAccountScopedBlobCiphertext({
+                    kind: 'action_operation_snapshot',
+                    material,
+                    payload: snapshot,
+                    randomBytes: getRandomBytes,
+                }),
+            },
+        });
     }
 
     private dispatchUpdate(update: Update): boolean {
@@ -782,11 +813,29 @@ export class ApiMachineClient {
                                 missingMethods: unregisteredCoreHandlers,
                             });
                         } else {
-                            const registrationResult = await this.publishMachineControlRunningWhenReady({
+                            let registrationResult = await this.publishMachineControlRunningWhenReady({
                                 socket,
                                 transportGeneration,
                                 timeoutMs: MACHINE_CONTROL_RPC_REGISTRATION_TIMEOUT_MS,
                             });
+                            const isCurrentTransport = () => (
+                                this.socket === socket
+                                && this.activeTransportGeneration === transportGeneration
+                                && socket.connected === true
+                            );
+                            if (
+                                registrationResult.readiness.status === 'timeout'
+                                && isCurrentTransport()
+                            ) {
+                                this.rpcHandlerManager.replayUnacknowledgedHandlerRegistrations(
+                                    REQUIRED_MACHINE_CONTROL_RPC_METHODS,
+                                );
+                                registrationResult = await this.publishMachineControlRunningWhenReady({
+                                    socket,
+                                    transportGeneration,
+                                    timeoutMs: MACHINE_CONTROL_RPC_REGISTRATION_TIMEOUT_MS,
+                                });
+                            }
                             controlReady = registrationResult.ready;
                             if (registrationResult.readiness.status !== 'ready') {
                                 logger.warn('[API MACHINE] Machine-control registration did not become ready; daemon remains offline', {

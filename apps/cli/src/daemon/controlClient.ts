@@ -69,9 +69,11 @@ import {
   type StopSessionResult,
 } from './sessions/stopSessionContract';
 import { readProcessRunState } from './processRunState';
+import { classifyDaemonLifecycleProcessByPid } from './doctor';
 
 export type DaemonControlRequestOptions = {
-  timeoutMs?: number;
+  /** `null` leaves a local control request owned by caller/daemon lifecycle. */
+  timeoutMs?: number | null;
   signal?: AbortSignal;
 };
 
@@ -162,7 +164,8 @@ function resolvePositiveIntValue(
   return Math.min(bounds.max, Math.max(bounds.min, Math.trunc(parsed)));
 }
 
-function resolveDaemonControlTimeoutMs(path: string, options: DaemonControlRequestOptions): number {
+function resolveDaemonControlTimeoutMs(path: string, options: DaemonControlRequestOptions): number | null {
+  if (options.timeoutMs === null) return null;
   if (options.timeoutMs !== undefined) {
     return resolvePositiveIntValue(options.timeoutMs, DEFAULT_DAEMON_HTTP_TIMEOUT_MS, { min: 100, max: 300_000 });
   }
@@ -231,11 +234,10 @@ async function inspectDaemonLockStartupProgress(): Promise<DaemonRunningInspecti
     return null;
   }
 
-  const { findHappyProcessByPid } = await import('@/daemon/doctor');
-  const proc = await findHappyProcessByPid(lockPid).catch(() => null);
-  const safeToTreatAsStarting = proc?.type === 'daemon' || proc?.type === 'dev-daemon';
-  if (!safeToTreatAsStarting) {
-    if (proc) {
+  const ownerProcess = await classifyDaemonLifecycleProcessByPid(lockPid)
+    .catch(() => ({ kind: 'unknown' as const }));
+  if (ownerProcess.kind !== 'daemon') {
+    if (ownerProcess.kind === 'not_daemon') {
       admittedDaemonStartupLocks.delete(lockPid);
       return null;
     }
@@ -298,6 +300,9 @@ export async function inspectDaemonRunningStateAndCleanupStaleState(): Promise<D
     return { status: 'starting', state };
   }
 
+  const ownerProcess = await classifyDaemonLifecycleProcessByPid(state.pid)
+    .catch(() => ({ kind: 'unknown' as const }));
+
   try {
     if (state.controlToken) {
       const liveness = await probeDaemonAuthenticatedControl({
@@ -314,14 +319,30 @@ export async function inspectDaemonRunningStateAndCleanupStaleState(): Promise<D
         logger.debug('[DAEMON RUN] Daemon PID stopped during authenticated liveness probe, leaving daemon-owned state for startup replacement');
         return { status: 'not-running' };
       }
+      if (liveness === 'running') {
+        return { status: 'running', state };
+      }
       if (liveness === 'unreachable') {
+        if (ownerProcess.kind === 'not_daemon') {
+          logger.debug('[DAEMON RUN] Daemon control is unreachable and its state PID belongs to an unrelated process, leaving state for startup replacement');
+          return { status: 'not-running' };
+        }
         logger.debug('[DAEMON RUN] Daemon /ping unreachable while PID is alive, treating daemon as starting or busy and keeping state');
         return { status: 'starting', state };
       }
     }
 
+    if (ownerProcess.kind === 'not_daemon') {
+      logger.debug('[DAEMON RUN] Daemon state PID belongs to an unrelated process, leaving state for startup replacement');
+      return { status: 'not-running' };
+    }
+
     return { status: 'running', state };
   } catch {
+    if (ownerProcess.kind === 'not_daemon') {
+      logger.debug('[DAEMON RUN] Daemon control probe failed and its state PID belongs to an unrelated process, leaving state for startup replacement');
+      return { status: 'not-running' };
+    }
     const ageMs = resolveDaemonStateAgeMs(state);
     if (ageMs !== null && ageMs < DAEMON_STATE_FRESHNESS_GRACE_MS) {
       logger.debug('[DAEMON RUN] Daemon PID is missing but state heartbeat is fresh, keeping state as startup in progress');
@@ -364,14 +385,15 @@ async function daemonPost(path: string, body?: any, options: DaemonPostOptions =
     if (authToken) {
       headers['x-happier-daemon-token'] = authToken;
     }
+    const timeoutSignal = timeout === null ? null : AbortSignal.timeout(timeout);
+    const signal = options.signal
+      ? (timeoutSignal ? AbortSignal.any([options.signal, timeoutSignal]) : options.signal)
+      : timeoutSignal;
     const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body || {}),
-      // Mostly increased for stress test
-      signal: options.signal
-        ? AbortSignal.any([options.signal, AbortSignal.timeout(timeout)])
-        : AbortSignal.timeout(timeout)
+      ...(signal ? { signal } : {}),
     });
     
     const rawBody = await response.text();
@@ -510,11 +532,10 @@ export async function requestDaemonSessionConnectedServiceAuthSwitch(
 }
 
 /**
- * The group-generation apply fans out to EVERY live session bound to the group, and each
- * per-session switch may legitimately wait a full turn-boundary deferral window (60s) before it can
- * restart the session. The generic 10s daemonPost default aborted the ack while the daemon-side
- * apply kept running (observed live 2026-07-10 16:29) — the UI then reported a divergence for a
- * switch that succeeded. Bound the ack with deferral + restart margin instead.
+ * Runtime-auth recovery may fan out to every live session bound to a group. The report is staged
+ * durably and daemon-side work continues if the client stops waiting, so a default wall-clock
+ * deadline would manufacture an ambiguous failure. Callers may still supply an explicit timeout
+ * or lifecycle signal when they own a narrower cancellation contract.
  */
 export async function notifyDaemonConnectedServiceRuntimeAuthFailure(
   body: Readonly<{
@@ -532,7 +553,13 @@ export async function notifyDaemonConnectedServiceRuntimeAuthFailure(
     switchesThisTurn: body.switchesThisTurn ?? 0,
     classification: body.classification,
     ...(body.resumePromptMode ? { resumePromptMode: body.resumePromptMode } : {}),
-  }, options);
+  }, {
+    // The report is staged durably before delivery and the daemon coalesces
+    // retries by reportId. Aborting this acknowledgement on a wall clock only
+    // makes a still-running recovery ambiguous to the caller.
+    timeoutMs: null,
+    ...options,
+  });
 }
 
 export async function notifyDaemonConnectedServiceTurnLifecycle(
@@ -1075,10 +1102,9 @@ function readDaemonLockPid(): number | null {
 }
 
 async function forceKillKnownDaemonPid(pid: number): Promise<void> {
-  const { findHappyProcessByPid } = await import('@/daemon/doctor');
-  const proc = await findHappyProcessByPid(pid);
-  const safeToKill = proc?.type === 'daemon' || proc?.type === 'dev-daemon';
-  if (!safeToKill) {
+  const ownerProcess = await classifyDaemonLifecycleProcessByPid(pid)
+    .catch(() => ({ kind: 'unknown' as const }));
+  if (ownerProcess.kind !== 'daemon') {
     logger.warn(`[CONTROL CLIENT] Refusing to force-kill PID ${pid} (does not look like a happier daemon process)`);
     return;
   }

@@ -27,6 +27,7 @@ import {
     useSessionConnectedServicesAuthSwitch,
     type SessionConnectedServicesAuthSwitchRestartState,
 } from '@/components/sessions/agentInput/hooks/useSessionConnectedServicesAuthSwitch';
+import { useExistingSessionMcpSelection } from '@/components/sessions/agentInput/hooks/useExistingSessionMcpSelection';
 import {
     deriveSessionIntentionalRestartSignals,
     resolveSessionIntentionalRestartRecoveryEvidenceAtMs,
@@ -38,10 +39,12 @@ import {
 import type { ComposerSuggestionKindId } from '@/components/autocomplete/composerSuggestionKinds';
 import { resolveSessionComposerSuggestions } from '@/components/sessions/agentInput/sessionComposerSuggestions';
 import { ChatHeaderView } from '@/components/sessions/transcript/ChatHeaderView';
+import { recordTranscriptBlank } from '@/components/sessions/transcript/viewport/driver/transcriptViewportWriteDiagnostics';
 import { SessionHeaderActionMenu } from '@/components/sessions/actions/SessionHeaderActionMenu';
 import { SESSION_HEADER_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
 import { SessionHeaderIconWithCount } from '@/components/sessions/actions/SessionHeaderIconWithCount';
 import { SessionHeaderInfoButton } from '@/components/sessions/actions/SessionHeaderInfoButton';
+import { ActionOperationActivityButton } from '@/components/inbox/actionOperations/ActionOperationActivityButton';
 import { SessionHeaderRightSidebarButton } from '@/components/sessions/actions/SessionHeaderRightSidebarButton';
 import { SessionHeaderSubagentsButton } from '@/components/sessions/actions/SessionHeaderSubagentsButton';
 import { SessionHeaderTerminalButton } from '@/components/sessions/actions/SessionHeaderTerminalButton';
@@ -62,6 +65,14 @@ import type { DropdownMenuItem } from '@/components/ui/forms/dropdown/DropdownMe
 import { EmptyMessages } from '@/components/ui/empty/EmptyMessages';
 import { VoiceSurface } from '@/components/voice/surface/VoiceSurface';
 import { useDraft } from '@/hooks/session/useDraft';
+import {
+    areSessionDraftCurrentnessCapturesEqual,
+    type SessionDraftCurrentness,
+} from '@/sync/ops/sessionDrafts/sessionDraftRepository';
+import {
+    SessionDraftConflictResolution,
+    useSessionDraftConflictComposerBanner,
+} from '@/components/sessions/drafts/SessionDraftConflictResolution';
 import { useNavigateToSession } from '@/hooks/session/useNavigateToSession';
 import { useSessionAgentInputComposerPersistence } from '@/hooks/session/useSessionAgentInputComposerPersistence';
 import { useReducedMotionPreference } from '@/hooks/ui/useReducedMotionPreference';
@@ -70,6 +81,7 @@ import {
     clearComposerAfterOutboundHandoff,
     restoreComposerAfterFailedOutboundHandoff,
 } from '@/hooks/session/sessionComposerSendCoordinator';
+import { useFeatureDecision } from '@/hooks/server/useFeatureDecision';
 import { useFeatureEnabled } from '@/hooks/server/useFeatureEnabled';
 import { useSessionExecutionRunsSupported } from '@/hooks/server/useSessionExecutionRunsSupported';
 import { buildScopedSessionRouteHref } from '@/hooks/session/sessionRouteServerScope';
@@ -77,6 +89,8 @@ import { useWarmRepositoryDirectoryCacheOnSessionOpen } from '@/hooks/session/fi
 import { Modal } from '@/modal';
 import { useScmSessionAutoRefresh } from '@/scm/refresh/useScmSessionAutoRefresh';
 import { buildNewSessionSourceContextNavigation } from '@/components/sessions/new/navigation/newSessionSourceContextNavigation';
+import { resolveNewSessionDraftRouteIdentity } from '@/components/sessions/new/navigation/newSessionDraftRouteIdentity';
+import { buildNewSessionLaunchRouteParams } from '@/components/sessions/new/navigation/newSessionRouteParams';
 import { sessionAbort, resumeSession } from '@/sync/ops';
 import { storage, useActiveServerAccountScope, useEndpointConnectivity, useIsDataReady, useLaunchSelectionMachines, useLocalSetting, useMachine, useOpenApprovalArtifactsForSession, useProfile, useRealtimeStatus, useSessionAutomationsEnabledCount, useSessionConnectedServiceAccountSwitchEvents, useSessionMessages, useSessionOrganizationProjection, useSessionPendingMessages, useSessionTranscriptIds, useSessionUsage, useSessionVisibleReadSeq, useSetting, useSettingMutable, useSettings, useSocketStatus, useSyncError, useWorkspaceReviewCommentsDrafts } from '@/sync/domains/state/storage';
 import { canContinueSessionWithFreshSpawn, canResumeSessionWithOptions } from '@/agents/runtime/resumeCapabilities';
@@ -114,16 +128,16 @@ import {
     filterReviewCommentDraftsIncludedInPrompt,
 } from '@/sync/domains/input/reviewComments/reviewCommentPrompt';
 import { buildReviewCommentsOutboundMessage } from '@/sync/domains/input/reviewComments/buildReviewCommentsOutboundMessage';
+import {
+    buildReviewCommentsV1MetaPayload,
+    parseReviewCommentsV1,
+} from '@/sync/domains/input/reviewComments/reviewCommentMeta';
 import { resolveSessionComposerSend } from '@/sync/domains/input/slashCommands/resolveSessionComposerSend';
 import { expandPromptTemplateInvocation } from '@/sync/domains/input/slashCommands/expandPromptTemplateInvocation';
 import { resolvePromptInvocationComposerSendAction } from '@/sync/domains/input/slashCommands/promptInvocationBehavior';
-import {
-    clearSessionDraftValue,
-    clearSessionDraftValues,
-    flushSessionDraftValues,
-    readSessionDraftValue,
-    writeSessionDraftValue,
-} from '@/sync/domains/input/draftValues/sessionDraftValueStore';
+import type { SessionArmedAgentContinuationSubmission } from '@/sync/domains/input/draftValues/sessionDraftValueTypes';
+import { existingSessionDraftSemanticValues } from '@/sync/domains/input/drafts/existingSessionDraftSemanticValues';
+import { serverAccountScopeKeySuffix } from '@/sync/domains/scope/serverAccountScope';
 import type { AgentInputLocalUiStateV1 } from '@/sync/domains/input/draftValues/agentInputLocalUiStateStore';
 import { applyPermissionModeSelection } from '@/sync/domains/permissions/permissionModeApply';
 import {
@@ -182,8 +196,8 @@ import type { SessionRouteHydrationState } from '@/sync/domains/session/sessionR
 import { confirmNonSteerableSend } from '@/components/sessions/agentInput/confirmNonSteerableSend';
 import { canApplySteerConfigInFlight, decideSessionMessageDelivery, type MessageSendMode } from '@/sync/domains/session/control/submitMode';
 import {
+    buildArmedAgentContinuationTransitionInput,
     continueSessionWithArmedAgent,
-    isArmedAgentContinuationOutcomeUnsettled,
     reconcileArmedAgentContinuationDisposition,
     type ArmedAgentContinuationCanonicalFacts,
     type ArmedAgentContinuationInputCustody,
@@ -286,6 +300,7 @@ import { useSessionResumeRequestListener } from '@/components/sessions/model/ses
 import { resolveSessionResumeMachineTarget } from './sessionResumeMachineTarget';
 import { useDirectSessionTakeover } from '@/components/sessions/model/useDirectSessionTakeover';
 import { useDirectSessionRuntime } from '@/components/sessions/model/useDirectSessionRuntime';
+import { SessionDirectSessionRuntimeProvider } from '@/components/sessions/model/useSessionDirectSessionRuntime';
 import { SessionWarningActionBanner } from './SessionWarningActionBanner';
 import { ComposerAuxiliaryFrame } from './view/ComposerAuxiliaryFrame';
 import {
@@ -299,6 +314,11 @@ import {
     type StaleSessionRunnerRestartViewStatus,
 } from '@/components/sessions/sessionRunner/staleSessionRunnerNoticePresentation';
 import {
+    buildMcpSelectionRestartNoticePresentation,
+    type McpSelectionRestartNoticeTranslate,
+    type McpSelectionRestartOperationStatus,
+} from '@/components/sessions/mcp/mcpSelectionRestartNoticePresentation';
+import {
     readActionableStaleSessionRunnerStatus,
     SESSION_RUNNER_RUNTIME_STATE_FIELD_ID,
 } from '@/sync/domains/sessionRunnerRuntime/sessionRunnerRuntimeStatus';
@@ -309,6 +329,7 @@ import {
 } from '@/sync/domains/sessionRunnerRuntime/sessionRunnerRuntimeStatusRetention';
 import {
     getSessionRunnerRuntimeStatus,
+    restartSessionRunnerForConfigurationWithObserve,
     restartStaleSessionRunnerWithObserve,
     type RestartStaleSessionRunnerResult,
 } from '@/sync/ops/sessionRunnerRestart';
@@ -329,6 +350,7 @@ import { isMachineOnline } from '@/utils/sessions/machineUtils';
 import { readDirectSessionLink } from '@/sync/domains/session/directSessions/readDirectSessionLink';
 import type { SessionParticipantTarget } from '@/sync/domains/session/participants/participantTargets';
 import type { PendingMessage } from '@/sync/domains/state/storageTypes';
+import { resolvePendingActivationBanner } from '@/components/sessions/pending/resolvePendingActivationBanner';
 import type { StorageState } from '@/sync/store/types';
 
 /**
@@ -378,8 +400,6 @@ function selectCanonicalOutboundHandoffForLocalId(
  * safe). A subscriber must use the selector above instead: this answer is stale
  * the moment the pending row or the transcript row lands.
  */
-const ARMED_AGENT_CONTINUATION_SUBMISSION_FIELD_ID = 'routing.agentContinuationSubmission' as const;
-
 function readCanonicalOutboundHandoffForLocalId(
     sessionId: string,
     localId: string | null,
@@ -391,6 +411,13 @@ function readCanonicalOutboundHandoffForLocalId(
 function hasCanonicalOutboundHandoffForLocalId(sessionId: string, localId: string | null): boolean {
     return readCanonicalOutboundHandoffForLocalId(sessionId, localId) !== 'absent';
 }
+
+const SESSION_COMPOSER_SEMANTIC_DRAFT_FIELD_IDS = [
+    'composer.mentions',
+    'routing.recipient',
+    'routing.executionRunDelivery',
+] as const;
+
 import {
     isHiddenSystemSession,
     ConnectedServiceIdSchema,
@@ -406,6 +433,7 @@ import { resolveNextOptimisticAcpConfigOptionOverrides } from './resolveNextOpti
 import { useSessionViewShellSession, useSessionViewShellSessionSeq } from './sessionViewStableSession';
 import {
     isEmptyPendingMessageComposerSemanticDraftSnapshot,
+    readPendingMessageComposerSemanticDraftSnapshot,
     type PendingMessageComposerEditState,
     type PendingMessageComposerSemanticDraftSnapshot as ComposerSemanticDraftSnapshot,
 } from './pendingMessageComposerEditSnapshot';
@@ -422,8 +450,8 @@ import {
 import {
     buildSessionUsageLimitRecoveryPresentation,
     buildSessionUsageLimitStatusBadgePresentation,
+    translateSessionUsageLimitRecovery,
     type SessionUsageLimitRecoveryActionKind,
-    type SessionUsageLimitRecoveryTranslate,
     type UsageLimitRecoveryOperationStatus,
 } from '@/components/sessions/usageLimitRecovery/sessionUsageLimitRecoveryPresentation';
 import { hasMeaningfulActivityAfterRuntimeIssue } from '@/components/sessions/usageLimitRecovery/sessionUsageLimitActivityStaleness';
@@ -830,7 +858,6 @@ type SessionViewLoadedProps = Readonly<{
 type SessionViewLoadedWithPendingMessagesProps = Omit<
     SessionViewLoadedProps,
     'agentActivityCounts'
-    | 'directSessionRuntime'
     | 'participantTargets'
     | 'pendingMessages'
 >;
@@ -841,10 +868,6 @@ const SessionViewLoadedWithPendingMessages = React.memo(function SessionViewLoad
     props: SessionViewLoadedWithPendingMessagesProps,
 ) {
     const { messages: pendingMessages } = useSessionPendingMessages(props.sessionId);
-    const directSessionRuntime = useDirectSessionRuntime({
-        sessionId: props.sessionId,
-        metadata: props.session.metadata ?? null,
-    });
     // One roster derivation for this subtree. The composer badge needs a count and the routing
     // controls need the recipient targets, and both come out of the same merged activity — deriving
     // the roster twice here would double the work `useSessionSubagents` does on every subagent-
@@ -855,7 +878,7 @@ const SessionViewLoadedWithPendingMessages = React.memo(function SessionViewLoad
     // transcript enrichment is the Agents pane's cost to pay, not the composer's.
     const agentActivity = useSessionAgentActivity({
         sessionId: props.sessionId,
-        directSessionRuntime,
+        directSessionRuntime: props.directSessionRuntime,
     });
     const derivedParticipantTargets = React.useMemo(
         () => deriveSessionSubagentRecipients(agentActivity.subagents),
@@ -868,7 +891,6 @@ const SessionViewLoadedWithPendingMessages = React.memo(function SessionViewLoad
             <MemoizedSessionViewLoaded
                 {...props}
                 agentActivityCounts={agentActivity.counts}
-                directSessionRuntime={directSessionRuntime}
                 participantTargets={participantTargets}
                 pendingMessages={pendingMessages}
             />
@@ -883,6 +905,7 @@ function readParticipantTargetKey(target: SessionParticipantTarget): string {
 type SessionHeaderRightElementProps = Readonly<{
     sessionId: string;
     session: Session;
+    directSessionRuntime: ReturnType<typeof useDirectSessionRuntime>;
     paneScopeId: string;
     currentSessionRouteServerId: string;
     mobileWorkspaceExperienceToggleActionId: string;
@@ -911,16 +934,12 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
     const sessionExecutionRunsSupported = useSessionExecutionRunsSupported(props.sessionId, {
         serverId: props.currentSessionRouteServerId,
     });
-    const directSessionRuntime = useDirectSessionRuntime({
-        sessionId: props.sessionId,
-        metadata: props.session.metadata ?? null,
-    });
     // R-8: the header count reads the unified activity model, not a private tally over the raw
     // roster. It is the same `counts` object the composer badge and the Agents pane use, so the
     // glyph beside the composer and the list it opens cannot report different numbers.
     const { counts: agentActivityCounts } = useSessionAgentActivity({
         sessionId: props.sessionId,
-        directSessionRuntime,
+        directSessionRuntime: props.directSessionRuntime,
     });
     // The icon is a live indicator: work that is still open, which includes an agent stopped on a
     // permission prompt. The overflow menu is a destination, so it stays available whenever there is
@@ -1032,6 +1051,12 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
 
     return (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <ActionOperationActivityButton
+                preferredSessionId={props.sessionId}
+                testID="session-header-action-operations"
+                buttonSize={44}
+                iconSize={SESSION_HEADER_ICON_SIZE_PX}
+            />
             <SessionHeaderActionMenu
                 sessionId={props.sessionId}
                 session={props.session}
@@ -1117,10 +1142,6 @@ function useStableAgentInputFileViewerPress(handler: AgentInputOnFileViewerPress
     handlerRef.current = handler;
 
     return React.useCallback<AgentInputOnFileViewerPress>(() => handlerRef.current(), []);
-}
-
-function areSemanticDraftValuesEqual(left: unknown, right: unknown): boolean {
-    return JSON.stringify(left) === JSON.stringify(right);
 }
 
 const EMPTY_AGENT_INPUT_REQUESTS: readonly PendingPermissionRequest[] = Object.freeze([]);
@@ -1562,6 +1583,11 @@ export const SessionView = React.memo((props: SessionViewProps) => {
         : isOwnedSessionRoutePathname(anchorPathname, sessionId);
     const shouldRenderSessionSurface = surfaceFocused || isRouteAnchor;
     const shouldRetainSessionSurface = Platform.OS === 'web' ? shouldRenderSessionSurface : true;
+    const directSessionRuntime = useDirectSessionRuntime({
+        sessionId,
+        metadata: session?.metadata ?? null,
+        enabled: Boolean(session && shouldRenderSessionSurface),
+    });
     const sessionRunnerRuntimeStatusRetention = useSessionRunnerRuntimeStatusRetention({
         enabled: Boolean(session && shouldRenderSessionSurface),
         serverId: currentSessionRouteServerId,
@@ -1759,6 +1785,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
             <SessionHeaderRightElement
                 sessionId={sessionId}
                 session={headerSession}
+                directSessionRuntime={directSessionRuntime}
                 paneScopeId={paneScopeId}
                 currentSessionRouteServerId={currentSessionRouteServerId}
                 mobileWorkspaceExperienceToggleActionId={mobileWorkspaceExperienceToggleActionId}
@@ -1784,6 +1811,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
 	            flavor: headerSession.metadata?.flavor || null,
 	        };
 	    }, [
+        directSessionRuntime,
         handleToggleWorkspaceExperience,
         isDataReady,
         mobileWorkspaceExperienceState.showWorkspaceExperienceToggle,
@@ -1810,6 +1838,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                 sessionId={sessionId}
                 routeServerId={currentSessionRouteServerId}
                 session={stableSessionForLoadedView ?? session}
+                directSessionRuntime={directSessionRuntime}
                 onBackPress={handleBackPress}
                 isEncryptedSessionLocked={isEncryptedSessionLocked}
                 executionRunsEnabled={executionRunsEnabled}
@@ -1829,6 +1858,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
         ))
         : null;
     return (
+        <SessionDirectSessionRuntimeProvider value={directSessionRuntime}>
         <SessionScreenTestIdsProvider enabled={surfaceFocused}>
             {session && shouldRenderSessionSurface && props.contentOverride == null ? (
                 <SessionPendingMessagesRefresh sessionId={sessionId} />
@@ -1910,6 +1940,7 @@ export const SessionView = React.memo((props: SessionViewProps) => {
                   ) : normalSessionContent}
             </View>
         </SessionScreenTestIdsProvider>
+        </SessionDirectSessionRuntimeProvider>
     );
 });
 
@@ -1990,9 +2021,14 @@ function useSessionTranscriptRenderState({
     isLocallyAttached,
     pendingMessagesCount,
 }: SessionTranscriptRenderStateInput) {
-    const { ids: committedMessageIds, isLoaded } = useSessionTranscriptIds(sessionId);
+    const { ids: committedMessageIds, isLoaded, hasRetainedContent } = useSessionTranscriptIds(sessionId);
     const shouldRenderChatTimeline = React.useMemo(() => {
         if (isEncryptedSessionLocked) return false;
+        // A `resetSessionMessages` -> refetch window empties the ids while the entry survives, but
+        // `useSessionMessages` keeps serving its cached rows through it. Treating that window as
+        // "no content" would unmount the transcript the reader is looking at and swap in the
+        // first-paint placeholder — the blank this window exists to avoid.
+        if (hasRetainedContent) return true;
         return shouldRenderChatTimelineForSession({
             committedMessagesCount: committedMessageIds.length,
             pendingMessagesCount,
@@ -2002,10 +2038,11 @@ function useSessionTranscriptRenderState({
             // still render the transcript so it can page backwards to find visible messages.
             forceRenderFooter: isForkedSessionV1 || (isLoaded === true && (session.seq ?? 0) > 0 && committedMessageIds.length === 0),
         });
-    }, [committedMessageIds.length, isEncryptedSessionLocked, isForkedSessionV1, isLoaded, isLocallyAttached, pendingMessagesCount, session.seq]);
+    }, [committedMessageIds.length, hasRetainedContent, isEncryptedSessionLocked, isForkedSessionV1, isLoaded, isLocallyAttached, pendingMessagesCount, session.seq]);
 
     return {
         committedMessagesCount: committedMessageIds.length,
+        hasRetainedContent,
         isLoaded,
         shouldRenderChatTimeline,
     };
@@ -2103,7 +2140,7 @@ const SessionTranscriptContent = React.memo(function SessionTranscriptContent({
         };
     }
 
-    const { committedMessagesCount, isLoaded, shouldRenderChatTimeline } = useSessionTranscriptRenderState({
+    const { committedMessagesCount, hasRetainedContent, isLoaded, shouldRenderChatTimeline } = useSessionTranscriptRenderState({
         sessionId,
         session,
         isEncryptedSessionLocked,
@@ -2157,7 +2194,39 @@ const SessionTranscriptContent = React.memo(function SessionTranscriptContent({
             isLoaded === true
             || committedMessagesCount > 0
             || pendingMessagesCount > 0
+            // Retained rows are presentable content: covering them with the first-paint
+            // placeholder would blink a transcript the reader is already reading.
+            || hasRetainedContent
         );
+
+    // Opt-in rare-defect probe (no-op unless happier.debug.viewportWrites=1). This gate is the
+    // last choke point every empty-transcript producer funnels through, so recording the frame
+    // where it closes captures the cause of a blank that is too transient to catch by watching.
+    const transcriptWasMountableRef = React.useRef(false);
+    React.useEffect(() => {
+        if (transcriptCanMountWithoutDeferredWindow) {
+            transcriptWasMountableRef.current = true;
+            return;
+        }
+        if (!transcriptWasMountableRef.current) return;
+        transcriptWasMountableRef.current = false;
+        recordTranscriptBlank({
+            committedMessagesCount,
+            hasRetainedContent,
+            isLoaded: isLoaded === true,
+            pendingMessagesCount,
+            reason: shouldRenderChatTimeline ? 'mount-gate-closed' : 'timeline-hidden',
+            sessionId,
+        });
+    }, [
+        committedMessagesCount,
+        hasRetainedContent,
+        isLoaded,
+        pendingMessagesCount,
+        sessionId,
+        shouldRenderChatTimeline,
+        transcriptCanMountWithoutDeferredWindow,
+    ]);
 
     return (
         <Deferred enabled={transcriptCanMountWithoutDeferredWindow} fallback={transcriptDeferredFallback}>
@@ -2483,6 +2552,10 @@ function SessionViewLoaded({
     // Check if CLI version is outdated and not already acknowledged
     const cliVersion = session.metadata?.version;
     const machineId = reachableMachineTarget?.machineId ?? session.metadata?.machineId;
+    const goalControlMachineId = controlMachineTarget?.machineId ?? machineId;
+    const goalControlMachine = useMachine(typeof goalControlMachineId === 'string' ? goalControlMachineId : '');
+    const sessionMachineRecord = useMachine(typeof machineId === 'string' ? machineId : '');
+    const daemonGoalControlsSupported = goalControlMachine?.metadata?.daemonSessionGoalControlsSupported === true;
     const isCliOutdated = cliVersion && !isVersionSupported(cliVersion, MINIMUM_CLI_VERSION);
     const isAcknowledged = machineId && acknowledgedCliVersions[machineId] === cliVersion;
     const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
@@ -2511,12 +2584,16 @@ function SessionViewLoaded({
     // Composer banner collapse is owned by ComposerBannerCollapseProvider (mounted above this
     // component) so a banner and the badge that toggles it agree even across subtrees, and so the
     // account-level "remember" preference decides between session-scoped and device-persisted state.
-    const [pendingQueueResumeFailed, setPendingQueueResumeFailed] = React.useState(false);
     const usageLimitRecoveryBanner = useComposerBannerCollapse('usageLimitRecovery');
     const staleSessionRunnerBanner = useComposerBannerCollapse('staleSessionRunner');
+    const mcpSelectionRestartRequiredBanner = useComposerBannerCollapse('mcpSelectionRestartRequired');
     const authRecoveryBanner = useComposerBannerCollapse('authRecovery');
     const pendingQueueResumeFailedBanner = useComposerBannerCollapse('pendingQueueResumeFailed');
     const agentTransitionOutcomeBanner = useComposerBannerCollapse('agentTransitionOutcome');
+    const activeServerAccountScope = useActiveServerAccountScope();
+    const activeServerAccountScopeKey = activeServerAccountScope
+        ? serverAccountScopeKeySuffix(activeServerAccountScope)
+        : 'local';
     // The last armed-switch outcome that still has something to say.
     //
     // This screen holds the FACT; `continueSessionWithArmedAgent` owns what it
@@ -2525,7 +2602,7 @@ function SessionViewLoaded({
     // reaches the daemon at all, so it carries its own already-resolved sentence
     // rather than pretending to be a transition result.
     const [armedContinuationOutcome, setArmedContinuationOutcome] = React.useState<
-        | Readonly<{ kind: 'refusal'; message: string }>
+        | Readonly<{ kind: 'refusal'; message: string; scopeKey: string }>
         | Readonly<{
             kind: 'outcome';
             /**
@@ -2534,6 +2611,8 @@ function SessionViewLoaded({
              * Session's unsettled switch onto another's composer.
              */
             sessionId: string;
+            /** The account/server scope that owned this arm at dispatch time. */
+            scopeKey: string;
             result: SessionAgentTransitionResultV1;
             /**
              * The switch that was submitted: the target the banner names, and
@@ -2544,30 +2623,14 @@ function SessionViewLoaded({
              * Resolved from that intent against the same catalog the rail
              * offered it from — at send time or at restore, through one helper.
              * Nothing presentational is persisted.
-             */
+            */
             labels: ArmedAgentContinuationLabels;
             localId: string;
-            /** The exact composer text this submission carried. */
-            submittedText: string;
-            /**
-             * Whether the semantic-draft values were still the submitted ones at
-             * the moment of the send. Present only on the mount that submitted;
-             * a restored outcome compare-clears the draft text alone.
-             */
-            semanticSnapshot: ComposerSemanticDraftSnapshot | null;
             /** Canonical Session/message facts have been read since the call returned. */
             reconciled: boolean;
         }>
         | null
     >(null);
-    /**
-     * The Session whose persisted unsettled switch has been read and judged.
-     *
-     * The record below is a mirror of the live outcome, and a mirror written
-     * before the restore has run would delete the very record it exists to
-     * carry across the remount.
-     */
-    const [armedContinuationRestoredFor, setArmedContinuationRestoredFor] = React.useState<string | null>(null);
     const [
         resolvedStaleSessionRunnerFingerprint,
         setResolvedStaleSessionRunnerFingerprint,
@@ -2578,6 +2641,13 @@ function SessionViewLoaded({
     ] = React.useState<Readonly<{
         fingerprint: string;
         status: StaleSessionRunnerRestartViewStatus;
+    }> | null>(null);
+    const [
+        mcpSelectionRestartOperation,
+        setMcpSelectionRestartOperation,
+    ] = React.useState<Readonly<{
+        fingerprint: string;
+        status: Exclude<McpSelectionRestartOperationStatus, null>;
     }> | null>(null);
     const sessionModeOptionIds = React.useMemo(() => {
         const modeState =
@@ -2611,9 +2681,18 @@ function SessionViewLoaded({
         [agentId, enabledAgentIds, session],
     );
     const hasWriteAccess = hasSessionWriteAccess(session.accessLevel);
+    const pendingActivationPresentation = React.useMemo(() => resolvePendingActivationBanner({
+        authorization: session.pendingActivationAuthorization,
+        activeAt: session.activeAt,
+        active: session.active,
+        machineReachable: Boolean(sessionMachineRecord && isMachineOnline(sessionMachineRecord)),
+        canWrite: hasWriteAccess,
+        pendingMessages,
+    }), [hasWriteAccess, pendingMessages, session.active, session.activeAt, session.pendingActivationAuthorization, sessionMachineRecord]);
+    const [pendingActivationActionBusy, setPendingActivationActionBusy] = React.useState(false);
     const providerSupportsEditableSessionGoals = React.useMemo(
-        () => supportsEditableSessionGoals({ agentId, session }),
-        [agentId, session],
+        () => supportsEditableSessionGoals({ agentId, session, daemonGoalControlsSupported }),
+        [agentId, daemonGoalControlsSupported, session],
     );
     const canEditSessionGoals = React.useMemo(
         () => isSessionGoalEditingAvailable({
@@ -2627,10 +2706,10 @@ function SessionViewLoaded({
     );
     // Provider goal-action capability profile applied to the set-first-goal form (before any native
     // goal item exists), so a provider like Claude shows only edit/clear with no budget/lifecycle
-    // controls. Null = full legacy surface (Codex). Capability-driven; no provider-name branching.
+    // controls. The registry has already intersected provider semantics with runtime reachability.
     const sessionGoalActionCapabilityFallback = React.useMemo(
-        () => resolveSessionGoalActionCapabilityProfile({ agentId, session }),
-        [agentId, session],
+        () => resolveSessionGoalActionCapabilityProfile({ agentId, session, daemonGoalControlsSupported }),
+        [agentId, daemonGoalControlsSupported, session],
     );
     const setSessionGoalForView = React.useCallback(
         (request: Parameters<typeof sessionGoalSet>[1]) => sessionGoalSet(sessionId, request),
@@ -2732,21 +2811,8 @@ function SessionViewLoaded({
             ? usageLimitRecoverySettingsV1.resumePromptMode
             : 'standard';
     const formatUsageLimitRecoveryTime = React.useCallback((timeMs: number) => new Date(timeMs).toLocaleString(), []);
-    const translateUsageLimitRecovery = React.useCallback<SessionUsageLimitRecoveryTranslate>((key, params) => {
-        switch (key) {
-            case 'session.usageLimitRecovery.resetBody':
-                return t(key, { time: params?.time ?? '' });
-            case 'session.usageLimitRecovery.statusWaitingUntil':
-                return t(key, { time: params?.time ?? '' });
-            case 'session.usageLimitRecovery.resetCreditBody':
-                return t(key, { count: params?.count ?? 0 });
-            case 'session.usageLimitRecovery.resetCreditExpiresBody':
-                return t(key, { count: params?.count ?? 0, time: params?.time ?? '' });
-            default:
-                return t(key);
-        }
-    }, []);
     const translateStaleSessionRunnerNotice = React.useCallback<StaleSessionRunnerNoticeTranslate>((key) => t(key), []);
+    const translateMcpSelectionRestartNotice = React.useCallback<McpSelectionRestartNoticeTranslate>((key) => t(key), []);
     const usageLimitRuntimeState = React.useMemo(() => {
         const pendingFlags = derivePendingRequestFlagsFromSession(sessionRuntimeStatusSource);
         return deriveSessionRuntimePresentationState({
@@ -2783,7 +2849,7 @@ function SessionViewLoaded({
         rememberedMode: usageLimitRecoveryMode,
         checkNowSupported: usageLimitRecoveryCheckNowSupported,
         nowMs: usageLimitRecoveryNowMs,
-        translate: translateUsageLimitRecovery,
+        translate: translateSessionUsageLimitRecovery,
         formatTime: formatUsageLimitRecoveryTime,
     }), [
         formatUsageLimitRecoveryTime,
@@ -2791,7 +2857,6 @@ function SessionViewLoaded({
         sessionRuntimeStatusSource.latestTurnStatusObservedAt,
         sessionRuntimeStatusSource.lastRuntimeIssue,
         sessionRuntimeStatusSource.meaningfulActivityAt,
-        translateUsageLimitRecovery,
         hasInterruptedWorkToResume,
         usageLimitRecovery,
         usageLimitRecoveryCredits,
@@ -2830,7 +2895,7 @@ function SessionViewLoaded({
         rememberedMode: usageLimitRecoveryMode,
         checkNowSupported: usageLimitRecoveryCheckNowSupported,
         nowMs: usageLimitRecoveryNowMs,
-        translate: translateUsageLimitRecovery,
+        translate: translateSessionUsageLimitRecovery,
         formatTime: formatUsageLimitRecoveryTime,
     }), [
         activeUsageLimitRecoveryOperationRetryAtMs,
@@ -2840,7 +2905,6 @@ function SessionViewLoaded({
         sessionRuntimeStatusSource.latestTurnStatusObservedAt,
         sessionRuntimeStatusSource.lastRuntimeIssue,
         sessionRuntimeStatusSource.meaningfulActivityAt,
-        translateUsageLimitRecovery,
         hasInterruptedWorkToResume,
         usageLimitRecovery,
         usageLimitRecoveryCredits,
@@ -2865,7 +2929,7 @@ function SessionViewLoaded({
         hasActivityAfterRuntimeIssue: hasMeaningfulActivityAfterRuntimeIssue(sessionRuntimeStatusSource),
         hasInterruptedWorkToResume,
         nowMs: usageLimitRecoveryNowMs,
-        translate: translateUsageLimitRecovery,
+        translate: translateSessionUsageLimitRecovery,
         formatTime: formatUsageLimitRecoveryTime,
     }), [
         activeUsageLimitRecoveryOperationRetryAtMs,
@@ -2875,7 +2939,6 @@ function SessionViewLoaded({
         sessionRuntimeStatusSource.latestTurnStatusObservedAt,
         sessionRuntimeStatusSource.lastRuntimeIssue,
         sessionRuntimeStatusSource.meaningfulActivityAt,
-        translateUsageLimitRecovery,
         hasInterruptedWorkToResume,
         usageLimitRecovery,
         usageLimitRecoveryFeatureEnabled,
@@ -3060,6 +3123,103 @@ function SessionViewLoaded({
         staleSessionRunnerOperationStatus?.status,
         staleSessionRunnerStatus,
     ]);
+    const mcpSelectionRestartBasePresentation = React.useMemo(
+        () => buildMcpSelectionRestartNoticePresentation({
+            sessionActive: session.active === true,
+            metadata: session.metadata,
+            operationStatus: null,
+            translate: translateMcpSelectionRestartNotice,
+        }),
+        [session.active, session.metadata, translateMcpSelectionRestartNotice],
+    );
+    React.useEffect(() => {
+        if (!mcpSelectionRestartOperation) return;
+        if (mcpSelectionRestartOperation.fingerprint === mcpSelectionRestartBasePresentation?.fingerprint) return;
+        setMcpSelectionRestartOperation(null);
+    }, [mcpSelectionRestartBasePresentation?.fingerprint, mcpSelectionRestartOperation]);
+    const activeMcpSelectionRestartOperationStatus = mcpSelectionRestartOperation
+        && mcpSelectionRestartOperation.fingerprint === mcpSelectionRestartBasePresentation?.fingerprint
+        ? mcpSelectionRestartOperation.status
+        : null;
+    const mcpSelectionRestartNoticePresentation = React.useMemo(
+        () => buildMcpSelectionRestartNoticePresentation({
+            sessionActive: session.active === true,
+            metadata: session.metadata,
+            operationStatus: activeMcpSelectionRestartOperationStatus,
+            translate: translateMcpSelectionRestartNotice,
+        }),
+        [
+            activeMcpSelectionRestartOperationStatus,
+            session.active,
+            session.metadata,
+            translateMcpSelectionRestartNotice,
+        ],
+    );
+    const visibleMcpSelectionRestartNoticePresentation = mcpSelectionRestartRequiredBanner.collapsed
+        ? null
+        : mcpSelectionRestartNoticePresentation;
+    const mcpSelectionRestartMachineId = controlMachineTarget?.machineId
+        ?? staleSessionRunnerMachineId
+        ?? machineId
+        ?? null;
+    const mcpSelectionRestartExpectedRunnerPid = React.useMemo(() => {
+        const runtimePid = sessionRunnerRuntimeStatus
+            && sessionRunnerRuntimeStatus.serverId === sessionRouteServerId
+            && sessionRunnerRuntimeStatus.sessionId === sessionId
+            && sessionRunnerRuntimeStatus.machineId === mcpSelectionRestartMachineId
+            ? sessionRunnerRuntimeStatus.state.runner.pid
+            : null;
+        if (typeof runtimePid === 'number' && Number.isInteger(runtimePid) && runtimePid > 0) return runtimePid;
+        const metadataPid = session.metadata?.hostPid;
+        return typeof metadataPid === 'number' && Number.isInteger(metadataPid) && metadataPid > 0
+            ? metadataPid
+            : null;
+    }, [
+        mcpSelectionRestartMachineId,
+        session.metadata?.hostPid,
+        sessionId,
+        sessionRouteServerId,
+        sessionRunnerRuntimeStatus,
+    ]);
+    const handleMcpSelectionRestart = React.useCallback(async () => {
+        if (!hasWriteAccess) {
+            Modal.alert(t('common.error'), t('session.sharing.noEditPermission'));
+            return;
+        }
+        const presentation = mcpSelectionRestartNoticePresentation;
+        if (!presentation || mcpSelectionRestartOperation?.status === 'pending') return;
+        if (!mcpSelectionRestartMachineId || !mcpSelectionRestartExpectedRunnerPid) {
+            setMcpSelectionRestartOperation({ fingerprint: presentation.fingerprint, status: 'failed' });
+            Modal.alert(t('session.mcpRestartRequired.errorTitle'), t('session.mcpRestartRequired.errorBody'));
+            return;
+        }
+
+        setMcpSelectionRestartOperation({ fingerprint: presentation.fingerprint, status: 'pending' });
+        const result = await restartSessionRunnerForConfigurationWithObserve({
+            sessionId,
+            machineId: mcpSelectionRestartMachineId,
+            serverId: sessionRouteServerId,
+            expectedRunnerPid: mcpSelectionRestartExpectedRunnerPid,
+        });
+        if (result.ok) {
+            setMcpSelectionRestartOperation({ fingerprint: presentation.fingerprint, status: 'restarted' });
+            onSessionRunnerRuntimeStatusInvalidated();
+            void sync.refreshSessions();
+            return;
+        }
+
+        setMcpSelectionRestartOperation({ fingerprint: presentation.fingerprint, status: 'failed' });
+        Modal.alert(t('session.mcpRestartRequired.errorTitle'), t('session.mcpRestartRequired.errorBody'));
+    }, [
+        hasWriteAccess,
+        mcpSelectionRestartExpectedRunnerPid,
+        mcpSelectionRestartMachineId,
+        mcpSelectionRestartNoticePresentation,
+        mcpSelectionRestartOperation?.status,
+        onSessionRunnerRuntimeStatusInvalidated,
+        sessionId,
+        sessionRouteServerId,
+    ]);
     const handleUsageLimitRecoveryAction = React.useCallback(async (kind: SessionUsageLimitRecoveryActionKind) => {
         if (usageLimitRecoveryPendingActionRef.current) return;
         const showUsageLimitRecoveryOperationFailure = (
@@ -3093,7 +3253,11 @@ function SessionViewLoaded({
                         void handleUsageLimitRecoveryAction(kind);
                     },
                     startFreshUnderSelectedAccount: () => {
-                        router.push('/new');
+                        const draftId = resolveNewSessionDraftRouteIdentity({ routeDraftId: undefined }).draftId;
+                        router.push({
+                            pathname: '/new',
+                            params: buildNewSessionLaunchRouteParams({ draftId }),
+                        });
                     },
                     resumeCurrentAccount: () => {},
                     openConnectedAccounts: () => {
@@ -3345,13 +3509,21 @@ function SessionViewLoaded({
     // to the reader — then feeds those facts back through the SAME disposition
     // owner that decided the daemon's answer.
     //
-    // A stored outcome belongs to one Session. If this screen is ever reused
-    // across a route change, carrying it over would attach one Session's failure
-    // to another's composer — which is why the restore below, and not a bare
-    // reset here, is what a Session change goes through.
-    const armedContinuationAwaitingReconcile = armedContinuationOutcome?.kind === 'outcome'
-        && armedContinuationOutcome.result.type === 'outcome_unknown'
-        && !armedContinuationOutcome.reconciled;
+    // Outcomes are mount-local presentation, but still belong to the same
+    // account/server scope as the arm that produced them. Do not project a
+    // stale scope's notice or custody key while a scope switch settles.
+    const activeArmedContinuationOutcome = armedContinuationOutcome?.scopeKey === activeServerAccountScopeKey
+        ? armedContinuationOutcome
+        : null;
+    React.useEffect(() => {
+        setArmedContinuationOutcome((current) => {
+            if (current === null || current.scopeKey !== activeServerAccountScopeKey) return null;
+            return current.kind === 'outcome' && current.sessionId !== sessionId ? null : current;
+        });
+    }, [activeServerAccountScopeKey, sessionId]);
+    const armedContinuationAwaitingReconcile = activeArmedContinuationOutcome?.kind === 'outcome'
+        && activeArmedContinuationOutcome.result.type === 'outcome_unknown'
+        && !activeArmedContinuationOutcome.reconciled;
     React.useEffect(() => {
         if (!armedContinuationAwaitingReconcile) return;
         let cancelled = false;
@@ -3367,13 +3539,16 @@ function SessionViewLoaded({
         ]).then(() => {
             if (cancelled) return;
             setArmedContinuationOutcome((current) => (
-                current?.kind === 'outcome' && !current.reconciled
+                current?.kind === 'outcome'
+                    && current.scopeKey === activeServerAccountScopeKey
+                    && current.sessionId === sessionId
+                    && !current.reconciled
                     ? { ...current, reconciled: true }
                     : current
             ));
         });
         return () => { cancelled = true; };
-    }, [armedContinuationAwaitingReconcile, sessionId, sessionRouteServerId]);
+    }, [activeServerAccountScopeKey, armedContinuationAwaitingReconcile, sessionId, sessionRouteServerId]);
 
     // `sessionRuntimeStatusSource` is the same live runtime-status owner
     // `isSessionActive` reads further down; this is not a second interpretation
@@ -3391,8 +3566,8 @@ function SessionViewLoaded({
     // per-row transcript update off this render path, and short-circuited to
     // `absent` while no armed outcome exists so a Session with no switch in
     // flight pays nothing for it.
-    const armedContinuationInputLocalId = armedContinuationOutcome?.kind === 'outcome'
-        ? armedContinuationOutcome.localId
+    const armedContinuationInputLocalId = activeArmedContinuationOutcome?.kind === 'outcome'
+        ? activeArmedContinuationOutcome.localId
         : null;
     const armedContinuationInputCustody = storage(
         React.useCallback(
@@ -3405,15 +3580,15 @@ function SessionViewLoaded({
         ),
     );
     const armedContinuationDisposition = React.useMemo(() => {
-        if (armedContinuationOutcome === null) return null;
-        if (armedContinuationOutcome.kind === 'refusal') return null;
+        if (activeArmedContinuationOutcome === null) return null;
+        if (activeArmedContinuationOutcome.kind === 'refusal') return null;
         // A definite arm is the daemon's own account of what it just did, so the
         // Session view beside it is trustworthy. An indeterminate one usually
         // means the transport failed, which is exactly when the local view is
         // suspect — so those facts are withheld until reconciliation refreshed
         // them.
-        const factsAreReadable = armedContinuationOutcome.result.type !== 'outcome_unknown'
-            || armedContinuationOutcome.reconciled;
+        const factsAreReadable = activeArmedContinuationOutcome.result.type !== 'outcome_unknown'
+            || activeArmedContinuationOutcome.reconciled;
         const facts: ArmedAgentContinuationCanonicalFacts | null = factsAreReadable
             ? {
                 currentAgentId: liveComposerState.agentId,
@@ -3422,14 +3597,14 @@ function SessionViewLoaded({
             }
             : null;
         return reconcileArmedAgentContinuationDisposition({
-            result: armedContinuationOutcome.result,
-            labels: armedContinuationOutcome.labels,
-            targetAgentId: armedContinuationOutcome.intent.selection.agentId,
+            result: activeArmedContinuationOutcome.result,
+            labels: activeArmedContinuationOutcome.labels,
+            targetAgentId: activeArmedContinuationOutcome.intent.selection.agentId,
             facts,
         });
     }, [
         armedContinuationInputCustody,
-        armedContinuationOutcome,
+        activeArmedContinuationOutcome,
         liveComposerState.agentId,
         sessionRuntimeStatusSource.active,
     ]);
@@ -3437,10 +3612,10 @@ function SessionViewLoaded({
     // render would invalidate that memo on every turn commit for a banner that
     // changes about twice in a Session's life.
     const armedContinuationNotice = React.useMemo<ArmedAgentContinuationNotice | null>(() => (
-        armedContinuationOutcome?.kind === 'refusal'
-            ? { tone: 'warning', message: armedContinuationOutcome.message, recovery: 'none' }
+        activeArmedContinuationOutcome?.kind === 'refusal'
+            ? { tone: 'warning', message: activeArmedContinuationOutcome.message, recovery: 'none' }
             : armedContinuationDisposition?.notice ?? null
-    ), [armedContinuationDisposition, armedContinuationOutcome]);
+    ), [activeArmedContinuationOutcome, armedContinuationDisposition]);
     // The composer's own gate, owned by the send-destination resolver.
     const pendingTransitionOutcome = armedContinuationDisposition?.send === 'block'
         ? 'unreconciled'
@@ -3472,6 +3647,19 @@ function SessionViewLoaded({
                 onPress: staleSessionRunnerBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
+        const mcpSelectionRestartBadge = mcpSelectionRestartNoticePresentation
+            ? [{
+                ...mcpSelectionRestartNoticePresentation.badge,
+                ...buildComposerBannerBadgeAccessibility({
+                    statusLabel: mcpSelectionRestartNoticePresentation.badge.label,
+                    collapsed: mcpSelectionRestartRequiredBanner.collapsed,
+                    expandHint: t('session.mcpRestartRequired.showBannerAction'),
+                    collapseHint: t('session.mcpRestartRequired.hideBannerAction'),
+                }),
+                icon: (tint: string) => <Icon name="arrows-clockwise" size={14} color={tint} />,
+                onPress: mcpSelectionRestartRequiredBanner.toggle,
+            } satisfies AgentInputStatusBadge]
+            : [];
         const authRecoveryBadge = authSurfaceState
             ? [{
                 key: 'session-auth-recovery',
@@ -3488,14 +3676,14 @@ function SessionViewLoaded({
                 onPress: authRecoveryBanner.toggle,
             } satisfies AgentInputStatusBadge]
             : [];
-        const pendingQueueBadge = pendingQueueResumeFailed
+        const pendingQueueBadge = pendingActivationPresentation
             ? [{
-                key: 'session-pendingQueue-resumeFailed',
-                testID: 'session.pendingQueueResumeFailed.badge',
-                label: t('session.pendingQueuedResumeFailedTitle'),
-                tone: 'warning',
+                key: 'session-pendingActivation',
+                testID: 'session.pendingActivation.badge',
+                label: t(`session.pendingActivation.${pendingActivationPresentation.kind}.title`),
+                tone: pendingActivationPresentation.kind === 'failed' ? 'warning' : 'neutral',
                 ...buildComposerBannerBadgeAccessibility({
-                    statusLabel: t('session.pendingQueuedResumeFailedTitle'),
+                    statusLabel: t(`session.pendingActivation.${pendingActivationPresentation.kind}.title`),
                     collapsed: pendingQueueResumeFailedBanner.collapsed,
                     expandHint: t('session.composerBanners.showBannerAction'),
                     collapseHint: t('session.composerBanners.hideBannerAction'),
@@ -3531,6 +3719,7 @@ function SessionViewLoaded({
         return [
             ...usageBadge,
             ...staleRunnerBadge,
+            ...mcpSelectionRestartBadge,
             ...authRecoveryBadge,
             ...pendingQueueBadge,
             ...agentTransitionOutcomeBadge,
@@ -3543,7 +3732,10 @@ function SessionViewLoaded({
         authRecoveryBanner.collapsed,
         authRecoveryBanner.toggle,
         authSurfaceState,
-        pendingQueueResumeFailed,
+        mcpSelectionRestartNoticePresentation,
+        mcpSelectionRestartRequiredBanner.collapsed,
+        mcpSelectionRestartRequiredBanner.toggle,
+        pendingActivationPresentation,
         pendingQueueResumeFailedBanner.collapsed,
         pendingQueueResumeFailedBanner.toggle,
         sessionWorkStateBadges,
@@ -3635,7 +3827,6 @@ function SessionViewLoaded({
         sessionActionDefaultBackend?.backendTarget
         ?? { kind: 'builtInAgent', agentId: liveComposerState.agentId },
     ), [liveComposerState.agentId, sessionActionDefaultBackend?.backendTarget]);
-    const sessionMachineRecord = useMachine(typeof machineId === 'string' ? machineId : '');
     // Each successful connect stamps a new value, which is exactly the lifetime a
     // continuation inspection may be trusted for.
     const socketConnectionGeneration = useSocketStatus().lastConnectedAt;
@@ -3692,14 +3883,13 @@ function SessionViewLoaded({
     // daemon nor the server re-gates the transition, so this decision's scope is
     // the whole gate: an aggregate over other selected servers would let an
     // unrelated server's setting decide whether this Session may switch Agent.
-    const agentSwitchingEnabled = useFeatureEnabled('sessions.agentSwitching', {
+    const agentSwitchingDecision = useFeatureDecision('sessions.agentSwitching', {
         scopeKind: 'spawn',
         serverId: capabilityServerId,
     });
     // Read here rather than beside the composer's other draft work because the
     // armed Agent is a Session draft value like the rest, and the picker below is
     // the one owner that writes it.
-    const activeServerAccountScope = useActiveServerAccountScope();
     const inSessionAgentPicker = useInSessionAgentPickerControls({
         sessionId,
         accountScope: activeServerAccountScope,
@@ -3708,7 +3898,7 @@ function SessionViewLoaded({
         currentAgentSessionActive: session.active,
         entries: sessionAgentCatalogEntries,
         favoriteBackendTargetKeys: settings.favoriteBackendTargetKeysV1,
-        featureEnabled: agentSwitchingEnabled,
+        featureDecision: agentSwitchingDecision,
         source: agentContinuationSource,
         machine: agentContinuationMachine,
         detail: agentContinuationTargetDetail,
@@ -3747,124 +3937,49 @@ function SessionViewLoaded({
             catalogEntry.providerAgentId === targetAgentId
         ))?.title ?? targetAgentId,
     }), [currentAgentLabel, sessionAgentCatalogEntries]);
-
-    // A stored outcome belongs to one Session, and to one submission whose
-    // effect is still open. Restoring it is not rehydrating it: the same
-    // disposition owner re-decides the persisted answer against canonical facts
-    // first, and an outcome that has nothing left to say is DELETED rather than
-    // put back on screen. A banner pointing at a transition that has since
-    // resolved — or a send block held for one — is worse than none.
-    const restoredArmedContinuationSessionIdRef = React.useRef<string | null>(null);
-    React.useEffect(() => {
-        if (restoredArmedContinuationSessionIdRef.current === sessionId) return;
-        restoredArmedContinuationSessionIdRef.current = sessionId;
-        const submission = readSessionDraftValue(
-            activeServerAccountScope,
-            sessionId,
-            ARMED_AGENT_CONTINUATION_SUBMISSION_FIELD_ID,
-        );
-        setArmedContinuationRestoredFor(sessionId);
-        if (typeof submission === 'undefined') {
-            setArmedContinuationOutcome(null);
+    const restoredArmedContinuationOutcomeKeyRef = React.useRef<string | null>(null);
+    React.useLayoutEffect(() => {
+        const intent = inSessionAgentPicker.armedContinuation
+            ?? inSessionAgentPicker.armedContinuationSubmissionIntent;
+        const submission = inSessionAgentPicker.armedContinuationSubmission;
+        const localId = inSessionAgentPicker.armedContinuationLocalId ?? submission?.localId ?? null;
+        if (intent === null || !submission || localId !== submission.localId) {
+            restoredArmedContinuationOutcomeKeyRef.current = null;
             return;
         }
-        // Same rule as the live path: an indeterminate answer usually means the
-        // transport failed, which is exactly when the local view is suspect, so
-        // its facts stay withheld until a reconciliation has refreshed them.
-        const factsAreReadable = submission.result.type !== 'outcome_unknown' || submission.reconciled;
-        const labels = buildArmedContinuationLabels(submission.intent.selection.agentId);
-        const disposition = reconcileArmedAgentContinuationDisposition({
-            result: submission.result,
-            labels,
-            targetAgentId: submission.intent.selection.agentId,
-            facts: factsAreReadable
-                ? {
-                    currentAgentId: liveComposerState.agentId,
-                    sessionActive: sessionRuntimeStatusSource.active === true,
-                    input: readCanonicalOutboundHandoffForLocalId(sessionId, submission.localId),
-                }
-                : null,
-        });
-        if (!isArmedAgentContinuationOutcomeUnsettled(disposition)) {
-            setArmedContinuationOutcome(null);
-            clearSessionDraftValue(
-                activeServerAccountScope,
-                sessionId,
-                ARMED_AGENT_CONTINUATION_SUBMISSION_FIELD_ID,
-            );
-            return;
-        }
+        // A nested submission proves a transition left this mount, but carries no
+        // daemon result to replay. Establish the same mount-local unknown outcome
+        // the RPC path records before this composer can accept input, so the
+        // existing disposition/reconciliation owner holds sends until canonical
+        // custody has been read.
+        const key = `${activeServerAccountScopeKey}\u0000${sessionId}\u0000${submission.localId}`;
+        const outcome = armedContinuationOutcome;
+        const outcomeIsCurrent = outcome !== null
+            && outcome.scopeKey === activeServerAccountScopeKey
+            && (outcome.kind === 'refusal' || outcome.sessionId === sessionId);
+        if (outcomeIsCurrent || restoredArmedContinuationOutcomeKeyRef.current === key) return;
+        restoredArmedContinuationOutcomeKeyRef.current = key;
         setArmedContinuationOutcome({
             kind: 'outcome',
             sessionId,
-            result: submission.result,
-            intent: submission.intent,
-            labels,
+            scopeKey: activeServerAccountScopeKey,
+            result: { type: 'outcome_unknown', localId: submission.localId },
+            intent,
+            labels: buildArmedContinuationLabels(intent.selection.agentId),
             localId: submission.localId,
-            submittedText: submission.submittedText,
-            semanticSnapshot: null,
-            reconciled: submission.reconciled,
+            reconciled: false,
         });
     }, [
-        activeServerAccountScope,
-        buildArmedContinuationLabels,
-        liveComposerState.agentId,
-        sessionId,
-        sessionRuntimeStatusSource.active,
-    ]);
-    // The persisted half of the same fact, mirrored from the live one.
-    //
-    // The record exists for one reason: `localId` is the daemon's dedupe and
-    // divider correlation key, and a remount that loses it re-mints a fresh one
-    // for the same armed choice — so the still-visible draft becomes a SECOND
-    // logical message for a switch that may already have committed. The banner
-    // that said so and the send block that stood in the way were in the same
-    // lost state, which is why all three travel together or none of them do.
-    //
-    // It is a mirror, not a second decision-maker: the same disposition owner
-    // says whether the outcome still has anything to say, and the record exists
-    // exactly while it does.
-    React.useEffect(() => {
-        if (armedContinuationRestoredFor !== sessionId) return;
-        const outcome = armedContinuationOutcome;
-        const unsettled = outcome !== null
-            && outcome.kind === 'outcome'
-            && outcome.sessionId === sessionId
-            && armedContinuationDisposition !== null
-            && isArmedAgentContinuationOutcomeUnsettled(armedContinuationDisposition);
-        if (!unsettled) {
-            const stored = readSessionDraftValue(
-                activeServerAccountScope,
-                sessionId,
-                ARMED_AGENT_CONTINUATION_SUBMISSION_FIELD_ID,
-            );
-            if (typeof stored === 'undefined') return;
-            clearSessionDraftValue(
-                activeServerAccountScope,
-                sessionId,
-                ARMED_AGENT_CONTINUATION_SUBMISSION_FIELD_ID,
-            );
-            return;
-        }
-        writeSessionDraftValue(
-            activeServerAccountScope,
-            sessionId,
-            ARMED_AGENT_CONTINUATION_SUBMISSION_FIELD_ID,
-            {
-                localId: outcome.localId,
-                intent: outcome.intent,
-                result: outcome.result,
-                submittedText: outcome.submittedText,
-                reconciled: outcome.reconciled,
-            },
-        );
-    }, [
-        activeServerAccountScope,
-        armedContinuationDisposition,
+        activeServerAccountScopeKey,
         armedContinuationOutcome,
-        armedContinuationRestoredFor,
+        buildArmedContinuationLabels,
+        inSessionAgentPicker.armedContinuation,
+        inSessionAgentPicker.armedContinuationLocalId,
+        inSessionAgentPicker.armedContinuationSubmission,
+        inSessionAgentPicker.armedContinuationSubmissionIntent,
         sessionId,
     ]);
+
     const connectedServiceQuotaProfileCredentialUsable = React.useMemo(() => {
         if (connectedServiceQuotaProfileRef?.credentialHealthStatus === undefined) return true;
         return isConnectedServiceCredentialHealthStatusUsable(
@@ -4156,7 +4271,12 @@ function SessionViewLoaded({
         setDraftValue,
         restoreDraft,
         restoreComposerSnapshot,
-    } = useDraft(sessionId, message, setMessage);
+        captureDraftForOutboundHandoff,
+        clearDraftCurrentness,
+        draftSnapshot,
+        draftScope,
+    } = useDraft(sessionId, message, setMessage, { active: surfaceFocused });
+    const draftConflictBanner = useSessionDraftConflictComposerBanner(draftSnapshot?.conflict ?? null);
     const messageRef = React.useRef(message);
     React.useEffect(() => {
         messageRef.current = message;
@@ -4173,61 +4293,92 @@ function SessionViewLoaded({
     const inputComposerRestoreTransientStateRef = React.useRef<(state: AgentInputLocalUiStateV1 | null) => void>(
         noopInputComposerRestoreTransientState,
     );
-    const captureComposerSemanticDraftSnapshot = React.useCallback((): ComposerSemanticDraftSnapshot => ({
-        recipient: readSessionDraftValue(activeServerAccountScope, sessionId, 'routing.recipient'),
-        executionRunDelivery: readSessionDraftValue(activeServerAccountScope, sessionId, 'routing.executionRunDelivery'),
-        structuredInputMentions: readSessionDraftValue(activeServerAccountScope, sessionId, 'structuredInput.mentions'),
-    }), [activeServerAccountScope, sessionId]);
-    const isComposerSemanticDraftSnapshotCurrent = React.useCallback((snapshot: ComposerSemanticDraftSnapshot) => {
-        const current = captureComposerSemanticDraftSnapshot();
-        return areSemanticDraftValuesEqual(current, snapshot);
-    }, [captureComposerSemanticDraftSnapshot]);
-    const clearSemanticDraftValuesAfterOutboundHandoff = React.useCallback(() => {
-        clearSessionDraftValues(activeServerAccountScope, sessionId, {
-            lifecycle: 'outboundHandoff',
-        });
-    }, [activeServerAccountScope, sessionId]);
-    // Consuming the same disposition once canonical facts move it.
-    //
-    // `draft: 'clear'` is only ever reached from the one depth where this exact
-    // input received canonical admission — and custody of it routinely lands
-    // AFTER the call returned, which is the whole reason reconciliation exists.
-    // Before this, that late answer took the warning down and left the message
-    // sitting in the composer, one tap from being sent twice. The clear runs
-    // through the same outbound-handoff owner as the send path's, compares
-    // against the exact submitted text, and takes the armed row with it because
-    // this depth spends the switch.
-    // Read narrowly: the picker's controls object is rebuilt every render, so
-    // depending on it would re-run this effect on every turn commit for a
-    // decision that moves about twice.
     const {
         armedContinuation: liveArmedContinuation,
         armedContinuationLocalId: liveArmedContinuationLocalId,
+        armedContinuationSubmission: liveArmedContinuationSubmission,
         clearArmedContinuation,
     } = inSessionAgentPicker;
-    const appliedArmedContinuationDraftClearRef = React.useRef<string | null>(null);
-    React.useEffect(() => {
-        const outcome = armedContinuationOutcome;
-        if (outcome === null || outcome.kind !== 'outcome' || outcome.sessionId !== sessionId) return;
-        if (armedContinuationDisposition?.draft !== 'clear') return;
-        if (appliedArmedContinuationDraftClearRef.current === outcome.localId) return;
-        appliedArmedContinuationDraftClearRef.current = outcome.localId;
-        const semanticSnapshot = outcome.semanticSnapshot;
+    const clearArmedContinuationSubmissionDraftsIfCurrent = React.useCallback((
+        submission: SessionArmedAgentContinuationSubmission,
+    ) => {
+        const currentness = submission.currentness;
+        let didClearSemantic = false;
         clearComposerAfterOutboundHandoff({
-            snapshot: { sessionId, text: outcome.submittedText },
+            snapshot: {
+                sessionId,
+                text: currentness?.text ?? submission.input.text,
+            },
             clearDraftForSessionIfCurrentValueMatches,
             clearTransientInputState: inputComposerClearTransientStateRef.current,
-            // Only the mount that submitted knows what the semantic values were
-            // then; a restored outcome clears the text alone rather than
-            // discarding structured input it cannot prove is still the submitted
-            // one.
-            ...(semanticSnapshot
+            ...(currentness && draftScope
                 ? {
-                    isSemanticSnapshotCurrent: () => isComposerSemanticDraftSnapshotCurrent(semanticSnapshot),
-                    clearSemanticDraftValues: clearSemanticDraftValuesAfterOutboundHandoff,
+                    clearSemanticDraftValues: () => {
+                        const currentMentions = existingSessionDraftSemanticValues.read(
+                            draftScope,
+                            sessionId,
+                            'structuredInput.mentions',
+                        );
+                        if (JSON.stringify(currentMentions ?? []) !== JSON.stringify(currentness.mentions)) return;
+                        existingSessionDraftSemanticValues.clear(
+                            draftScope,
+                            sessionId,
+                            'structuredInput.mentions',
+                        );
+                        didClearSemantic = true;
+                    },
                 }
                 : {}),
         });
+        if (didClearSemantic && draftScope) {
+            fireAndForget(
+                existingSessionDraftSemanticValues.flush(draftScope, sessionId),
+                { tag: 'SessionView.clearArmedContinuationSemanticDraft' },
+            );
+        }
+
+        if (currentness && currentness.attachmentDraftIds.length > 0) {
+            const submittedAttachmentDraftIds = new Set(currentness.attachmentDraftIds);
+            const currentAttachmentDrafts = attachmentDraftsSnapshotRef.current;
+            const nextAttachmentDrafts = currentAttachmentDrafts.filter((draft) => (
+                !submittedAttachmentDraftIds.has(draft.id)
+            ));
+            if (nextAttachmentDrafts.length !== currentAttachmentDrafts.length) {
+                replaceSessionAttachmentDrafts(nextAttachmentDrafts);
+            }
+        }
+
+        const happierEnvelope = readObjectRecord(submission.input.meta.happier);
+        const submittedReviewComments = happierEnvelope?.kind === 'review_comments.v1'
+            ? parseReviewCommentsV1(happierEnvelope.payload)
+            : null;
+        if (submittedReviewComments === null) return;
+        const currentReviewComments = buildReviewCommentsV1MetaPayload({
+            sessionId,
+            drafts: includedReviewCommentDrafts,
+        });
+        if (JSON.stringify(currentReviewComments) === JSON.stringify(submittedReviewComments)) {
+            clearSentReviewCommentDrafts();
+        }
+    }, [
+        clearDraftForSessionIfCurrentValueMatches,
+        clearSentReviewCommentDrafts,
+        draftScope,
+        includedReviewCommentDrafts,
+        replaceSessionAttachmentDrafts,
+        sessionId,
+    ]);
+    const appliedArmedContinuationDraftClearRef = React.useRef<string | null>(null);
+    React.useEffect(() => {
+        const outcome = activeArmedContinuationOutcome;
+        if (outcome === null || outcome.kind !== 'outcome' || outcome.sessionId !== sessionId) return;
+        if (armedContinuationDisposition?.draft !== 'clear') return;
+        const clearKey = `${activeServerAccountScopeKey}\u0000${outcome.localId}`;
+        if (appliedArmedContinuationDraftClearRef.current === clearKey) return;
+        const submission = liveArmedContinuationSubmission;
+        if (submission?.localId !== outcome.localId) return;
+        appliedArmedContinuationDraftClearRef.current = clearKey;
+        clearArmedContinuationSubmissionDraftsIfCurrent(submission);
         // Draft currentness controls only whether this exact text can be removed.
         // Canonical custody still spends the submitted transition: otherwise a
         // rewritten draft would retain its prior localId and could collide with
@@ -4242,54 +4393,81 @@ function SessionViewLoaded({
             clearArmedContinuation();
         }
     }, [
+        activeArmedContinuationOutcome,
+        activeServerAccountScopeKey,
         armedContinuationDisposition,
-        armedContinuationOutcome,
         clearArmedContinuation,
-        clearDraftForSessionIfCurrentValueMatches,
-        clearSemanticDraftValuesAfterOutboundHandoff,
-        isComposerSemanticDraftSnapshotCurrent,
+        clearArmedContinuationSubmissionDraftsIfCurrent,
         liveArmedContinuationLocalId,
         liveArmedContinuation,
+        liveArmedContinuationSubmission,
         sessionId,
     ]);
+    const armedContinuationSubmissionCustody = storage(
+        React.useCallback(
+            (state: StorageState) => selectCanonicalOutboundHandoffForLocalId(
+                state,
+                sessionId,
+                liveArmedContinuationSubmission?.localId ?? null,
+            ),
+            [liveArmedContinuationSubmission?.localId, sessionId],
+        ),
+    );
+    React.useEffect(() => {
+        // A remount does not revive a transient outcome. The nested snapshot is
+        // sufficient: canonical custody of its localId spends the exact arm.
+        if (activeArmedContinuationOutcome?.kind === 'outcome') return;
+        const submission = liveArmedContinuationSubmission;
+        if (!submission || armedContinuationSubmissionCustody === 'absent') return;
+        const clearKey = `${activeServerAccountScopeKey}\u0000${submission.localId}`;
+        if (appliedArmedContinuationDraftClearRef.current === clearKey) return;
+        appliedArmedContinuationDraftClearRef.current = clearKey;
+        clearArmedContinuationSubmissionDraftsIfCurrent(submission);
+        if (
+            liveArmedContinuation !== null
+            && liveArmedContinuationLocalId === submission.localId
+        ) {
+            clearArmedContinuation();
+        }
+    }, [
+        activeArmedContinuationOutcome,
+        activeServerAccountScopeKey,
+        armedContinuationSubmissionCustody,
+        clearArmedContinuation,
+        clearArmedContinuationSubmissionDraftsIfCurrent,
+        liveArmedContinuation,
+        liveArmedContinuationLocalId,
+        liveArmedContinuationSubmission,
+    ]);
+    const captureComposerSemanticDraftSnapshot = React.useCallback((): ComposerSemanticDraftSnapshot => (
+        readPendingMessageComposerSemanticDraftSnapshot(draftSnapshot?.document ?? null)
+    ), [draftSnapshot]);
     const restoreSemanticDraftValuesFromSnapshot = React.useCallback((snapshot: ComposerSemanticDraftSnapshot) => {
-        if (typeof snapshot.recipient === 'undefined') {
-            clearSessionDraftValue(activeServerAccountScope, sessionId, 'routing.recipient', { flush: false });
-        } else {
-            writeSessionDraftValue(activeServerAccountScope, sessionId, 'routing.recipient', snapshot.recipient, { flush: false });
+        if (!draftScope) return;
+        for (const [fieldId, value] of [
+            ['routing.recipient', snapshot.recipient],
+            ['routing.executionRunDelivery', snapshot.executionRunDelivery],
+            ['structuredInput.mentions', snapshot.structuredInputMentions],
+        ] as const) {
+            if (typeof value === 'undefined') {
+                existingSessionDraftSemanticValues.clear(draftScope, sessionId, fieldId);
+            } else {
+                existingSessionDraftSemanticValues.write(draftScope, sessionId, fieldId, value);
+            }
         }
-
-        if (typeof snapshot.executionRunDelivery === 'undefined') {
-            clearSessionDraftValue(activeServerAccountScope, sessionId, 'routing.executionRunDelivery', { flush: false });
-        } else {
-            writeSessionDraftValue(
-                activeServerAccountScope,
-                sessionId,
-                'routing.executionRunDelivery',
-                snapshot.executionRunDelivery,
-                { flush: false },
-            );
+        fireAndForget(
+            existingSessionDraftSemanticValues.flush(draftScope, sessionId),
+            { tag: 'SessionView.restorePendingEditSemanticDraft' },
+        );
+    }, [draftScope, sessionId]);
+    const clearMountedArmedContinuationAfterAcceptedComposerClear = React.useCallback(() => {
+        if (inSessionAgentPicker.armedContinuation !== null) {
+            inSessionAgentPicker.clearArmedContinuation();
         }
-
-        if (typeof snapshot.structuredInputMentions === 'undefined') {
-            clearSessionDraftValue(activeServerAccountScope, sessionId, 'structuredInput.mentions', { flush: false });
-        } else {
-            writeSessionDraftValue(
-                activeServerAccountScope,
-                sessionId,
-                'structuredInput.mentions',
-                snapshot.structuredInputMentions,
-                { flush: false },
-            );
-        }
-
-        flushSessionDraftValues(activeServerAccountScope);
-    }, [activeServerAccountScope, sessionId]);
-    const clearSemanticDraftValuesAfterAcceptedComposerClear = React.useCallback(() => {
-        clearSessionDraftValues(activeServerAccountScope, sessionId, {
-            lifecycle: 'composerCleared',
-        });
-    }, [activeServerAccountScope, sessionId]);
+    }, [
+        inSessionAgentPicker.armedContinuation,
+        inSessionAgentPicker.clearArmedContinuation,
+    ]);
     const restorePendingEditAttachmentDraftsIfSafe = React.useCallback((edit: PendingMessageComposerEditState) => {
         if (attachmentDraftsSnapshotRef.current.length !== 0) return;
         replaceSessionAttachmentDrafts(edit.previousAttachmentDrafts);
@@ -4351,12 +4529,16 @@ function SessionViewLoaded({
             loadedText: editText,
         });
         replaceSessionAttachmentDrafts([]);
-        clearSemanticDraftValuesAfterAcceptedComposerClear();
+        const draftToClear = captureDraftForOutboundHandoff?.();
+        if (draftToClear) clearDraftCurrentness(draftToClear);
+        clearMountedArmedContinuationAfterAcceptedComposerClear();
         inputComposerClearTransientStateRef.current();
         setDraftValue(editText);
     }, [
         captureComposerSemanticDraftSnapshot,
-        clearSemanticDraftValuesAfterAcceptedComposerClear,
+        captureDraftForOutboundHandoff,
+        clearDraftCurrentness,
+        clearMountedArmedContinuationAfterAcceptedComposerClear,
         replaceSessionAttachmentDrafts,
         setDraftValue,
     ]);
@@ -4604,8 +4786,15 @@ function SessionViewLoaded({
     // the notice untrue, so it goes.
     const handleArmedContinuationResume = React.useCallback(async () => {
         const resumed = await handleResumeSession({ silent: false });
-        if (resumed) setArmedContinuationOutcome(null);
-    }, [handleResumeSession]);
+        if (resumed) {
+            setArmedContinuationOutcome((current) => (
+                current?.scopeKey === activeServerAccountScopeKey && current.kind === 'outcome' && current.sessionId === sessionId
+                    ? null
+                    : current
+            ));
+        }
+        return resumed;
+    }, [activeServerAccountScopeKey, handleResumeSession, sessionId]);
 
     useSessionResumeRequestListener(
         sessionId,
@@ -4686,43 +4875,6 @@ function SessionViewLoaded({
     // running to take it". The disposition owner decides it; the two effects
     // below only route it, and neither re-decides it.
     const armedContinuationAwaitingRuntime = armedContinuationDisposition?.awaitingRuntime === true;
-
-    React.useEffect(() => {
-        if (!pendingQueueResumeFailed) return;
-        if (!isSessionActive) return;
-        // A live runtime retracts the ordinary send's signal — but not one the
-        // disposition owner is still asserting. `target_start_failed` is the
-        // daemon's own proof that the target never started, and letting a
-        // client-side liveness read clear it here would both weaken a definite
-        // daemon arm and fight the router below for the same boolean. It yields
-        // to canonical custody instead: `resolveAwaitingRuntime` stops asserting
-        // the moment the message is demonstrably carried.
-        if (armedContinuationAwaitingRuntime) return;
-        setPendingQueueResumeFailed(false);
-    }, [armedContinuationAwaitingRuntime, isSessionActive, pendingQueueResumeFailed]);
-
-    // The armed switch's half of the same fact: this input is in the queue and
-    // nothing is running to take it. It is handed to the queued-message owner
-    // directly above rather than restated by a second banner, and it is WATCHED
-    // rather than sampled once at send time — `accepted` only means the spawn
-    // was acknowledged, so the target can die minutes later (the incident that
-    // exposed this had the runtime fail 94 seconds after a switch that reported
-    // success, and the reader was told nothing at all). The disposition owner
-    // decides; this only routes, and the effect above retracts it once canonical
-    // custody shows the message was actually carried.
-    React.useEffect(() => {
-        if (!armedContinuationAwaitingRuntime) return;
-        // `isResumable` is a capability of the recovery this banner offers, not a
-        // second opinion on whether the message is waiting. Liveness deliberately
-        // is NOT re-checked here: the disposition owner already weighed it for the
-        // arms decided from client facts, and for the arm the daemon proved
-        // (`target_start_failed`) re-checking it would let a stale Session view
-        // silence a fact the daemon established — which is exactly how this arm
-        // reached a real reader saying nothing.
-        if (!isResumable) return;
-        setPendingQueueResumeFailed(true);
-    }, [armedContinuationAwaitingRuntime, isResumable]);
-
     const isLocallyAttached = !isHiddenSystemSessionSession && isSessionLocallyAttached(session);
     const cliAvailability = useCLIDetection(machineId ?? null, {
         autoDetect: isLocallyAttached,
@@ -4856,7 +5008,7 @@ function SessionViewLoaded({
                     { serverId });
                 },
                 appendNewSessionDraft: ({ promptText, sourceServerId }) => {
-                    appendTranscriptSelectionToNewSessionDraft({
+                    return appendTranscriptSelectionToNewSessionDraft({
                         promptText,
                         sourceServerId,
                         scope: activeServerAccountScope,
@@ -4865,8 +5017,11 @@ function SessionViewLoaded({
                 navigateToSession: ({ sessionId: destinationSessionId, serverId }) => {
                     void navigateToSession(destinationSessionId, { serverId });
                 },
-                navigateToNewSession: () => {
-                    router.push('/new');
+                navigateToNewSession: ({ draftId }) => {
+                    router.push({
+                        pathname: '/new',
+                        params: buildNewSessionLaunchRouteParams({ draftId }),
+                    });
                 },
             });
         } catch {
@@ -4956,6 +5111,16 @@ function SessionViewLoaded({
             defaultBackendId: sessionActionDefaultBackend?.defaultBackendId ?? null,
             instructionsText: message,
         });
+        const sessionMcpChip = useExistingSessionMcpSelection({
+            sessionId,
+            sessionMetadata: session.metadata,
+            machineId: controlMachineTarget?.machineId ?? machineId ?? null,
+            directory: liveAuthoringContext.snapshot.directory,
+            agentId: liveComposerState.agentId,
+            serverId: capabilityServerId,
+            isReadOnly,
+            sessionActive: session.active === true,
+        });
         const routingControls = useSessionAgentInputRoutingControls({
             isReadOnly,
             participantTargets,
@@ -5011,6 +5176,7 @@ function SessionViewLoaded({
         const agentInputStatusBadges = React.useMemo<ReadonlyArray<AgentInputStatusBadge>>(() => [
             ...sessionStatusBadges,
             ...sessionConnectedServicesAuthSwitch.statusBadges,
+            ...(draftConflictBanner.statusBadge ? [draftConflictBanner.statusBadge] : []),
             ...(pendingMessageEdit
                 ? [{
                     key: 'pending-message-edit',
@@ -5026,6 +5192,7 @@ function SessionViewLoaded({
         ], [
             cancelPendingMessageEdit,
             pendingMessageEdit,
+            draftConflictBanner.statusBadge,
             sessionConnectedServicesAuthSwitch.statusBadges,
             sessionStatusBadges,
         ]);
@@ -5033,13 +5200,14 @@ function SessionViewLoaded({
             const chips = [
                 ...(sessionGoalActionChip ? [sessionGoalActionChip] : []),
                 ...(extraActionChips ?? []),
+                ...(sessionMcpChip ? [sessionMcpChip] : []),
                 ...(sessionConnectedServicesAuthSwitch.connectedServicesAuthChip
                     ? [sessionConnectedServicesAuthSwitch.connectedServicesAuthChip]
                     : []),
                 ...(routingControls.extraActionChips ?? []),
             ];
             return chips.length > 0 ? chips : undefined;
-        }, [extraActionChips, routingControls.extraActionChips, sessionConnectedServicesAuthSwitch.connectedServicesAuthChip, sessionGoalActionChip]);
+        }, [extraActionChips, routingControls.extraActionChips, sessionConnectedServicesAuthSwitch.connectedServicesAuthChip, sessionGoalActionChip, sessionMcpChip]);
 
     const openFileViewer = React.useCallback(() => {
         openSessionTarget({ kind: 'fileBrowser' });
@@ -5097,6 +5265,7 @@ function SessionViewLoaded({
             const busySteerSendPolicy = storage.getState().settings.sessionBusySteerSendPolicy;
             const permissionModeApplyTiming = storage.getState().settings.sessionPermissionModeApplyTiming;
             const nonSteerableSendPrompt = storage.getState().settings.sessionNonSteerableSendPrompt;
+            const sessionInactiveResumePolicy = storage.getState().settings.sessionInactiveResumePolicy;
             const forceImmediateSend = sendIntent?.forceImmediate === true;
             const providerNonSteerablePayloadReason = getSessionComposerNonSteerablePayloadReasonFromUiState({
                 agentId: liveComposerState.agentId,
@@ -5127,6 +5296,7 @@ function SessionViewLoaded({
                     text: trimmedText,
                     permissionModeApplyTiming,
                     nonSteerableSendPrompt,
+                    sessionInactiveResumePolicy,
                     providerNonSteerablePayloadReason,
                     nowMs: Date.now(),
                 });
@@ -5196,15 +5366,15 @@ function SessionViewLoaded({
             }
 
             const previousMessage = composerTextBeforeSend;
-            const sendSnapshot = { sessionId, text: previousMessage };
+            const sendSnapshot = captureDraftForOutboundHandoff?.() ?? { sessionId, text: previousMessage };
             const semanticDraftSnapshot = captureComposerSemanticDraftSnapshot();
-            let semanticDraftSnapshotAfterHandoffClear: ComposerSemanticDraftSnapshot | null = null;
             const transientInputStateHandoff = captureComposerTransientInputStateForOutboundHandoff({
                 captureTransientInputState: inputComposerCaptureTransientStateRef.current,
                 clearTransientInputState: inputComposerClearTransientStateRef.current,
                 restoreTransientInputState: inputComposerRestoreTransientStateRef.current,
             });
             let didClearAtOutboundHandoff = false;
+            let semanticDraftCurrentnessAfterHandoffClear: SessionDraftCurrentness | null = null;
             let outboundHandoffLocalId: string | null = null;
             let didRecordOutboundAccepted = false;
             const recordOutboundAccepted = () => {
@@ -5218,15 +5388,20 @@ function SessionViewLoaded({
                 // wake and provider delivery continue through their canonical session/Pending
                 // projections and must not keep the submit button in a local sending state.
                 setIsComposerSendPending(false);
-                const didClear = clearComposerAfterOutboundHandoff({
-                    snapshot: sendSnapshot,
-                    clearDraftForSessionIfCurrentValueMatches,
-                    clearTransientInputState: transientInputStateHandoff.clearTransientInputState,
-                    isSemanticSnapshotCurrent: () => isComposerSemanticDraftSnapshotCurrent(semanticDraftSnapshot),
-                    clearSemanticDraftValues: clearSemanticDraftValuesAfterOutboundHandoff,
-                });
+                const didClear = sendSnapshot.currentness
+                    ? clearDraftCurrentness(sendSnapshot)
+                    : clearComposerAfterOutboundHandoff({
+                        snapshot: sendSnapshot,
+                        clearDraftForSessionIfCurrentValueMatches,
+                        clearTransientInputState: transientInputStateHandoff.clearTransientInputState,
+                    });
+                if (sendSnapshot.currentness && didClear) {
+                    transientInputStateHandoff.clearTransientInputState();
+                }
                 if (didClear) {
-                    semanticDraftSnapshotAfterHandoffClear = captureComposerSemanticDraftSnapshot();
+                    semanticDraftCurrentnessAfterHandoffClear = captureDraftForOutboundHandoff?.(
+                        SESSION_COMPOSER_SEMANTIC_DRAFT_FIELD_IDS,
+                    )?.currentness ?? null;
                 }
                 didClearAtOutboundHandoff = didClearAtOutboundHandoff || didClear;
                 return didClear;
@@ -5242,12 +5417,12 @@ function SessionViewLoaded({
                         sessionId,
                         outboundHandoffLocalId,
                     ),
-                    isSemanticRestoreSafe: () =>
-                        semanticDraftSnapshotAfterHandoffClear !== null
-                        && isComposerSemanticDraftSnapshotCurrent(semanticDraftSnapshotAfterHandoffClear),
+                    isSemanticRestoreSafe: () => areSessionDraftCurrentnessCapturesEqual(
+                        semanticDraftCurrentnessAfterHandoffClear,
+                        captureDraftForOutboundHandoff?.(SESSION_COMPOSER_SEMANTIC_DRAFT_FIELD_IDS)?.currentness ?? null,
+                    ),
                     restoreDraftForSessionIfCurrentValueMatches,
                     restoreTransientInputState: transientInputStateHandoff.restoreTransientInputState,
-                    restoreSemanticDraftValues: () => restoreSemanticDraftValuesFromSnapshot(semanticDraftSnapshot),
                 });
                 if (didRestore && attachmentDraftsForRestore) {
                     restoreAttachmentDraftsFromSnapshot(attachmentDraftsForRestore);
@@ -5294,6 +5469,7 @@ function SessionViewLoaded({
                 if (refused.reason !== 'unreconciledTransitionOutcome') {
                     setArmedContinuationOutcome({
                         kind: 'refusal',
+                        scopeKey: activeServerAccountScopeKey,
                         message: refused.reason === 'conflictingDestination'
                             ? t('session.agentContinuation.transition.conflictingDestination', {
                                 agent: armedContinuationTargetLabel,
@@ -5320,7 +5496,7 @@ function SessionViewLoaded({
                 }>,
                 onAdmitted: () => void,
             ): Promise<void> => {
-                const { disposition, result } = await continueSessionWithArmedAgent({
+                const transitionSubmission = {
                     machineId: destination.machineId,
                     serverId: sessionRouteServerId,
                     sessionId,
@@ -5337,10 +5513,45 @@ function SessionViewLoaded({
                     },
                     sourceAgentLabel: currentAgentLabel,
                     targetAgentLabel: armedContinuationTargetLabel,
-                });
+                };
+                // Persist the stable localId and exact wire input before the RPC
+                // leaves this process. The nested arm is the only durable owner;
+                // a remount can then compare-clear this exact request if custody
+                // appears after the call returned.
+                const existingSubmission = inSessionAgentPicker.armedContinuationSubmission;
+                const transitionInput = existingSubmission?.localId === destination.localId
+                    ? existingSubmission.input
+                    : buildArmedAgentContinuationTransitionInput(transitionSubmission);
+                if (!inSessionAgentPicker.recordArmedContinuationSubmission({
+                    localId: destination.localId,
+                    input: transitionInput,
+                    currentness: {
+                        text: previousMessage,
+                        mentions: semanticDraftSnapshot.structuredInputMentions ?? [],
+                        attachmentDraftIds: attachmentDrafts.map((draft) => draft.id),
+                    },
+                })) {
+                    return;
+                }
+                // The server's reconciliation path is allowed to update a
+                // matching localId, so retrying an edited composer must reuse
+                // the arm's first exact wire input rather than trusting localId
+                // alone to protect its content.
+                const submissionForDispatch = existingSubmission?.localId === destination.localId
+                    ? {
+                        ...transitionSubmission,
+                        input: {
+                            text: existingSubmission.input.text,
+                            meta: existingSubmission.input.meta,
+                        },
+                    }
+                    : transitionSubmission;
+                const { disposition, result } = await continueSessionWithArmedAgent(submissionForDispatch);
                 // The armed row is dropped only once it stops being a truthful
                 // promise about the next message.
-                if (disposition.arm === 'clear') {
+                // A draft clear is consumed by the one compare-clear owner below,
+                // which needs the nested snapshot to remain available first.
+                if (disposition.arm === 'clear' && disposition.draft !== 'clear') {
                     inSessionAgentPicker.clearArmedContinuation();
                 }
                 // The outcome itself is recorded, not its rendering: the banner
@@ -5349,16 +5560,11 @@ function SessionViewLoaded({
                 setArmedContinuationOutcome({
                     kind: 'outcome',
                     sessionId,
+                    scopeKey: activeServerAccountScopeKey,
                     result,
                     intent: destination.intent,
                     labels: buildArmedContinuationLabels(destination.intent.selection.agentId),
                     localId: destination.localId,
-                    // The exact text this submission carried, so a custody
-                    // answer that only arrives later can compare-clear an
-                    // UNCHANGED draft instead of leaving the reader a message
-                    // already sent.
-                    submittedText: previousMessage,
-                    semanticSnapshot: semanticDraftSnapshot,
                     reconciled: false,
                 });
                 // Only canonical admission of this exact localId clears the draft.
@@ -5512,6 +5718,7 @@ function SessionViewLoaded({
                                 : outbound.metaOverrides,
                             configuredMode,
                             busySteerSendPolicy,
+                            sessionInactiveResumePolicy,
                             permissionModeApplyTiming,
                             nonSteerableSendPrompt,
                             providerNonSteerablePayloadReason,
@@ -5550,9 +5757,6 @@ function SessionViewLoaded({
                             }
                             Modal.alert(t('common.error'), result.errorMessage ?? t('errors.failedToSendMessage'));
                             return;
-                        }
-                        if ((result.type === 'wake_pending' || result.type === 'wake_failed') && !isSessionActive && isResumable) {
-                            setPendingQueueResumeFailed(true);
                         }
                         if (shouldSendReviewComments) {
                             clearSentReviewCommentDrafts();
@@ -5750,6 +5954,7 @@ function SessionViewLoaded({
                             : outbound.metaOverrides,
                         configuredMode,
                         busySteerSendPolicy,
+                        sessionInactiveResumePolicy,
                         permissionModeApplyTiming,
                         nonSteerableSendPrompt,
                         providerNonSteerablePayloadReason,
@@ -5793,9 +5998,6 @@ function SessionViewLoaded({
 
                     recordOutboundAccepted();
 
-                    if ((result.type === 'wake_pending' || result.type === 'wake_failed') && !isSessionActive && isResumable) {
-                        setPendingQueueResumeFailed(true);
-                    }
 
                     if (shouldSendReviewComments) {
                         clearSentReviewCommentDrafts();
@@ -5854,6 +6056,7 @@ function SessionViewLoaded({
             )
         ) {
             const previousMessage = composerMessage;
+            const composerClearSnapshot = captureDraftForOutboundHandoff?.();
             void executeSessionComposerResolution({
                 resolved,
                 sessionId,
@@ -5865,7 +6068,12 @@ function SessionViewLoaded({
                 setMessage: setDraftValue,
                 clearDraft,
                 clearTransientInputState: inputComposerClearTransientStateRef.current,
-                clearSemanticDraftValues: clearSemanticDraftValuesAfterAcceptedComposerClear,
+                clearSemanticDraftValues: () => {
+                    if (composerClearSnapshot) {
+                        clearDraftCurrentness(composerClearSnapshot);
+                    }
+                    clearMountedArmedContinuationAfterAcceptedComposerClear();
+                },
                 restoreDraft,
                 restoreComposerSnapshotIfCurrentValueMatches: restoreDraftForSessionIfCurrentValueMatches,
                 restoreComposerSnapshot,
@@ -5897,22 +6105,71 @@ function SessionViewLoaded({
                     <SessionAuthRecoveryBanner message={authSurfaceState.message} />
                 </ComposerAuxiliaryFrame>
             ) : null}
-            {pendingQueueResumeFailed && !pendingQueueResumeFailedBanner.collapsed ? (
+            {pendingActivationPresentation && !pendingQueueResumeFailedBanner.collapsed ? (
                 <ComposerAuxiliaryFrame>
                     <SessionWarningActionBanner
-                        testID="session-pendingQueue-resumeFailed"
-                        actionTestID="session-pendingQueue-resumeFailed-retry"
-                        title={t('session.pendingQueuedResumeFailedTitle')}
-                        body={t('session.pendingQueuedResumeFailedBody')}
-                        actionLabel={t('common.retry')}
-                        actionAccessibilityLabel={t('common.retry')}
-                        disabled={isResuming}
-                        onActionPress={async () => {
-                            const ok = await handleResumeSession({ silent: false });
-                            if (ok) {
-                                setPendingQueueResumeFailed(false);
+                        testID="session-pendingActivation"
+                        tone={pendingActivationPresentation.kind === 'failed' ? 'warning' : 'neutral'}
+                        title={t(`session.pendingActivation.${pendingActivationPresentation.kind}.title`)}
+                        body={t(`session.pendingActivation.${pendingActivationPresentation.kind}.body`)}
+                        {...(pendingActivationPresentation.primaryAction && pendingActivationPresentation.row
+                            ? {
+                                actionTestID: `session-pendingActivation-${pendingActivationPresentation.primaryAction}`,
+                                actionLabel: t(`session.pendingActivation.actions.${pendingActivationPresentation.primaryAction}`),
+                                actionAccessibilityLabel: t(`session.pendingActivation.actions.${pendingActivationPresentation.primaryAction}`),
+                                actionBusy: pendingActivationActionBusy,
+                                disabled: pendingActivationActionBusy,
+                                onActionPress: async () => {
+                                    const row = pendingActivationPresentation.row;
+                                    if (!row?.localId) return;
+                                    setPendingActivationActionBusy(true);
+                                    try {
+                                        await sync.sendPendingMessageNow(sessionId, {
+                                            localId: row.localId,
+                                            createdAt: row.createdAt,
+                                            rawRecord: row.rawRecord,
+                                            text: row.text,
+                                            displayText: row.displayText,
+                                        });
+                                    } catch (error) {
+                                        Modal.alert(t('common.error'), error instanceof Error ? error.message : t('session.pendingMessages.errors.sendFailed'));
+                                    } finally {
+                                        setPendingActivationActionBusy(false);
+                                    }
+                                },
                             }
-                        }}
+                            : {})}
+                        secondaryActions={[
+                            ...(pendingActivationPresentation.secondaryAction && pendingActivationPresentation.row?.localId
+                                ? [{
+                                    key: 'keep-queued',
+                                    testID: 'session-pendingActivation-keepQueued',
+                                    label: t('session.pendingActivation.actions.keepQueued'),
+                                    accessibilityLabel: t('session.pendingActivation.actions.keepQueued'),
+                                    disabled: pendingActivationActionBusy,
+                                    onPress: async () => {
+                                        const localId = pendingActivationPresentation.row?.localId;
+                                        if (!localId) return;
+                                        setPendingActivationActionBusy(true);
+                                        try {
+                                            await sync.updatePendingRequestedAction(sessionId, localId, { v: 1, kind: 'enqueue' });
+                                        } catch (error) {
+                                            Modal.alert(t('common.error'), error instanceof Error ? error.message : t('session.pendingMessages.errors.sendFailed'));
+                                        } finally {
+                                            setPendingActivationActionBusy(false);
+                                        }
+                                    },
+                                }]
+                                : []),
+                            {
+                                key: 'settings',
+                                testID: 'session-pendingActivation-settings',
+                                label: t('session.pendingActivation.actions.autoResumeOptions'),
+                                accessibilityLabel: t('session.pendingActivation.actions.autoResumeOptions'),
+                                onPress: () => router.push('/settings/session/composer'),
+                                variant: 'quiet' as const,
+                            },
+                        ]}
                     />
                 </ComposerAuxiliaryFrame>
             ) : null}
@@ -5931,7 +6188,9 @@ function SessionViewLoaded({
                                 disabled: isResuming || !hasWriteAccess,
                                 // Delegated, never re-implemented: this is the same
                                 // resume owner every other inactive-session path uses.
-                                onActionPress: handleArmedContinuationResume,
+                                onActionPress: async () => {
+                                    await handleArmedContinuationResume();
+                                },
                             }
                             : {})}
                     />
@@ -5970,6 +6229,34 @@ function SessionViewLoaded({
                         actionAccessibilityLabel={visibleStaleSessionRunnerNoticePresentation.banner.primaryAction.accessibilityLabel}
                         disabled={visibleStaleSessionRunnerNoticePresentation.banner.primaryAction.disabled || !hasWriteAccess}
                         onActionPress={() => void handleStaleSessionRunnerRestart()}
+                    />
+                </ComposerAuxiliaryFrame>
+            ) : null}
+            {visibleMcpSelectionRestartNoticePresentation ? (
+                <ComposerAuxiliaryFrame>
+                    <SessionWarningActionBanner
+                        testID={visibleMcpSelectionRestartNoticePresentation.banner.testID}
+                        actionTestID={visibleMcpSelectionRestartNoticePresentation.banner.primaryAction.testID}
+                        title={visibleMcpSelectionRestartNoticePresentation.banner.title}
+                        body={visibleMcpSelectionRestartNoticePresentation.banner.body}
+                        actionLabel={visibleMcpSelectionRestartNoticePresentation.banner.primaryAction.label}
+                        actionAccessibilityLabel={visibleMcpSelectionRestartNoticePresentation.banner.primaryAction.accessibilityLabel}
+                        disabled={
+                            visibleMcpSelectionRestartNoticePresentation.banner.primaryAction.disabled
+                            || !hasWriteAccess
+                            || !mcpSelectionRestartMachineId
+                            || !mcpSelectionRestartExpectedRunnerPid
+                        }
+                        onActionPress={() => void handleMcpSelectionRestart()}
+                    />
+                </ComposerAuxiliaryFrame>
+            ) : null}
+            {draftScope && draftSnapshot?.conflict && !draftConflictBanner.collapsed ? (
+                <ComposerAuxiliaryFrame>
+                    <SessionDraftConflictResolution
+                        scope={draftScope}
+                        address={{ kind: 'session', sessionId }}
+                        conflict={draftSnapshot.conflict}
                     />
                 </ComposerAuxiliaryFrame>
             ) : null}

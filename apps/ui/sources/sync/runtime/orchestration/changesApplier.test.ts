@@ -13,6 +13,7 @@ function buildPlanned(partial: {
     unsupportedChanges?: PlannedChangeActions['unsupportedChanges'];
     invalidate?: Partial<PlannedChangeActions['invalidate']>;
     kv?: PlannedChangeActions['kv'];
+    sessionDraftAddresses?: PlannedChangeActions['sessionDraftAddresses'];
 }): PlannedChangeActions {
     return {
         changes: partial.changes ?? [],
@@ -32,6 +33,7 @@ function buildPlanned(partial: {
             ...(partial.invalidate ?? {}),
         },
         kv: partial.kv ?? { type: 'none' },
+        sessionDraftAddresses: partial.sessionDraftAddresses ?? [],
         sessionFolderAssignments: { mode: 'none' },
         sessionOrganization: { mode: 'none' },
     };
@@ -799,6 +801,74 @@ describe('changesApplier', () => {
         });
     });
 
+    it('advances after session-shell hydration without catching up a hidden loaded transcript', async () => {
+        const invalidateMessagesForSession = vi.fn(async () => {});
+        const result = await applyPlannedChangeActions({
+            planned: buildPlanned({
+                changes: [
+                    buildChange({ cursor: 1, kind: 'session', entityId: 's1', hint: { lastMessageSeq: 120 } }),
+                ],
+                sessionIdsToCatchUp: ['s1'],
+                invalidate: { sessions: true },
+            }),
+            credentials,
+            isSessionMessagesLoaded: () => true,
+            shouldCatchUpSessionMessages: () => false,
+            getSessionMaterializedMaxSeq: () => 119,
+            invalidate: { sessions: async () => {} },
+            invalidateMessagesForSession,
+            invalidateScmStatusForSession: () => {},
+            applyTodoSocketUpdates: async () => {},
+            kvBulkGet: async () => ({ values: [] }),
+        } as Parameters<typeof applyPlannedChangeActions>[0]);
+
+        expect(result).toEqual({
+            status: 'complete',
+            safeAdvanceCursor: '1',
+            processedChanges: 1,
+            blockedChanges: 0,
+        });
+        expect(invalidateMessagesForSession).not.toHaveBeenCalled();
+    });
+
+    it('still repairs an edited row in a hidden loaded transcript without running bulk newer catch-up', async () => {
+        const invalidateMessagesForSession = vi.fn(async () => {});
+        const repairSessionTranscriptRevision = vi.fn(async () => {});
+        const result = await applyPlannedChangeActions({
+            planned: buildPlanned({
+                changes: [
+                    buildChange({
+                        cursor: 1,
+                        kind: 'session',
+                        entityId: 's1',
+                        hint: { lastMessageSeq: 120, updatedMessageSeq: 15, updatedMessageId: 'm15' },
+                    }),
+                ],
+                sessionIdsToCatchUp: ['s1'],
+                sessionTranscriptRepairs: [{ sessionId: 's1', minSeq: 15, messageIds: ['m15'] }],
+                invalidate: { sessions: true },
+            }),
+            credentials,
+            isSessionMessagesLoaded: () => true,
+            shouldCatchUpSessionMessages: () => false,
+            getSessionMaterializedMaxSeq: () => 15,
+            invalidate: { sessions: async () => {} },
+            invalidateMessagesForSession,
+            repairSessionTranscriptRevision,
+            invalidateScmStatusForSession: () => {},
+            applyTodoSocketUpdates: async () => {},
+            kvBulkGet: async () => ({ values: [] }),
+        } as Parameters<typeof applyPlannedChangeActions>[0]);
+
+        expect(result).toMatchObject({ status: 'complete', safeAdvanceCursor: '1' });
+        expect(invalidateMessagesForSession).not.toHaveBeenCalled();
+        expect(repairSessionTranscriptRevision).toHaveBeenCalledWith({
+            sessionId: 's1',
+            minSeq: 15,
+            messageIds: ['m15'],
+        });
+    });
+
     it('advances loaded session rows when the materialized seq reaches the server hint', async () => {
         const result = await applyPlannedChangeActions({
             planned: buildPlanned({
@@ -924,5 +994,30 @@ describe('changesApplier', () => {
             blockedCursor: '1',
             blockedReason: 'pending-not-converged',
         });
+    });
+
+    it('materializes an exact draft before advancing its Account change cursor', async () => {
+        const address = { kind: 'session', sessionId: 'session-a' } as const;
+        const change = buildChange({
+            cursor: 2,
+            kind: 'account',
+            entityId: 'session-draft:session/session-a',
+            hint: { v: 1, sessionDraft: true, address, revision: 4, status: 'present' },
+        });
+        const materializeSessionDraft = vi.fn(async () => {});
+        const result = await applyPlannedChangeActions({
+            planned: buildPlanned({ changes: [change], sessionDraftAddresses: [address] }),
+            credentials,
+            isSessionMessagesLoaded: () => false,
+            invalidate: {},
+            invalidateMessagesForSession: async () => {},
+            invalidateScmStatusForSession: () => {},
+            applyTodoSocketUpdates: async () => {},
+            kvBulkGet: async () => ({ values: [] }),
+            materializeSessionDraft,
+        });
+
+        expect(materializeSessionDraft).toHaveBeenCalledWith(address);
+        expect(result).toMatchObject({ status: 'complete', safeAdvanceCursor: '2' });
     });
 });

@@ -66,13 +66,17 @@ export function buildCodingSessionPromptPlanBaseV1(args: Readonly<{
   base?: string;
   executionRunsFeatureEnabled: boolean;
   memoryRecallGuidanceEnabled?: boolean;
+  sessionTitleToolAvailable?: boolean;
 }>): PromptPlanV1 {
   const settings = args.settings && typeof args.settings === 'object' && !Array.isArray(args.settings)
     ? args.settings
     : null;
   const base = typeof args.base === 'string'
     ? args.base
-    : buildHappierBaseSystemPromptV1({ settings });
+    : buildHappierBaseSystemPromptV1({
+        settings,
+        sessionTitleToolAvailable: args.sessionTitleToolAvailable,
+      });
 
   const blocks = [{
     id: 'coding.base',
@@ -91,7 +95,7 @@ export function buildCodingSessionPromptPlanBaseV1(args: Readonly<{
   if (!args.executionRunsFeatureEnabled) {
     return buildPromptPlanV1({ modality: 'coding', blocks });
   }
-  if (settings?.executionRunsGuidanceEnabled !== true) {
+  if (settings?.executionRunsGuidanceEnabled === false) {
     return buildPromptPlanV1({ modality: 'coding', blocks });
   }
 
@@ -117,6 +121,7 @@ export function buildAppendSystemPromptBaseV1(args: Readonly<{
   base?: string;
   executionRunsFeatureEnabled: boolean;
   memoryRecallGuidanceEnabled?: boolean;
+  sessionTitleToolAvailable?: boolean;
 }>): string {
   return renderPromptPlanV1(buildCodingSessionPromptPlanBaseV1(args));
 }

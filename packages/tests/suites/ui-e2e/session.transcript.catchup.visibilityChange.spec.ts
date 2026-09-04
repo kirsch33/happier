@@ -8,7 +8,10 @@ import { startServerLight, type StartedServer } from '../../src/testkit/process/
 import { startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
 import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/daemon';
 import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
-import { createSessionFromNewSessionComposer } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
+import {
+  createSessionFromNewSessionComposer,
+  reloadCreatedSessionFromNewSessionComposer,
+} from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
 import { fakeClaudeFixturePath } from '../../src/testkit/fakeClaude';
 import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { runCliJson } from '../../src/testkit/uiE2e/cliJson';
@@ -186,15 +189,6 @@ async function waitForLatestMachineId(params: { suiteDir: string; timeoutMs?: nu
   return readLatestMachineIdFromServerLightDb({ suiteDir: params.suiteDir });
 }
 
-async function createSessionFromComposer(params: {
-  page: Page;
-  uiBaseUrl: string;
-  machineId: string;
-  prompt: string;
-}): Promise<string> {
-  return createSessionFromNewSessionComposer(params);
-}
-
 test.describe('ui e2e: transcript background/foreground catch-up (visibility)', () => {
   test.describe.configure({ mode: 'serial' });
 
@@ -215,7 +209,7 @@ test.describe('ui e2e: transcript background/foreground catch-up (visibility)', 
       testDir: suiteDir,
       dbProvider: 'sqlite',
       extraEnv: {
-        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys',
+        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,providers.claude.unifiedTerminal',
         HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
         HAPPIER_PRESENCE_SESSION_TIMEOUT_MS: '60000',
         HAPPIER_PRESENCE_MACHINE_TIMEOUT_MS: '60000',
@@ -331,9 +325,15 @@ test.describe('ui e2e: transcript background/foreground catch-up (visibility)', 
     });
 
     const machineId = await waitForLatestMachineId({ suiteDir, timeoutMs: 120_000 });
-    const sessionId = await createSessionFromComposer({ page, uiBaseUrl, machineId, prompt: `hello vis ${run.runId}` });
-    await page.goto(`${uiBaseUrl}/session/${sessionId}`, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
+    const session = await createSessionFromNewSessionComposer({
+      page,
+      uiBaseUrl,
+      machineId,
+      prompt: `hello vis ${run.runId}`,
+      readiness: 'first-turn-reload-safe',
+    });
+    const { sessionId } = session;
+    await reloadCreatedSessionFromNewSessionComposer({ page, session });
     await requireViewportTelemetrySnapshot(page);
 
     const requests: Array<{ url: string; ts: number }> = [];

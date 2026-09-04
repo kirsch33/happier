@@ -290,7 +290,7 @@ describe('sessionAuthoringDraftAdapters', () => {
                 agentId: 'claude',
                 backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
                 transcriptStorage: 'persisted',
-                profileId: null,
+                profileId: '',
                 environmentVariables: null,
                 resumeSessionId: null,
                 permissionMode: null,
@@ -317,6 +317,7 @@ describe('sessionAuthoringDraftAdapters', () => {
         } as any);
 
         expect(spawnOptions).not.toHaveProperty('token');
+        expect(spawnOptions).not.toHaveProperty('profileId');
     });
 
     it('round-trips an existing-session authoring draft through the shared automation template adapter', () => {
@@ -1077,6 +1078,29 @@ describe('sessionAuthoringDraftAdapters', () => {
         expect(liveDraft.prompt).toBe(prompt);
         expect(liveDraft.displayText).toBe('');
         expect(persistedDraft.input).toBe('<html_like attr="value">large prompt body</html_like>');
+    });
+
+    it('persists an explicit current-path checkout selection as null while leaving an unset selection absent', () => {
+        const liveDraft = buildLiveNewSessionAuthoringDraftFromResolvedInputs({
+            directory: '/tmp/project',
+            prompt: '',
+            connectedServices: null,
+        });
+        const baseParams = {
+            draft: liveDraft,
+            machineId: null,
+            selectedSecretId: null,
+            selectedSecretIdByProfileIdByEnvVarName: null,
+            sessionOnlySecretValueEncByProfileIdByEnvVarName: null,
+            agentNewSessionOptionStateByAgentId: null,
+            updatedAt: 123,
+        };
+
+        expect(buildPersistedNewSessionDraftFromAuthoringDraft(baseParams)).not.toHaveProperty('checkoutCreationDraft');
+        expect(buildPersistedNewSessionDraftFromAuthoringDraft({
+            ...baseParams,
+            checkoutSelectionExplicit: true,
+        })).toHaveProperty('checkoutCreationDraft', null);
     });
 
     it('builds a persisted new-session draft from the shared authoring draft', () => {

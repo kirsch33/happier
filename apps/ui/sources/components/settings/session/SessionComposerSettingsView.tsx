@@ -11,6 +11,10 @@ import { t } from '@/text';
 import { useLocalSettingMutable, useSettingMutable } from '@/sync/domains/state/storage';
 import { normalizeComposerBannerCollapseRecord } from '@/components/sessions/composerBanners/composerBannerCollapse';
 import type { BusySteerSendPolicy, MessageSendMode, NonSteerableSendPromptSetting } from '@/sync/domains/session/control/submitMode';
+import {
+    SESSION_INACTIVE_RESUME_POLICY_VALUES,
+    type SessionInactiveResumePolicy,
+} from '@/sync/domains/session/control/inactiveResumePolicy';
 import { Icon } from '@/components/ui/icons/Icon';
 
 type PendingQueueDrainMode = 'one_at_a_time' | 'drain_all';
@@ -24,6 +28,7 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
     const [nonSteerableSendPrompt, setNonSteerableSendPrompt] = useSettingMutable('sessionNonSteerableSendPrompt');
     const [pendingQueueDrainMode, setPendingQueueDrainMode] = useSettingMutable('sessionPendingQueueDrainMode');
     const [pendingQueueDeliveryTiming, setPendingQueueDeliveryTiming] = useSettingMutable('sessionPendingQueueDeliveryTiming');
+    const [sessionInactiveResumePolicy, setSessionInactiveResumePolicy] = useSettingMutable('sessionInactiveResumePolicy');
     const [agentInputEnterToSend, setAgentInputEnterToSend] = useSettingMutable('agentInputEnterToSend');
     const [agentInputEnterToSendNative, setAgentInputEnterToSendNative] = useSettingMutable('agentInputEnterToSendNative');
     const [agentInputHistoryScope, setAgentInputHistoryScope] = useSettingMutable('agentInputHistoryScope');
@@ -32,8 +37,10 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
     const [alwaysShowContextSize, setAlwaysShowContextSize] = useSettingMutable('alwaysShowContextSize');
     const [composerSurfaceStyle, setComposerSurfaceStyle] = useSettingMutable('composerSurfaceStyle');
     const [rememberBannerVisibility, setRememberBannerVisibility] = useSettingMutable('sessionComposerRememberBannerVisibility');
+    const [newSessionDraftEntryMode, setNewSessionDraftEntryMode] = useSettingMutable('newSessionDraftEntryMode');
     const [collapsedBannerKinds, setCollapsedBannerKinds] = useLocalSettingMutable('sessionComposerCollapsedBannerKinds');
     const [openHistoryScopeMenu, setOpenHistoryScopeMenu] = React.useState(false);
+    const [openInactiveResumePolicyMenu, setOpenInactiveResumePolicyMenu] = React.useState(false);
 
     const hiddenBannerCount = Object.keys(normalizeComposerBannerCollapseRecord(collapsedBannerKinds)).length;
 
@@ -76,6 +83,28 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
             subtitle: t('settingsSession.messageSending.pendingSubtitle'),
         },
     ];
+    const inactiveResumePolicyOptions = SESSION_INACTIVE_RESUME_POLICY_VALUES.map((policy) => {
+        switch (policy) {
+            case 'when_available':
+                return {
+                    id: policy,
+                    title: t('settingsSession.messageSending.inactiveResumePolicy.whenAvailableTitle'),
+                    subtitle: t('settingsSession.messageSending.inactiveResumePolicy.whenAvailableSubtitle'),
+                };
+            case 'online_only':
+                return {
+                    id: policy,
+                    title: t('settingsSession.messageSending.inactiveResumePolicy.onlineOnlyTitle'),
+                    subtitle: t('settingsSession.messageSending.inactiveResumePolicy.onlineOnlySubtitle'),
+                };
+            case 'manual':
+                return {
+                    id: policy,
+                    title: t('settingsSession.messageSending.inactiveResumePolicy.manualTitle'),
+                    subtitle: t('settingsSession.messageSending.inactiveResumePolicy.manualSubtitle'),
+                };
+        }
+    });
     const busySteerOptions: Array<{ key: BusySteerSendPolicy; title: string; subtitle: string }> = [
         {
             key: 'steer_immediately',
@@ -133,6 +162,34 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
 
     return (
         <ItemList ref={popoverBoundaryRef} style={{ paddingTop: 0 }}>
+            <ItemGroup
+                title={t('settingsSession.newSessionDraftEntry.title')}
+                footer={t('settingsSession.newSessionDraftEntry.footer')}
+            >
+                <Item
+                    testID="settings-new-session-draft-entry-resume"
+                    title={t('settingsSession.newSessionDraftEntry.resumeTitle')}
+                    subtitle={t('settingsSession.newSessionDraftEntry.resumeSubtitle')}
+                    icon={<Icon name="clock-counter-clockwise" size={29} color={theme.colors.accent.indigo} />}
+                    rightElement={newSessionDraftEntryMode === 'resumePrevious'
+                        ? <Icon name="check" size={20} color={theme.colors.accent.blue} />
+                        : null}
+                    onPress={() => setNewSessionDraftEntryMode('resumePrevious')}
+                    showChevron={false}
+                />
+                <Item
+                    testID="settings-new-session-draft-entry-fresh"
+                    title={t('settingsSession.newSessionDraftEntry.freshTitle')}
+                    subtitle={t('settingsSession.newSessionDraftEntry.freshSubtitle')}
+                    icon={<Icon name="plus" size={29} color={theme.colors.accent.indigo} />}
+                    rightElement={newSessionDraftEntryMode === 'alwaysFresh'
+                        ? <Icon name="check" size={20} color={theme.colors.accent.blue} />
+                        : null}
+                    onPress={() => setNewSessionDraftEntryMode('alwaysFresh')}
+                    showChevron={false}
+                />
+            </ItemGroup>
+
             <ItemGroup title={t('settingsSession.inputBehavior.title')} footer={t('settingsSession.inputBehavior.footer')}>
                 <Item
                     title={t('settingsFeatures.enterToSend')}
@@ -188,6 +245,35 @@ export const SessionComposerSettingsView = React.memo(function SessionComposerSe
                         showChevron={false}
                     />
                 ))}
+                <DropdownMenu
+                    open={openInactiveResumePolicyMenu}
+                    onOpenChange={setOpenInactiveResumePolicyMenu}
+                    variant="selectable"
+                    search={false}
+                    selectedId={sessionInactiveResumePolicy}
+                    showCategoryTitles={false}
+                    matchTriggerWidth={true}
+                    connectToTrigger={true}
+                    rowKind="item"
+                    popoverBoundaryRef={popoverBoundaryRef}
+                    itemTrigger={{
+                        title: t('settingsSession.messageSending.inactiveResumePolicyTitle'),
+                        subtitle: t('settingsSession.messageSending.inactiveResumePolicySubtitle'),
+                        icon: <Icon name="arrow-clockwise" size={29} color={theme.colors.accent.blue} />,
+                    }}
+                    items={inactiveResumePolicyOptions.map((option) => ({
+                        ...option,
+                        icon: (
+                            <View style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}>
+                                <Icon name="arrow-clockwise" size={20} color={theme.colors.text.secondary} />
+                            </View>
+                        ),
+                    }))}
+                    onSelect={(id) => {
+                        setSessionInactiveResumePolicy(id as SessionInactiveResumePolicy);
+                        setOpenInactiveResumePolicyMenu(false);
+                    }}
+                />
             </ItemGroup>
 
             {messageSendMode === 'agent_queue' || messageSendMode === 'server_pending' ? (

@@ -5,6 +5,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { renderScreen } from '@/dev/testkit';
 import { installSessionHandoffCommonModuleMocks } from './sessionHandoffTestHelpers';
 
+const requestActionOperationStopMock = vi.hoisted(() => vi.fn(async () => {}));
+
+vi.mock('@/components/inbox/actionOperations/requestActionOperationStop', () => ({
+    requestActionOperationStop: requestActionOperationStopMock,
+}));
+
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 installSessionHandoffCommonModuleMocks();
@@ -14,6 +20,41 @@ function findProgressIndicators(screen: Awaited<ReturnType<typeof renderScreen>>
 }
 
 describe('SessionHandoffProgressModal', () => {
+    it('keeps the shared operation Stop and Collapse controls in the rich running presentation', async () => {
+        const { SessionHandoffProgressModal } = await import('./SessionHandoffProgressModal');
+        const setChrome = vi.fn();
+        const onClose = vi.fn();
+        const operation = {
+            version: 1 as const,
+            operationId: 'handoff-operation-controls',
+            requestId: 'request-controls',
+            revision: 1,
+            actionId: 'session.handoff',
+            state: 'running' as const,
+            scope: { accountId: 'account-1', machineId: 'source-machine', sessionId: 'session-1' },
+            title: 'Hand off session',
+            createdAt: 1,
+            startedAt: 1,
+            cancellation: 'supported' as const,
+        };
+
+        await renderScreen(
+            <SessionHandoffProgressModal
+                onClose={onClose}
+                setChrome={setChrome}
+                operation={operation}
+            />,
+        );
+
+        const chrome = setChrome.mock.calls.at(-1)?.[0];
+        expect(React.isValidElement(chrome?.footer)).toBe(true);
+        const footer = await renderScreen(chrome.footer);
+        await footer.pressByTestIdAsync('action-operation-stop');
+        expect(requestActionOperationStopMock).toHaveBeenCalledWith(operation);
+        await footer.pressByTestIdAsync('action-operation-close');
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
     it('shows a spinner while the modal is waiting for the first status update', async () => {
         const { SessionHandoffProgressModal } = await import('./SessionHandoffProgressModal');
         const setChrome = vi.fn();
@@ -31,6 +72,120 @@ describe('SessionHandoffProgressModal', () => {
         );
         expect(screen.getTextContent()).toContain('sessionHandoff.progress.message');
         expect(findProgressIndicators(screen)).toHaveLength(1);
+    });
+
+    it('shows determinate session-state packaging progress before workspace preparation begins', async () => {
+        const { SessionHandoffProgressModal } = await import('./SessionHandoffProgressModal');
+        const screen = await renderScreen(
+            <SessionHandoffProgressModal
+                onClose={() => {}}
+                operation={{
+                    version: 1,
+                    operationId: 'handoff-operation-1',
+                    requestId: 'request-1',
+                    revision: 2,
+                    actionId: 'session.handoff',
+                    state: 'running',
+                    scope: { accountId: 'account-1', machineId: 'source-machine', sessionId: 'session-1' },
+                    title: 'Hand off session',
+                    createdAt: 1,
+                    startedAt: 1,
+                    progress: { kind: 'determinate', current: 1024, total: 4096, label: 'Packaging session state' },
+                    cancellation: 'supported',
+                }}
+            />,
+        );
+
+        expect(screen.findByTestId('session-handoff-operation-progress-bar')).toBeTruthy();
+        expect(screen.getTextContent()).toContain('25');
+        expect(screen.getTextContent()).toContain('Packaging session state');
+    });
+
+    it('renders operation progress as one stateful checklist with progress nested under the active step', async () => {
+        const { SessionHandoffProgressModal } = await import('./SessionHandoffProgressModal');
+        const screen = await renderScreen(
+            <SessionHandoffProgressModal
+                onClose={() => {}}
+                workspaceTransferEnabled={false}
+                operation={{
+                    version: 1,
+                    operationId: 'handoff-operation-1',
+                    requestId: 'request-1',
+                    revision: 3,
+                    actionId: 'session.handoff',
+                    state: 'running',
+                    scope: { accountId: 'account-1', machineId: 'source-machine', sessionId: 'session-1' },
+                    title: 'Hand off session',
+                    createdAt: 1,
+                    startedAt: 1,
+                    progress: { kind: 'determinate', current: 1024, total: 4096, label: 'Transferring session data' },
+                    cancellation: 'supported',
+                }}
+            />,
+        );
+
+        const prepare = screen.findByTestId('session-handoff-step-prepare-session');
+        const transfer = screen.findByTestId('session-handoff-step-transfer-session');
+        const workspace = screen.findByTestId('session-handoff-step-transfer-workspace');
+        const startTarget = screen.findByTestId('session-handoff-step-start-target');
+
+        expect(prepare?.props.accessibilityState?.checked).toBe(true);
+        expect(transfer?.props.accessibilityState?.selected).toBe(true);
+        expect(workspace).toBeNull();
+        expect(startTarget?.props.accessibilityState?.selected).toBe(false);
+        expect(transfer?.findByProps({ testID: 'session-handoff-operation-progress-bar' })).toBeTruthy();
+        expect(screen.getTextContent()).not.toContain('Transferring session data');
+    });
+
+    it('keeps completed session bytes anchored to the session transfer step while import begins', async () => {
+        const { SessionHandoffProgressModal } = await import('./SessionHandoffProgressModal');
+        const screen = await renderScreen(
+            <SessionHandoffProgressModal
+                onClose={() => {}}
+                operation={{
+                    version: 1,
+                    operationId: 'handoff-operation-2',
+                    requestId: 'request-2',
+                    revision: 4,
+                    actionId: 'session.handoff',
+                    state: 'running',
+                    scope: { accountId: 'account-1', machineId: 'source-machine', sessionId: 'session-1' },
+                    title: 'Hand off session',
+                    createdAt: 1,
+                    startedAt: 1,
+                    progress: { kind: 'determinate', current: 4096, total: 4096, label: 'Importing session state' },
+                    cancellation: 'supported',
+                }}
+            />,
+        );
+
+        expect(screen.findByTestId('session-handoff-step-transfer-session')?.props.accessibilityState?.selected).toBe(true);
+    });
+
+    it('suppresses semantically duplicate workspace progress labels', async () => {
+        const { SessionHandoffProgressModal } = await import('./SessionHandoffProgressModal');
+        const screen = await renderScreen(
+            <SessionHandoffProgressModal
+                onClose={() => {}}
+                workspaceTransferEnabled
+                operation={{
+                    version: 1,
+                    operationId: 'handoff-operation-3',
+                    requestId: 'request-3',
+                    revision: 5,
+                    actionId: 'session.handoff',
+                    state: 'running',
+                    scope: { accountId: 'account-1', machineId: 'source-machine', sessionId: 'session-1' },
+                    title: 'Hand off session',
+                    createdAt: 1,
+                    startedAt: 1,
+                    progress: { kind: 'determinate', current: 1024, total: 4096, label: 'Transferring workspace' },
+                    cancellation: 'supported',
+                }}
+            />,
+        );
+
+        expect(screen.getTextContent()).not.toContain('Transferring workspace');
     });
 
     it('renders a full checkpoint timeline that matches the protocol checkpoint enum', async () => {

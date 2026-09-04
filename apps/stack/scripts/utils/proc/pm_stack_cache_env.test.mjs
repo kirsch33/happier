@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ensureCliBuilt, ensureDepsInstalled, pmExecBin } from './pm.mjs';
 import { withCliDistBuildLock } from './cliDistBuildLock.mjs';
+import { writeWorkspacePackageBuildOwnerProxy } from '../../testkit/core/workspace_package_build_owner.mjs';
 
 async function writeYarnEnvDumpStub({ binDir, outputPath }) {
   await mkdir(binDir, { recursive: true });
@@ -147,7 +148,7 @@ async function writeNpmArgDumpStub({ binDir, outputPath }) {
   await writeFile(
     npmPath,
     [
-      '#!/usr/bin/env bash',
+      '#!/bin/bash',
       'set -euo pipefail',
       'echo "$*" >> "${OUTPUT_PATH:?}"',
     ].join('\n') + '\n',
@@ -163,7 +164,7 @@ async function writeCorepackYarnArgDumpStub({ binDir, outputPath }) {
   await writeFile(
     corepackPath,
     [
-      '#!/usr/bin/env bash',
+      '#!/bin/bash',
       'set -euo pipefail',
       'echo "$*" >> "${OUTPUT_PATH:?}"',
       'if [[ "${1:-}" == "yarn" && "${2:-}" == "--version" ]]; then',
@@ -1069,16 +1070,22 @@ test('ensureDepsInstalled does not repeat a successful no-op refresh while depen
   const unchangedInstalls = unchangedOut.split('\n').filter((line) => /\binstall\b/.test(line));
   assert.equal(unchangedInstalls.length, 1, `expected one successful refresh for unchanged inputs, got:\n${unchangedOut}`);
 
-  const changed = new Date(Date.now() + 10_000);
-  await utimes(join(root, 'apps', 'server', 'package.json'), changed, changed);
+  await writeFile(
+    join(root, 'apps', 'server', 'package.json'),
+    '{"name":"happier-server-light","version":"1"}\n',
+    'utf-8',
+  );
   await ensureDepsInstalled(join(root, 'apps', 'server'), 'happier-server-light', { quiet: true });
 
   const changedOut = await readFile(outputPath, 'utf-8');
   const changedInstalls = changedOut.split('\n').filter((line) => /\binstall\b/.test(line));
   assert.equal(changedInstalls.length, 2, `expected a later dependency input change to refresh again, got:\n${changedOut}`);
 
-  const changedAgain = new Date(Date.now() + 20_000);
-  await utimes(join(root, 'apps', 'server', 'package.json'), changedAgain, changedAgain);
+  await writeFile(
+    join(root, 'apps', 'server', 'package.json'),
+    '{"name":"happier-server-light","version":"2"}\n',
+    'utf-8',
+  );
   process.env.YARN_INSTALL_FAIL = '1';
   await assert.rejects(
     ensureDepsInstalled(join(root, 'apps', 'server'), 'happier-server-light', { quiet: true }),
@@ -1375,7 +1382,7 @@ test('ensureDepsInstalled falls back to npm in binary mode when yarn is unavaila
   await writeNpmArgDumpStub({ binDir, outputPath });
 
   applyEnvOverrides(t, {
-    PATH: `${binDir}:/usr/bin:/bin`,
+    PATH: binDir,
     OUTPUT_PATH: outputPath,
     HAPPIER_STACK_BINARY_MODE: '1',
     HAPPIER_STACK_ENV_FILE: null,
@@ -1404,7 +1411,7 @@ test('ensureDepsInstalled uses Corepack Yarn when a global Yarn shim is unavaila
     quiet: true,
     env: {
       ...process.env,
-      PATH: `${binDir}:/usr/bin:/bin`,
+      PATH: binDir,
       OUTPUT_PATH: outputPath,
       HAPPIER_STACK_BINARY_MODE: '0',
       HAPPIER_STACK_ENV_FILE: '',
@@ -1431,7 +1438,7 @@ test('ensureDepsInstalled preserves a Windows-style Path key while preparing Cor
 
   const env = {
     ...process.env,
-    Path: `${binDir}:/usr/bin:/bin`,
+    Path: binDir,
     OUTPUT_PATH: outputPath,
     HAPPIER_STACK_BINARY_MODE: '0',
     HAPPIER_STACK_ENV_FILE: '',
@@ -1981,6 +1988,7 @@ test('ensureCliBuilt refreshes shared workspace deps before trusting a cached cl
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
   });
+  await writeWorkspacePackageBuildOwnerProxy(root);
 
   const cliDir = join(root, 'apps', 'cli');
   const agentsDir = join(root, 'packages', 'agents');
@@ -2066,6 +2074,7 @@ test('ensureCliBuilt rebuilds an auto-mode cli dist after repairing a stale work
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
   });
+  await writeWorkspacePackageBuildOwnerProxy(root);
 
   const cliDir = join(root, 'apps', 'cli');
   const agentsDir = join(root, 'packages', 'agents');

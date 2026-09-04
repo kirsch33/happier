@@ -834,6 +834,17 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         emptyDescription: '目前沒有待處理的請求或更新。',
         unreadSessions: '未讀工作階段',
         updates: '動態',
+        actionOperations: {
+            sections: { inProgress: '進行中', needsAttention: '需要處理', recent: '最近' },
+            clearRecent: '清除最近記錄',
+            status: { accepted: '已接受', running: '執行中', succeeded: '已成功', failed: '失敗', cancelled: '已取消', reconnecting: '正在重新連線', unavailable: '狀態無法使用', setupNeedsAttention: '工作階段已建立；設定需要處理' },
+            empty: '長時間執行的操作會顯示在這裡。',
+            openHint: '開啟操作詳細資訊',
+            stop: '停止',
+            dismiss: '隱藏',
+            stopFailed: '無法停止此操作。它可能仍在執行。',
+            detail: { status: '狀態', progress: '進度', error: '錯誤', warning: '警告', result: '結果', recoveryReference: '復原參照' },
+        },
     },
 
     memorySearchSettings: {
@@ -2077,13 +2088,14 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         backendsSubtitle: "已設定的後端與自訂啟動目標。",
       },
       enableInjection: {
-        title: "啟用指引注入",
+        title: "Happier 執行指示",
+        subtitle: "關閉後，編碼代理的系統提示詞中將移除原生優先路由說明與 Happier 執行機制。",
       },
       characterBudget: {
-        title: "字元上限",
+        title: "自訂規則字元上限",
         subtitle: ({ value }: { value: string }) => `${value} 個字元`,
-        promptTitle: "字元上限",
-        promptBody: "可注入到系統提示詞中的最大字元數。",
+        promptTitle: "自訂規則字元上限",
+        promptBody: "系統提示詞中自訂執行規則的最大字元數。",
       },
       rules: {
         groupTitle: "指引規則",
@@ -3941,8 +3953,8 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         showLineNumbersInDiffsDescription: '在程式碼差異中顯示行號',
         showLineNumbersInToolViews: '在工具檢視中顯示行號',
         showLineNumbersInToolViewsDescription: '在工具檢視差異中顯示行號',
-        wrapLinesInDiffs: '在差異中換行',
-        wrapLinesInDiffsDescription: '在差異檢視中換行顯示長行而不是水平捲動',
+        wrapLinesInDiffs: '在程式碼檢視中自動換行',
+        wrapLinesInDiffsDescription: '在程式碼預覽和編輯器中自動換行顯示長行，而不是水平捲動',
         alwaysShowContextSize: '始終顯示上下文大小',
         alwaysShowContextSizeDescription: '即使未接近限制時也顯示上下文使用情況',
         avatarStyle: '頭像風格',
@@ -4181,6 +4193,8 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         daemonRpcUnavailableBody:
             'Happier 無法連線到此裝置上的守護程序。它可能離線、仍在啟動，或與伺服器中斷連線。',
         launchStillPendingTitle: '工作階段仍在啟動',
+        createdWithSetupIssueTitle: '工作階段已建立',
+        createdWithSetupIssueBody: '工作階段已建立，但初始設定尚未完成。你可以在此畫面重試，而不會建立另一個工作階段。',
         launchStillPendingBody:
             'Happier 尚未確認新的工作階段。啟動要求仍已儲存。請重試以繼續同一次啟動，不會建立重複的工作階段。',
         connectedServiceSwitchUnavailable: {
@@ -4606,10 +4620,15 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
             },
             resuming: '正在恢復...',
             resumeFailed: '無法恢復工作階段',
-            pendingQueuedResumeFailedTitle: '訊息已排入佇列',
-            pendingQueuedResumeFailedBody:
-                '你的訊息已儲存到待傳送佇列，但 Happier 無法恢復此工作階段。請重試以啟動它。',
-            composerBanners: {
+        pendingActivation: {
+            waiting_offline: { title: '訊息已加入此機器的佇列', body: '這台機器及其背景服務重新上線後，訊息將被處理。' },
+            waiting: { title: '等待恢復', body: '背景服務恢復此工作階段時，你的訊息會安全地保留在佇列中。' },
+            failed: { title: '無法恢復工作階段', body: '你的訊息仍安全地保留在佇列中。準備好後請重試。' },
+            queued: { title: '訊息已加入佇列', body: '此非作用中工作階段有一則排隊訊息。準備好後請恢復工作階段。' },
+            queued_offline: { title: '訊息等待手動恢復', body: '在你恢復此工作階段之前，訊息會一直留在佇列中。' },
+            actions: { retry: '重試', resume: '恢復', process_when_online: '上線後處理', keepQueued: '保留在佇列中', autoResumeOptions: '自動恢復選項' },
+        },
+        composerBanners: {
                 showBannerAction: '顯示橫幅',
                 hideBannerAction: '隱藏橫幅',
             },
@@ -5133,6 +5152,12 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         newTagConfirm: '新增',
     },
 
+    sessionDrafts: {
+        sectionTitle: '草稿', badge: '草稿', untitled: '未命名草稿', continueEditing: '繼續編輯', startAnother: '開始另一份',
+        status: { offline: '離線', syncing: '同步中', conflict: '衝突', machineUnavailable: '機器無法使用', attachmentNeedsAttention: '附件需要處理', startInterrupted: '啟動中斷' },
+        new: { action: '新增草稿' }, delete: { action: '刪除草稿', confirmTitle: '刪除草稿？', confirmDescription: '此草稿將從你的裝置移除。' },
+        conflict: { title: '草稿衝突', description: '此欄位已在其他裝置上變更。', mine: '此裝置', synced: '已同步', useSynced: '使用同步版本', keepDevice: '保留裝置版本', copyMine: '複製我的版本', copied: '已複製', copyFailed: '無法複製', field: { text: '文字', mentions: '提及', attachments: '附件', recipient: '收件者', agentContinuation: '代理延續', executionRunDelivery: '執行傳送' } },
+    },
     sessionsList: {
         serverHeader: ({ server }: { server: string }) => `伺服器：${server}`,
         storagePersistedTab: 'Happier',
@@ -5248,6 +5273,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} connected services`,
         browseSourceClaudeDefault: "預設 Claude 設定",
         browseSourceOpenCodeDefault: "預設 OpenCode 伺服器",
+        browseSourcePiDefault: "預設 Pi 代理目錄",
         browseCandidates: "可用工作階段",
         browseNoMachines: "目前尚無可用於直接工作階段的機器。",
         browseNoCandidates: "找不到這台機器與提供者對應的工作階段。",
@@ -5336,6 +5362,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         viewSessionLogSubtitle: '開啟此工作階段的即時日誌尾端',
         pinSession: '釘選工作階段',
         unpinSession: '取消釘選',
+        pinLimitExceeded: ({ count }: { count: number }) => `最多可釘選 ${count.toLocaleString()} 個工作階段。請取消釘選另一個工作階段後再試一次。`,
         viewMachine: '查看裝置',
         viewMachineSubtitle: '查看裝置詳情和工作階段',
         killSessionSubtitle: '立即終止工作階段',
@@ -6346,6 +6373,14 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                 runClass: '執行類別',
                 ioMode: 'I/O 模式',
             },
+            launchOrigin: {
+                crossSession: ({ sessionId }: { sessionId: string }) => `由工作階段 ${sessionId} 啟動`,
+                externalCli: '由 CLI 從外部啟動',
+                externalMcp: '透過 MCP 從外部啟動',
+                externalAction: '透過 Happier 動作從外部啟動',
+                externalUnknown: '從外部啟動（來源不明）',
+                legacyUnknown: '啟動來源不明',
+            },
             timestamps: {
                 started: '開始',
                 finished: '完成',
@@ -6516,6 +6551,14 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: '新工作階段草稿',
+        footer: '選擇「新工作階段」要繼續此裝置上的草稿，還是開啟新草稿。',
+        resumeTitle: '繼續上一個草稿',
+        resumeSubtitle: '繼續在此裝置上透過「新工作階段」開始的草稿。',
+        freshTitle: '一律重新開始',
+        freshSubtitle: '每次選擇「新工作階段」時都開啟新草稿。',
+    },
 	          sessionList: {
 	              title: '工作階段列表',
 	              footer: '工作階段側邊欄列表的外觀與行為。',
@@ -6679,6 +6722,16 @@ settingsSession: {
             title: '進階',
         },
         messageSending: {
+            inactiveResumePolicyTitle: '傳送後自動恢復',
+            inactiveResumePolicySubtitle: '選擇向非作用中工作階段傳送訊息後 Happier 應執行的操作。',
+            inactiveResumePolicy: {
+                whenAvailableTitle: '立即或機器恢復時',
+                whenAvailableSubtitle: '可連線時立即恢復；否則在背景服務重新連線後處理。',
+                onlineOnlyTitle: '僅當機器在線上時',
+                onlineOnlySubtitle: '傳送時只嘗試一次。若無法使用，則將訊息保留在佇列中。',
+                manualTitle: '永不自動恢復',
+                manualSubtitle: '始終將訊息保留在佇列中，直到你恢復工作階段。',
+            },
             title: '訊息送出',
             footer: '控制代理執行中送出訊息時的行為。',
             queueInAgentTitle: '在代理中排隊（目前）',
@@ -7032,6 +7085,9 @@ settingsSession: {
               wizardColumnsTitle: '雙欄版面',
               wizardColumnsEnabledSubtitle: '在寬螢幕上並排顯示相關選擇器。',
               wizardColumnsDisabledSubtitle: '將所有精靈選擇器堆疊在單欄中。',
+              defaultWorktreeTitle: '為新工作階段建立 worktree',
+              defaultWorktreeEnabledSubtitle: '在新的 worktree 中啟動每個新的 Git 工作階段。',
+              defaultWorktreeDisabledSubtitle: '在所選資料夾中啟動新的 Git 工作階段。',
               wizardPresentationTitle: '精靈選擇器版面',
               wizardPresentationFooter: 'Auto 會將短區段保留為清單，並將長區段切換為可搜尋下拉選單。',
               wizardPresentationAutoTitle: 'Auto',

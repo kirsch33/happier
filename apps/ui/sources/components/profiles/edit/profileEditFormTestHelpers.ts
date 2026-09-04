@@ -6,6 +6,7 @@ type ModuleFactory = () => unknown | Promise<unknown>;
 type InstallProfileEditFormModuleMocksOptions = Readonly<{
     reactNative?: ModuleFactory;
     storageModule?: ModuleFactory;
+    environmentVariablesList?: ModuleFactory;
 }>;
 
 const profileEditFormTestState = vi.hoisted(() => ({
@@ -19,6 +20,7 @@ const profileEditFormTestState = vi.hoisted(() => ({
     options: {
         reactNative: undefined as ModuleFactory | undefined,
         storageModule: undefined as ModuleFactory | undefined,
+        environmentVariablesList: undefined as ModuleFactory | undefined,
     },
 }));
 
@@ -33,6 +35,7 @@ export function resetProfileEditFormTestState() {
     profileEditFormTestState.options = {
         reactNative: undefined,
         storageModule: undefined,
+        environmentVariablesList: undefined,
     };
 }
 
@@ -42,6 +45,7 @@ export function installProfileEditFormModuleMocks(
     profileEditFormTestState.options = {
         reactNative: options.reactNative,
         storageModule: options.storageModule,
+        environmentVariablesList: options.environmentVariablesList,
     };
 
     vi.mock('@/text', async () => {
@@ -119,12 +123,17 @@ export function installProfileEditFormModuleMocks(
         useCLIDetection: () => ({ status: 'unknown' }),
     }));
 
-    vi.mock('@/components/profiles/environmentVariables/EnvironmentVariablesList', () => ({
-        EnvironmentVariablesList: () => null,
-    }));
+    vi.mock('@/components/profiles/environmentVariables/EnvironmentVariablesList', async () => {
+        if (profileEditFormTestState.options.environmentVariablesList) {
+            return await profileEditFormTestState.options.environmentVariablesList();
+        }
+        return {
+            EnvironmentVariablesList: () => null,
+        };
+    });
 
     vi.mock('@/components/ui/forms/dropdown/DropdownMenu', () => ({
-        DropdownMenu: () => null,
+        DropdownMenu: (props: Record<string, unknown>) => React.createElement('DropdownMenu', props),
     }));
 
     vi.mock('@/components/ui/lists/ItemList', () => ({

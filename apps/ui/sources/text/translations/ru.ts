@@ -757,6 +757,17 @@ export const ru: TranslationStructure = {
     permissions: "Разрешения",
     unreadSessions: "Непрочитанные сессии",
     updates: "Активность",
+    actionOperations: {
+      sections: { inProgress: "Выполняются", needsAttention: "Требуют внимания", recent: "Недавние" },
+      clearRecent: "Очистить недавние",
+      status: { accepted: "Принято", running: "Выполняется", succeeded: "Выполнено", failed: "Ошибка", cancelled: "Отменено", reconnecting: "Повторное подключение", unavailable: "Статус недоступен", setupNeedsAttention: "Сессия создана; настройка требует внимания" },
+      empty: "Здесь появятся длительные действия.",
+      openHint: "Открывает сведения о действии",
+      stop: "Остановить",
+      dismiss: "Скрыть",
+      stopFailed: "Не удалось остановить эту операцию. Возможно, она всё ещё выполняется.",
+      detail: { status: "Статус", progress: "Ход выполнения", error: "Ошибка", warning: "Предупреждение", result: "Результат", recoveryReference: "Ссылка для восстановления" },
+    },
   },
 
   approvals: {
@@ -1796,14 +1807,15 @@ export const ru: TranslationStructure = {
           backendsSubtitle: "Настроенные серверные части и пользовательские цели запуска.",
         },
         enableInjection: {
-          title: "Включить внедрение подсказок",
+          title: "Инструкции для запусков Happier",
+          subtitle: "Отключение удаляет приоритет нативной маршрутизации и механику запусков Happier из системных промптов агентов программирования.",
         },
         characterBudget: {
-          title: "Лимит символов",
+          title: "Лимит пользовательских правил",
           subtitle: ({ value }: { value: string }) => `${value} символов`,
-          promptTitle: "Лимит символов",
+          promptTitle: "Лимит пользовательских правил",
           promptBody:
-            "Максимум символов, которые будут добавлены в системный промпт.",
+            "Максимум символов для пользовательских правил запуска в системном промпте.",
         },
         rules: {
           groupTitle: "Правила подсказок",
@@ -4268,9 +4280,9 @@ export const ru: TranslationStructure = {
       "Показывать номера строк в представлениях инструментов",
     showLineNumbersInToolViewsDescription:
       "Отображать номера строк в различиях представлений инструментов",
-    wrapLinesInDiffs: "Перенос строк в различиях",
+    wrapLinesInDiffs: "Перенос строк в представлениях кода",
     wrapLinesInDiffsDescription:
-      "Переносить длинные строки вместо горизонтальной прокрутки в представлениях различий",
+      "Переносить длинные строки в предпросмотрах кода и редакторах вместо горизонтальной прокрутки",
     alwaysShowContextSize: "Всегда показывать размер контекста",
     alwaysShowContextSizeDescription:
       "Отображать использование контекста даже когда не близко к лимиту",
@@ -4742,6 +4754,8 @@ export const ru: TranslationStructure = {
     daemonRpcUnavailableBody:
       "Happier не может подключиться к демону на этой машине. Он может быть офлайн, ещё запускаться или быть отключён от сервера.",
     launchStillPendingTitle: "Запуск всё ещё выполняется",
+    createdWithSetupIssueTitle: "Сеанс создан",
+    createdWithSetupIssueBody: "Сеанс создан, но начальная настройка не завершена. Можно повторить попытку на этом экране, не создавая новый сеанс.",
     launchStillPendingBody:
       "Happier ещё не подтвердил новую сессию. Запрос на запуск сохранён. Повторите попытку, чтобы продолжить тот же запуск без создания дубликата сессии.",
     connectedServiceSwitchUnavailable: {
@@ -5089,6 +5103,12 @@ export const ru: TranslationStructure = {
     newTagConfirm: "Добавить",
   },
 
+  sessionDrafts: {
+    sectionTitle: 'Черновики', badge: 'Черновик', untitled: 'Черновик без названия', continueEditing: 'Продолжить редактирование', startAnother: 'Начать другой',
+    status: { offline: 'Не в сети', syncing: 'Синхронизация', conflict: 'Конфликт', machineUnavailable: 'Компьютер недоступен', attachmentNeedsAttention: 'Вложение требует внимания', startInterrupted: 'Запуск прерван' },
+    new: { action: 'Новый черновик' }, delete: { action: 'Удалить черновик', confirmTitle: 'Удалить черновик?', confirmDescription: 'Этот черновик будет удалён с ваших устройств.' },
+    conflict: { title: 'Конфликт черновика', description: 'Это поле изменено на другом устройстве.', mine: 'На этом устройстве', synced: 'Синхронизировано', useSynced: 'Использовать синхронизированное', keepDevice: 'Оставить с устройства', copyMine: 'Скопировать моё', copied: 'Скопировано', copyFailed: 'Не удалось скопировать', field: { text: 'Текст', mentions: 'Упоминания', attachments: 'Вложения', recipient: 'Получатель', agentContinuation: 'Продолжение агента', executionRunDelivery: 'Доставка запуска' } },
+  },
   sessionsList: {
     serverHeader: ({ server }: { server: string }) => `Сервер: ${server}`,
     storagePersistedTab: "Happier",
@@ -5204,6 +5224,7 @@ export const ru: TranslationStructure = {
     browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} connected services`,
     browseSourceClaudeDefault: "Стандартная конфигурация Claude",
     browseSourceOpenCodeDefault: "Стандартный сервер OpenCode",
+    browseSourcePiDefault: "Каталог агента Pi по умолчанию",
     browseCandidates: "Доступные сессии",
     browseNoMachines: "Для прямых сессий пока нет доступных машин.",
     browseNoCandidates: "Для этой машины и провайдера сессии не найдены.",
@@ -5315,7 +5336,8 @@ export const ru: TranslationStructure = {
     viewSessionLogTitle: "Открыть лог сессии",
     viewSessionLogSubtitle: "Открыть хвост лога в реальном времени для этой сессии",
     pinSession: "Закрепить сессию",
-    unpinSession: "Открепить сессию",
+        unpinSession: "Открепить сессию",
+        pinLimitExceeded: ({ count }: { count: number }) => `Можно закрепить до ${count.toLocaleString()} сеансов. Открепите другой сеанс и повторите попытку.`,
     copyResumeCommand: "Скопировать команду возобновления",
     resumeCommand: ({ sessionId }: { sessionId: string }) =>
       `happier resume ${sessionId}`,
@@ -5761,10 +5783,15 @@ export const ru: TranslationStructure = {
 	    },
 	    resuming: "Возобновление...",
 	    resumeFailed: "Не удалось возобновить сессию",
-	    pendingQueuedResumeFailedTitle: "Сообщение поставлено в очередь",
-	    pendingQueuedResumeFailedBody:
-	      "Ваше сообщение сохранено в очереди ожидания, но Happier не смог возобновить эту сессию. Нажмите «Повторить», чтобы запустить её.",
-	    composerBanners: {
+        pendingActivation: {
+            waiting_offline: { title: 'Сообщение в очереди для этой машины', body: 'Оно будет обработано, когда эта машина и её daemon снова будут онлайн.' },
+            waiting: { title: 'Ожидание возобновления', body: 'Ваше сообщение сохранено в очереди, пока daemon возобновляет эту сессию.' },
+            failed: { title: 'Не удалось возобновить сессию', body: 'Ваше сообщение по-прежнему сохранено в очереди. Повторите попытку, когда будете готовы.' },
+            queued: { title: 'Сообщение в очереди', body: 'В этой неактивной сессии есть сообщение в очереди. Возобновите её, когда будете готовы.' },
+            queued_offline: { title: 'Сообщение ожидает ручного возобновления', body: 'Оно останется в очереди, пока вы не возобновите эту сессию.' },
+            actions: { retry: 'Повторить', resume: 'Возобновить', process_when_online: 'Обработать после подключения', keepQueued: 'Оставить в очереди', autoResumeOptions: 'Параметры автовозобновления' },
+        },
+        composerBanners: {
             showBannerAction: 'Показать баннер',
             hideBannerAction: 'Скрыть баннер',
 	    },
@@ -5784,6 +5811,18 @@ export const ru: TranslationStructure = {
 	      hideBannerAction: "Скрыть уведомление о старой CLI",
 	      errorTitle: "Перезапуск runner недоступен",
 	      errorBody: "Демон не смог перезапустить этот runner сессии. Сессия по-прежнему доступна.",
+	    },
+	    mcpRestartRequired: {
+	        title: "Перезапустите сессию, чтобы применить изменения MCP",
+	        body: "MCP-серверы применяются при запуске сессии. Перезапустите этот процесс, чтобы использовать обновлённый выбор.",
+	        failureBody: "Happier не удалось перезапустить процесс. Ваш выбор MCP сохранён и будет применён при следующем запуске.",
+	        restartAction: "Перезапустить сессию",
+	        restartPendingAction: "Перезапуск…",
+	        badgeLabel: "Изменения MCP",
+	        showBannerAction: "Показать уведомление о перезапуске MCP",
+	        hideBannerAction: "Скрыть уведомление о перезапуске MCP",
+	        errorTitle: "Перезапуск сессии недоступен",
+	        errorBody: "Не удалось перезапустить процесс. Ваш выбор MCP сохранён и будет применён при следующем запуске сессии.",
 	    },
 	    invalidLinkTitle: "Недействительная ссылка на сессию",
 	    invalidLinkDescription: "Ссылка на сессию отсутствует или недействительна. Проверьте URL и попробуйте снова.",
@@ -5805,7 +5844,7 @@ export const ru: TranslationStructure = {
       `Эта сессия завершена и не может быть возобновлена, потому что ${provider} не поддерживает восстановление контекста здесь. Начните новую сессию, чтобы продолжить.`,
     machineOfflineNoticeTitle: "Машина не в сети",
     machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-      `“${machine}” не в сети, поэтому Happier пока не может возобновить эту сессию. Подключите машину, чтобы продолжить.`,
+      `“${machine}” не в сети. Сообщение можно поставить в очередь сейчас; Happier продолжит, когда компьютер снова подключится.`,
         machineOfflineCannotResume:
           "Машина не в сети. Подключите её, чтобы возобновить эту сессию.",
         openRuns: "Открыть запуски сессии",
@@ -7573,6 +7612,14 @@ export const ru: TranslationStructure = {
         runClass: "Класс запуска",
         ioMode: "Режим ввода/вывода",
       },
+      launchOrigin: {
+        crossSession: ({ sessionId }: { sessionId: string }) => `Запущено из сессии ${sessionId}`,
+        externalCli: "Запущено извне через CLI",
+        externalMcp: "Запущено извне через MCP",
+        externalAction: "Запущено извне через действие Happier",
+        externalUnknown: "Запущено извне (источник неизвестен)",
+        legacyUnknown: "Источник запуска неизвестен",
+      },
       timestamps: {
         started: "Начато",
         finished: "Завершено",
@@ -7744,6 +7791,14 @@ export const ru: TranslationStructure = {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: 'Черновики новой сессии',
+        footer: 'Выберите, продолжать ли черновик на этом устройстве или открывать новый при выборе «Новая сессия».',
+        resumeTitle: 'Продолжить предыдущий черновик',
+        resumeSubtitle: 'Продолжить черновик, начатый через «Новую сессию» на этом устройстве.',
+        freshTitle: 'Всегда начинать заново',
+        freshSubtitle: 'Открывать новый черновик при каждом выборе «Новая сессия».',
+    },
 	    sessionList: {
 	        title: 'Список сессий',
 	        footer: 'Настройте, что показывается в каждой строке сессии.',
@@ -7914,6 +7969,16 @@ settingsSession: {
         title: 'Дополнительно',
     },
     messageSending: {
+      inactiveResumePolicyTitle: "Автоматическое возобновление после отправки",
+      inactiveResumePolicySubtitle: "Выберите, что Happier должен делать после отправки в неактивную сессию.",
+      inactiveResumePolicy: {
+        whenAvailableTitle: "Сейчас или после возвращения машины",
+        whenAvailableSubtitle: "Возобновить сразу, если доступна; иначе обработать после переподключения daemon.",
+        onlineOnlyTitle: "Только если машина онлайн",
+        onlineOnlySubtitle: "Попробовать один раз при отправке. Если недоступна, оставить сообщение в очереди.",
+        manualTitle: "Никогда автоматически",
+        manualSubtitle: "Всегда оставлять сообщения в очереди до ручного возобновления сессии.",
+      },
       title: "Отправка сообщений",
       footer:
         "Определяет, что происходит при отправке сообщения, пока агент работает.",
@@ -8339,6 +8404,9 @@ settingsSession: {
         wizardColumnsTitle: "Макет в две колонки",
         wizardColumnsEnabledSubtitle: "Размещает связанные селекторы рядом на широких экранах.",
         wizardColumnsDisabledSubtitle: "Размещает все селекторы мастера в одной колонке.",
+        defaultWorktreeTitle: "Создавать worktree для новых сессий",
+        defaultWorktreeEnabledSubtitle: "Запускайте каждую новую Git-сессию в новом worktree.",
+        defaultWorktreeDisabledSubtitle: "Запускайте новые Git-сессии в выбранной папке.",
         wizardPresentationTitle: "Макет селекторов мастера",
         wizardPresentationFooter:
           "Auto оставляет короткие разделы списками и переключает длинные разделы на выпадающие меню с поиском.",

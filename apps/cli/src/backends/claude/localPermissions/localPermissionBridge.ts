@@ -31,7 +31,7 @@ import {
 } from '@happier-dev/agents';
 import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
 import { isAskUserQuestionToolName } from '@happier-dev/protocol';
-import { withAskUserQuestionUiFreeformDefault } from './askUserQuestionFreeformDefault';
+import { normalizeClaudeAskUserQuestionInputForPublication } from '../utils/normalizeClaudeAskUserQuestionInput';
 import { buildAskUserQuestionAnswersForClaude } from '../utils/askUserQuestionAnswersForClaude';
 import {
     normalizeLegacyStructuredQuestionAnswers,
@@ -298,7 +298,7 @@ export class ClaudeLocalPermissionBridge {
             });
         }
 
-        const coordinatorToolInput = withAskUserQuestionUiFreeformDefault(toolName, toolInput);
+        const coordinatorToolInput = normalizeClaudeAskUserQuestionInputForPublication(toolName, toolInput);
         const waiter = this.createLocalWaiter({
             requestId,
             toolName,
@@ -457,7 +457,9 @@ export class ClaudeLocalPermissionBridge {
         const mode = this.permissionMode;
         if (mode === 'yolo') return 'allow';
         if (mode === 'safe-yolo') {
-            return isDefaultWriteLikeToolName(toolName) ? 'prompt' : 'allow';
+            // Claude's Auto classifier owns this decision. PermissionRequest hooks only arrive
+            // after Claude leaves a tool unresolved, so reclassifying it here would bypass Auto.
+            return 'prompt';
         }
         if (mode === 'read-only') {
             return isDefaultWriteLikeToolName(toolName) ? 'deny' : 'allow';

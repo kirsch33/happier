@@ -694,6 +694,17 @@ export const ca: TranslationStructure = {
         permissions: 'Permisos',
         unreadSessions: 'Sessions sense llegir',
         updates: 'Activitat',
+        actionOperations: {
+            sections: { inProgress: 'En curs', needsAttention: 'Requereix atenció', recent: 'Recents' },
+            clearRecent: 'Neteja els recents',
+            status: { accepted: 'Acceptada', running: 'En curs', succeeded: 'Completada', failed: 'Ha fallat', cancelled: 'Cancel·lada', reconnecting: 'S’està reconnectant', unavailable: 'Estat no disponible', setupNeedsAttention: 'Sessió creada; la configuració requereix atenció' },
+            empty: 'Les accions de llarga durada apareixeran aquí.',
+            openHint: 'Obre els detalls de l’acció',
+            stop: 'Atura',
+            dismiss: 'Descarta',
+            stopFailed: 'No s’ha pogut aturar aquesta operació. Pot continuar en curs.',
+            detail: { status: 'Estat', progress: 'Progrés', error: 'Incidència', warning: 'Avís', result: 'Resultat', recoveryReference: 'Referència de recuperació' },
+        },
     },
 
     approvals: {
@@ -1725,13 +1736,14 @@ export const ca: TranslationStructure = {
                 backendsSubtitle: 'Backends configurats i destinacions d’inici personalitzades.',
             },
             enableInjection: {
-                title: 'Activa la injecció de guia',
+                title: 'Instruccions de les execucions de Happier',
+                subtitle: 'Desactivar-les elimina l’encaminament natiu prioritari i la mecànica d’execucions de Happier dels prompts del sistema dels agents de codi.',
             },
             characterBudget: {
-                title: 'Límit de caràcters',
+                title: 'Límit de regles personalitzades',
                 subtitle: ({ value }: { value: string }) => `${value} caràcters`,
-                promptTitle: 'Límit de caràcters',
-                promptBody: 'Màxim de caràcters per afegir al prompt del sistema.',
+                promptTitle: 'Límit de regles personalitzades',
+                promptBody: 'Màxim de caràcters per a regles d’execució personalitzades al prompt del sistema.',
             },
             rules: {
                 groupTitle: 'Regles de guia',
@@ -4097,8 +4109,8 @@ export const ca: TranslationStructure = {
         showLineNumbersInDiffsDescription: 'Mostra els números de línia a les diferències de codi',
         showLineNumbersInToolViews: 'Mostra els números de línia a les vistes d\'eines',
         showLineNumbersInToolViewsDescription: 'Mostra els números de línia a les diferències de vistes d\'eines',
-        wrapLinesInDiffs: 'Ajusta les línies a les diferències',
-        wrapLinesInDiffsDescription: 'Ajusta les línies llargues en lloc de desplaçament horitzontal a les vistes de diferències',
+        wrapLinesInDiffs: 'Ajusta les línies a les vistes de codi',
+        wrapLinesInDiffsDescription: 'Ajusta les línies llargues a les previsualitzacions de codi i als editors en lloc de desplaçar-te horitzontalment',
         alwaysShowContextSize: 'Mostra sempre la mida del context',
         alwaysShowContextSizeDescription: 'Mostra l\'ús del context fins i tot quan no estigui prop del límit',
         agentInputActionBarLayout: 'Barra d’accions d’entrada',
@@ -4494,6 +4506,8 @@ deps: {
         daemonRpcUnavailableBody:
             'Happier no pot connectar amb el dimoni en aquesta màquina. Pot estar fora de línia, iniciant-se o desconnectat del servidor.',
         launchStillPendingTitle: 'L’inici encara està en curs',
+        createdWithSetupIssueTitle: 'Sessió creada',
+        createdWithSetupIssueBody: 'La sessió s’ha creat, però la configuració inicial no ha acabat. Pots tornar-ho a provar des d’aquesta pantalla sense crear una altra sessió.',
         launchStillPendingBody:
             'Happier encara no ha confirmat la nova sessió. La sol·licitud d’inici continua desada. Torna-ho a provar per continuar el mateix inici sense crear una sessió duplicada.',
         connectedServiceSwitchUnavailable: {
@@ -4942,10 +4956,15 @@ deps: {
 	        },
 	        resuming: 'Reprenent...',
 	        resumeFailed: 'No s’ha pogut reprendre la sessió',
-	        pendingQueuedResumeFailedTitle: 'Missatge en cua',
-	        pendingQueuedResumeFailedBody:
-	            'El teu missatge s’ha desat a la cua pendent, però Happier no ha pogut reprendre aquesta sessió. Torna-ho a provar per iniciar-la.',
-	        composerBanners: {
+        pendingActivation: {
+            waiting_offline: { title: 'Missatge en cua per a aquesta màquina', body: 'Es processarà quan aquesta màquina i el seu dimoni tornin a estar en línia.' },
+            waiting: { title: 'Esperant per reprendre', body: 'El missatge és segur a la cua mentre el dimoni reprèn aquesta sessió.' },
+            failed: { title: 'No s’ha pogut reprendre la sessió', body: 'El missatge continua segur a la cua. Torna-ho a provar quan vulguis.' },
+            queued: { title: 'Missatge en cua', body: 'Aquesta sessió inactiva té un missatge en cua. Reprèn-la quan vulguis.' },
+            queued_offline: { title: 'Missatge pendent de represa manual', body: 'Continuarà en cua fins que reprenguis aquesta sessió.' },
+            actions: { retry: 'Torna-ho a provar', resume: 'Reprèn', process_when_online: 'Processa quan estigui en línia', keepQueued: 'Mantén en cua', autoResumeOptions: 'Opcions de represa automàtica' },
+        },
+        composerBanners: {
             showBannerAction: 'Mostra el bàner',
             hideBannerAction: 'Amaga el bàner',
 	        },
@@ -4966,6 +4985,18 @@ deps: {
 	            errorTitle: 'Reinici del runner no disponible',
 	            errorBody: 'El daemon no ha pogut reiniciar aquest runner de sessió. La sessió continua disponible.',
 	        },
+	        mcpRestartRequired: {
+	            title: 'Reinicia per aplicar els canvis d’MCP',
+	            body: 'Els servidors MCP s’apliquen quan s’inicia una sessió. Reinicia aquest executor per utilitzar la selecció actualitzada.',
+	            failureBody: 'Happier no ha pogut reiniciar aquest executor. La selecció d’MCP està desada i s’aplicarà al proper inici.',
+	            restartAction: 'Reinicia la sessió',
+	            restartPendingAction: 'Reiniciant…',
+	            badgeLabel: 'Canvis d’MCP',
+	            showBannerAction: 'Mostra l’avís de reinici d’MCP',
+	            hideBannerAction: 'Amaga l’avís de reinici d’MCP',
+	            errorTitle: 'El reinici de la sessió no està disponible',
+	            errorBody: 'No s’ha pogut reiniciar l’executor. La selecció d’MCP està desada i s’aplicarà al proper inici de la sessió.',
+	        },
 	        invalidLinkTitle: 'Enllaç de sessió invàlid',
 	        invalidLinkDescription: 'L’enllaç de la sessió falta o no és vàlid. Comprova l’URL i torna-ho a provar.',
 	        resumeSupportNoteChecking: 'Nota: Happier encara està comprovant si aquesta màquina pot reprendre la sessió del proveïdor.',
@@ -4984,7 +5015,7 @@ deps: {
             `Aquesta sessió ha finalitzat i no es pot reprendre perquè ${provider} no admet restaurar el seu context aquí. Inicia una sessió nova per continuar.`,
         machineOfflineNoticeTitle: 'La màquina està fora de línia',
           machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-              `“${machine}” està fora de línia, així que Happier encara no pot reprendre aquesta sessió. Torna-la a posar en línia per continuar.`,
+              `“${machine}” està fora de línia. Pots posar un missatge a la cua ara; Happier continuarà quan la màquina torni a estar en línia.`,
             machineOfflineCannotResume: 'La màquina està fora de línia. Torna-la a posar en línia per reprendre aquesta sessió.',
                 openRuns: 'Obre les execucions de la sessió',
                 openAutomations: 'Obre les automatitzacions de la sessió',
@@ -5724,6 +5755,12 @@ deps: {
         newTagConfirm: 'Afegeix',
     },
 
+    sessionDrafts: {
+        sectionTitle: 'Esborranys', badge: 'Esborrany', untitled: 'Esborrany sense títol', continueEditing: 'Continua editant', startAnother: 'Comença’n un altre',
+        status: { offline: 'Sense connexió', syncing: 'Sincronitzant', conflict: 'Conflicte', machineUnavailable: 'Màquina no disponible', attachmentNeedsAttention: 'Cal revisar l’adjunt', startInterrupted: 'Inici interromput' },
+        new: { action: 'Esborrany nou' }, delete: { action: 'Suprimeix l’esborrany', confirmTitle: 'Vols suprimir l’esborrany?', confirmDescription: 'Aquest esborrany se suprimirà dels teus dispositius.' },
+        conflict: { title: 'Conflicte d’esborrany', description: 'Aquest camp ha canviat en un altre dispositiu.', mine: 'En aquest dispositiu', synced: 'Sincronitzat', useSynced: 'Utilitza el sincronitzat', keepDevice: 'Conserva el del dispositiu', copyMine: 'Copia el meu', copied: 'Copiat', copyFailed: 'No s’ha pogut copiar', field: { text: 'Contingut de text', mentions: 'Mencions', attachments: 'Adjunts', recipient: 'Destinatari', agentContinuation: 'Continuació de l’agent', executionRunDelivery: 'Lliurament de l’execució' } },
+    },
     sessionsList: {
         serverHeader: ({ server }: { server: string }) => `Servidor: ${server}`,
         storagePersistedTab: 'Happier',
@@ -5839,6 +5876,7 @@ deps: {
         browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} connected services`,
         browseSourceClaudeDefault: "Configuració predeterminada de Claude",
         browseSourceOpenCodeDefault: "Servidor predeterminat d'OpenCode",
+        browseSourcePiDefault: "Directori per defecte de l'agent Pi",
         browseCandidates: "Sessions disponibles",
         browseNoMachines: "Encara no hi ha màquines disponibles per a sessions directes.",
         browseNoCandidates: "No s'han trobat sessions del proveïdor per a aquesta màquina i aquest proveïdor.",
@@ -5949,6 +5987,7 @@ deps: {
         viewSessionLogSubtitle: 'Obre el final del registre en viu per a aquesta sessió',
         pinSession: 'Fixar sessió',
         unpinSession: 'Desfixar sessió',
+        pinLimitExceeded: ({ count }: { count: number }) => `Pots fixar fins a ${count.toLocaleString()} sessions. Desfixa'n una altra i torna-ho a provar.`,
         copyResumeCommand: 'Copia l’ordre de reprendre',
         resumeCommand: ({ sessionId }: { sessionId: string }) => `happier resume ${sessionId}`,
         viewMachine: 'Veure la màquina',
@@ -7082,6 +7121,14 @@ deps: {
                 runClass: 'Classe d\'execució',
                 ioMode: 'Mode E/S',
             },
+            launchOrigin: {
+                crossSession: ({ sessionId }: { sessionId: string }) => `Iniciat des de la sessió ${sessionId}`,
+                externalCli: 'Iniciat externament des de la CLI',
+                externalMcp: 'Iniciat externament mitjançant MCP',
+                externalAction: 'Iniciat externament mitjançant una acció de Happier',
+                externalUnknown: 'Iniciat externament (origen desconegut)',
+                legacyUnknown: 'Origen d’inici desconegut',
+            },
             timestamps: {
                 started: 'Iniciat',
                 finished: 'Finalitzat',
@@ -7313,6 +7360,14 @@ deps: {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: 'Esborranys de sessió nova',
+        footer: 'Tria si Sessió nova continua l’esborrany d’aquest dispositiu o n’obre un de nou.',
+        resumeTitle: 'Reprèn l’esborrany anterior',
+        resumeSubtitle: 'Continua l’esborrany iniciat des de Sessió nova en aquest dispositiu.',
+        freshTitle: 'Comença sempre de zero',
+        freshSubtitle: 'Obre un esborrany nou cada vegada que triïs Sessió nova.',
+    },
 	            sessionList: {
 	                title: 'Llista de sessions',
 	                footer: 'Personalitza què apareix a cada fila de sessió.',
@@ -7501,6 +7556,16 @@ settingsSession: {
                 title: 'Avançat',
             },
             messageSending: {
+                inactiveResumePolicyTitle: 'Represa automàtica després d’enviar',
+                inactiveResumePolicySubtitle: 'Tria què ha de fer Happier després d’enviar a una sessió inactiva.',
+                inactiveResumePolicy: {
+                    whenAvailableTitle: 'Ara o quan torni la màquina',
+                    whenAvailableSubtitle: 'Reprèn immediatament si és accessible; si no, processa quan el dimoni es reconnecti.',
+                    onlineOnlyTitle: 'Només si la màquina és en línia',
+                    onlineOnlySubtitle: 'Prova-ho una vegada en enviar. Si no està disponible, mantén el missatge en cua.',
+                    manualTitle: 'Mai automàticament',
+                    manualSubtitle: 'Mantén sempre els missatges en cua fins que reprenguis la sessió.',
+                },
                 title: 'Enviament de missatges',
                 footer: 'Controla què passa quan envies un missatge mentre l’agent s’està executant.',
               queueInAgentTitle: 'Posa a la cua de l’agent (actual)',
@@ -7889,6 +7954,9 @@ settingsSession: {
               wizardColumnsTitle: 'Disseny en dues columnes',
               wizardColumnsEnabledSubtitle: 'Col·loca selectors relacionats de costat en pantalles amples.',
               wizardColumnsDisabledSubtitle: 'Apila tots els selectors de l’assistent en una columna.',
+              defaultWorktreeTitle: 'Crea un arbre de treball per a les sessions noves',
+              defaultWorktreeEnabledSubtitle: 'Inicia cada sessió Git nova en un arbre de treball nou.',
+              defaultWorktreeDisabledSubtitle: 'Inicia les sessions Git noves a la carpeta seleccionada.',
               wizardPresentationTitle: 'Disseny dels selectors de l’assistent',
               wizardPresentationFooter: 'Auto manté les seccions curtes com a llistes i canvia les llargues a desplegables amb cerca.',
               wizardPresentationAutoTitle: 'Auto',

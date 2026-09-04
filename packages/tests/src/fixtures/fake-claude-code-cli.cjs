@@ -469,6 +469,17 @@ if (argv.includes('--version') || argv.includes('-v')) {
   process.exit(0);
 }
 
+if (argv.includes('--help') || argv.includes('-h')) {
+  process.stdout.write([
+    'Usage: claude [options] [prompt]',
+    '  --output-format <format>',
+    '  --input-format <format>',
+    '  --permission-mode <mode>',
+    '',
+  ].join('\n'));
+  process.exit(0);
+}
+
 if (requireNativeOauth) {
   const nativeAuthContract = inspectNativeOauthContract();
   safeAppendJsonl(logPath, nativeAuthContract);
@@ -529,6 +540,7 @@ void emitHookEvent('SessionStart', {
 async function runSdkStreamUntilEof() {
   const rl = readline.createInterface({ input: process.stdin });
   let initialized = false;
+  let permissionRequestHookCallbackId = null;
   let turn = 0;
   let stagedRuntimeActivityTaskId = null;
   let stagedRuntimeActivityTerminalEmitted = false;
@@ -644,14 +656,22 @@ async function runSdkStreamUntilEof() {
     };
   }
 
-  function createCanUseToolControlRequest(toolName, input) {
+  function createPermissionHookControlRequest(callbackId, toolName, input, toolUseId) {
     return {
       type: 'control_request',
-      request_id: `can_use_${randomUUID()}`,
+      request_id: `hook_callback_${randomUUID()}`,
       request: {
-        subtype: 'can_use_tool',
-        tool_name: toolName,
-        input,
+        subtype: 'hook_callback',
+        callback_id: callbackId,
+        tool_use_id: toolUseId,
+        input: {
+          hook_event_name: 'PermissionRequest',
+          session_id: sessionId,
+          cwd: process.cwd(),
+          tool_name: toolName,
+          tool_input: input,
+          tool_use_id: toolUseId,
+        },
       },
     };
   }
@@ -756,6 +776,21 @@ async function runSdkStreamUntilEof() {
     // Respond to Agent SDK control requests (initialize, set_permission_mode, etc).
     if (msg && typeof msg === 'object' && msg.type === 'control_request') {
       const requestId = typeof msg.request_id === 'string' ? msg.request_id : null;
+      if (msg?.request?.subtype === 'initialize') {
+        const registrations = msg?.request?.hooks?.PermissionRequest;
+        if (Array.isArray(registrations)) {
+          for (const registration of registrations) {
+            const callbackIds = registration?.hookCallbackIds;
+            const callbackId = Array.isArray(callbackIds)
+              ? callbackIds.find((value) => typeof value === 'string' && value.length > 0)
+              : null;
+            if (callbackId) {
+              permissionRequestHookCallbackId = callbackId;
+              break;
+            }
+          }
+        }
+      }
       safeAppendJsonl(logPath, {
         type: 'sdk_stdin',
         invocationId,
@@ -859,7 +894,10 @@ async function runSdkStreamUntilEof() {
       ]);
 
       emitSdk(assistant);
-      emitSdk(createCanUseToolControlRequest('Write', writeInput));
+      if (!permissionRequestHookCallbackId) {
+        throw new Error('permission-prompt-write requires an initialized PermissionRequest hook callback');
+      }
+      emitSdk(createPermissionHookControlRequest(permissionRequestHookCallbackId, 'Write', writeInput, writeToolUseId));
       // Intentionally omit the result message: the agent SDK will pause the turn
       // until the client approves/denies the permission and provides a tool_result.
       continue;
@@ -1350,7 +1388,10 @@ if (isSdkStreamJson) {
   let localComposerBuffer = '';
   let skipNextLfAfterCr = false;
   const renderLocalIdleComposer = () => {
-    process.stdout.write('\n❯ \x1b[2mTry "refactor <filepath>"\x1b[22m\n');
+    // Keep the new composer on a distinct terminal row from the submitted prompt. The real Claude
+    // TUI renders turn output between them; a single shared newline makes two composer-shaped rows
+    // overlap in the screen parser's global matcher and falsely leaves the submitted prompt active.
+    process.stdout.write('\n\n❯ ');
     safeAppendJsonl(logPath, {
       type: 'local_idle_composer_rendered',
       invocationId,
@@ -1405,6 +1446,13 @@ if (isSdkStreamJson) {
         continue;
       }
       skipNextLfAfterCr = false;
+      if (char === '\x1b') {
+        // Claude's idle composer clears its current draft on Escape. The unified injector uses this
+        // bounded behavior to recover only its own verified leftover text.
+        localComposerBuffer = '';
+        process.stdout.write('\r\x1b[2K❯ ');
+        continue;
+      }
       if (char === '\r') {
         submitLocalComposerBuffer();
         skipNextLfAfterCr = true;
@@ -1412,9 +1460,11 @@ if (isSdkStreamJson) {
       }
       if (char === '\n') {
         localComposerBuffer += '\n';
+        process.stdout.write('\n');
         continue;
       }
       localComposerBuffer += char;
+      process.stdout.write(char);
     }
   });
   if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {

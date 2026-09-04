@@ -12,6 +12,8 @@ import { BackendTargetKeySchema, BackendTargetRefSchema, buildBackendTargetKey, 
 import { ExecutionRunListRequestSchema } from '../executionRunListRequest.js';
 import { ExecutionRunStartRequestSchema } from '../executionRunStartRequest.js';
 import { SessionRollbackTargetSchema } from '../sessionRollback.js';
+import { SessionForkRpcParamsSchema } from '../sessionFork.js';
+import { PendingFirstInputV1Schema } from '../spawnSession.js';
 import { SessionSpawnSourceContextV1Schema } from '../sessionSpawnSourceContextV1.js';
 import { SessionHandoffWorkspaceTransferSchema } from '../sessionControl/handoff/handoffSchemas.js';
 import { ActionApprovalSchema, type ActionApproval } from './actionApprovalMetadata.js';
@@ -40,6 +42,10 @@ import {
   EXECUTION_RUN_ACTION_PERMISSION_MODE_DESCRIPTION,
   ExecutionRunActionPermissionModeSchema,
 } from './executionRunActionPermissionMode.js';
+import {
+  ActionOperationDeclarationV1Schema,
+  type ActionOperationDeclarationV1,
+} from './operations/actionOperationDeclarationV1.js';
 
 export {
   ActionApprovalFlowSchema,
@@ -50,6 +56,10 @@ export {
   type ActionApprovalFlow,
   type ActionApprovalResult,
 } from './actionApprovalMetadata.js';
+export {
+  ActionOperationDeclarationV1Schema,
+  type ActionOperationDeclarationV1,
+} from './operations/actionOperationDeclarationV1.js';
 
 const ZodSchemaLike = z.custom<z.ZodTypeAny>((value) => {
   if (!value || typeof value !== 'object') return false;
@@ -80,6 +90,18 @@ export const ActionToolExposureSchema = z.object({
   cli: ActionToolExposureModeSchema.optional(),
 }).strict();
 export type ActionToolExposure = z.infer<typeof ActionToolExposureSchema>;
+
+export const ActionContextualDefaultSourceSchema = z.enum([
+  'current_session',
+  'current_session_machine',
+]);
+export type ActionContextualDefaultSource = z.infer<typeof ActionContextualDefaultSourceSchema>;
+
+export const ActionContextualDefaultsSchema = z.object({
+  sessionId: ActionContextualDefaultSourceSchema.optional(),
+  machineId: ActionContextualDefaultSourceSchema.optional(),
+}).strict();
+export type ActionContextualDefaults = z.infer<typeof ActionContextualDefaultsSchema>;
 
 export const ActionSafetySchema = z.enum(['safe', 'danger']);
 export type ActionSafety = z.infer<typeof ActionSafetySchema>;
@@ -208,7 +230,9 @@ export const ActionSpecSchema = z.object({
     .passthrough()
     .optional(),
   prompting: ActionPromptingSchema.optional(),
+  operation: ActionOperationDeclarationV1Schema.optional(),
   toolExposure: ActionToolExposureSchema.optional(),
+  contextualDefaults: ActionContextualDefaultsSchema.optional(),
   approval: ActionApprovalSchema,
   surfaces: ActionSurfaceSchema,
   inputSchema: ZodSchemaLike,
@@ -217,6 +241,7 @@ export const ActionSpecSchema = z.object({
 
 export type ActionSpec = z.infer<typeof ActionSpecSchema> & Readonly<{
   placements: readonly ActionUiPlacement[];
+  operation?: ActionOperationDeclarationV1;
 }>;
 
 const EmptyObjectSchema = z.object({}).strict();
@@ -329,7 +354,15 @@ export const SessionEventsGetInputSchema = z.object({
   includeRaw: z.boolean().optional(),
   maxTextChars: z.number().int().min(0).max(4000).optional(),
   maxPayloadChars: z.number().int().min(0).max(32768).optional(),
-}).passthrough();
+}).passthrough().superRefine((value, ctx) => {
+  if (value.sidechainId && value.scope !== 'sidechain') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'scope must be sidechain when sidechainId is provided',
+      path: ['scope'],
+    });
+  }
+});
 export type SessionEventsGetInput = z.infer<typeof SessionEventsGetInputSchema>;
 export type SessionEventsGetItem = Readonly<{
   id: string;
@@ -414,6 +447,8 @@ const IntentStartCommonSchema = z.object({
   // Optional per-target override keyed by backend target key (e.g. { "agent:codex": "openai-codex:team" }).
   // A per-target entry wins over the blanket `connectedServices` for that target.
   connectedServicesByBackendTargetKey: z.record(z.string().min(1), z.unknown()).optional(),
+  waitForCompletion: z.boolean().optional(),
+  waitTimeoutSeconds: z.number().int().min(1).optional(),
 }).passthrough();
 
 const PlanStartInputSchema = IntentStartCommonSchema.extend({
@@ -424,7 +459,7 @@ const PlanStartInputSchema = IntentStartCommonSchema.extend({
 }).passthrough();
 
 const DelegateStartInputSchema = IntentStartCommonSchema.extend({
-  permissionMode: ExecutionRunActionPermissionModeSchema.default('workspace_write'),
+  permissionMode: ExecutionRunActionPermissionModeSchema.optional(),
   retentionPolicy: z.enum(['ephemeral', 'resumable']).default('ephemeral'),
   runClass: z.enum(['bounded', 'long_lived']).default('bounded'),
   ioMode: z.enum(['request_response', 'streaming']).default('request_response'),
@@ -470,6 +505,8 @@ const ExecutionRunStartInputSchema = z.object({
   // at the action boundary. Omit to use the account's configured default exactly as stored (literal:
   // a profile default binds to that profile, a pool default binds to that pool — no silent upgrade).
   connectedServices: z.unknown().optional(),
+  waitForCompletion: z.boolean().optional(),
+  waitTimeoutSeconds: z.number().int().min(1).optional(),
 }).passthrough();
 
 const ExecutionRunGetInputSchema = ExecutionRunIdInputSchema.extend({
@@ -504,9 +541,17 @@ const SessionOpenInputSchema = z.object({
   }
 });
 
-const SessionForkInputSchema = z.object({
-  sessionId: z.string().min(1).optional(),
-}).passthrough();
+/**
+ * Action-facing fork recipe. The transport's parent session id is resolved from
+ * the action input/context, while legacy callers may continue to omit a fork
+ * point and let their host adapter apply its existing default.
+ */
+export const SessionForkActionInputSchema = SessionForkRpcParamsSchema
+  .omit({ v: true, parentSessionId: true })
+  .partial()
+  .extend({ sessionId: z.string().min(1).optional() })
+  .passthrough();
+export type SessionForkActionInput = z.infer<typeof SessionForkActionInputSchema>;
 
 const SessionRollbackInputSchema = z.object({
   sessionId: z.string().min(1).optional(),
@@ -516,6 +561,7 @@ const SessionRollbackInputSchema = z.object({
 const SessionHandoffInputSchema = z.object({
   sessionId: z.string().min(1).optional(),
   targetMachineId: z.string().min(1).optional(),
+  targetPath: z.string().min(1).optional(),
   targetSessionStorageMode: z.enum(['direct', 'persisted']).optional(),
   workspaceTransfer: SessionHandoffWorkspaceTransferSchema.optional(),
 }).passthrough();
@@ -535,7 +581,11 @@ function normalizeSpawnTargetAlias(value: string): string {
   return trimmed === 'customAcp' ? trimmed : `agent:${trimmed}`;
 }
 
-const SessionSpawnNewInputSchema = z.object({
+const SessionSpawnAttemptIdentifierSchema = z.string().refine((value) => value.trim().length > 0, {
+  message: 'Spawn attempt identifier must not be blank',
+});
+
+export const SessionSpawnNewInputSchema = z.object({
   tag: z.string().min(1).optional(),
   tags: z.array(z.string().min(1)).optional(),
   agentId: z.string().trim().min(1).optional(),
@@ -547,16 +597,26 @@ const SessionSpawnNewInputSchema = z.object({
   title: z.string().min(1).optional(),
   path: z.string().min(1).optional(),
   directory: z.string().min(1).optional(),
+  approvedNewDirectoryCreation: z.boolean().optional(),
   host: z.string().min(1).optional(),
   machineId: z.string().min(1).optional(),
+  spawnNonce: SessionSpawnAttemptIdentifierSchema.optional(),
+  userAttemptId: SessionSpawnAttemptIdentifierSchema.optional(),
+  firstTurnLocalId: SessionSpawnAttemptIdentifierSchema.optional(),
+  attachmentMessageLocalId: SessionSpawnAttemptIdentifierSchema.optional(),
+  pendingFirstInput: PendingFirstInputV1Schema.optional(),
   prompt: z.string().min(1).optional(),
   initialPrompt: z.string().min(1).optional(),
   initialMessage: z.string().min(1).optional(),
   permissionMode: SessionPermissionModeInputSchema.optional(),
+  permissionModeUpdatedAt: z.number().int().optional(),
   agentModeId: z.string().min(1).optional(),
+  agentModeUpdatedAt: z.number().int().optional(),
+  modelUpdatedAt: z.number().int().optional(),
   sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.optional(),
   configOptions: z.record(z.string().min(1), SpawnConfigOptionValueSchema).optional(),
   profileId: z.string().min(1).optional(),
+  resume: z.string().trim().min(1).optional(),
   environmentVariables: z.record(z.string().min(1), z.string()).optional(),
   connectedServices: ConnectedServiceBindingsV1Schema.optional(),
   connectedServicesUpdatedAt: z.number().int().optional(),
@@ -566,6 +626,7 @@ const SessionSpawnNewInputSchema = z.object({
   windowsRemoteSessionLaunchMode: z.enum(['hidden', 'windows_terminal', 'console']).optional(),
   windowsRemoteSessionConsole: z.enum(['hidden', 'visible']).optional(),
   windowsTerminalWindowName: z.string().min(1).optional(),
+  experimentalCodexAcp: z.boolean().optional(),
   codexBackendMode: z.enum(['mcp', 'acp', 'appServer']).optional(),
   agentRuntimeDescriptorV1: AgentRuntimeDescriptorV1Schema.optional(),
   /**
@@ -785,6 +846,7 @@ const ActionOptionsResolveInputSchema = z.object({
   sessionId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(200).optional(),
   query: z.string().trim().optional(),
+  draftInput: z.record(z.string(), z.unknown()).optional(),
 }).passthrough().superRefine((value, ctx) => {
   const actionId = typeof value.actionId === 'string' ? value.actionId.trim() : '';
   const fieldPath = typeof value.fieldPath === 'string' ? value.fieldPath.trim() : '';
@@ -1106,7 +1168,8 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
         { path: 'actionId', title: 'Action id', description: 'Optional when optionsSourceId is provided directly.', widget: 'text' },
         { path: 'fieldPath', title: 'Field path', description: 'Dot-path for the action input field.', widget: 'text' },
         { path: 'optionsSourceId', title: 'Options source id', description: 'Direct options source lookup when known.', widget: 'text' },
-        { path: 'sessionId', title: 'Session id', description: 'Needed for session-scoped option sources.', widget: 'text' },
+        { path: 'sessionId', title: 'Session id', description: 'Omit to use the current invoking session.', widget: 'text' },
+        { path: 'draftInput', title: 'Partial action input', description: 'Partial input for dependent options, for example { "backendTargetKeys": ["agent:pi"] } when resolving a model.', widget: 'textarea' },
         { path: 'query', title: 'Query filter', description: 'Optional search text to filter the returned options.', widget: 'text' },
         { path: 'limit', title: 'Limit', description: 'Maximum number of options to return.', widget: 'text' },
       ],
@@ -1192,7 +1255,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     examples: {
-      voice: { argsExample: '{"sessionId":"{{sessionId}}","engineIds":["codex"],"instructions":"Review this.","changeType":"uncommitted","base":{"kind":"none"}}' },
+      voice: { argsExample: '{"engineIds":["codex"],"instructions":"Review this.","changeType":"uncommitted","base":{"kind":"none"}}' },
     },
     surfaces: {
       ui_button: true,
@@ -1263,7 +1326,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     examples: {
-      voice: { argsExample: '{"sessionId":"{{sessionId}}","backendTargetKeys":["agent:codex"],"instructions":"Plan the changes."}' },
+      voice: { argsExample: '{"backendTargetKeys":["agent:codex"],"instructions":"Plan the changes."}' },
     },
 	    surfaces: {
 	      ui_button: true,
@@ -1341,7 +1404,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     examples: {
-      voice: { argsExample: '{"sessionId":"{{sessionId}}","backendTargetKeys":["agent:codex"],"instructions":"Delegate the task."}' },
+      voice: { argsExample: '{"backendTargetKeys":["agent:codex"],"instructions":"Delegate the task."}' },
     },
 	    surfaces: {
 	      ui_button: true,
@@ -1398,7 +1461,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     examples: {
-      voice: { argsExample: '{"sessionId":"{{sessionId}}","backendTargetKeys":["agent:codex"],"instructions":"Start the voice assistant for this workspace."}' },
+      voice: { argsExample: '{"backendTargetKeys":["agent:codex"],"instructions":"Start the voice assistant for this workspace."}' },
     },
     surfaces: {
       ui_button: false,
@@ -1421,7 +1484,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
     bindings: { mcpToolName: 'execution_run_start' },
     examples: {
       mcp: {
-        argsExample: '{"sessionId":"{{sessionId}}","intent":"voice_agent","backendTarget":{"kind":"builtInAgent","agentId":"codex"},"instructions":"Summarize recent changes.","permissionMode":"read_only","retentionPolicy":"ephemeral","runClass":"bounded","ioMode":"request_response"}',
+        argsExample: '{"intent":"voice_agent","backendTarget":{"kind":"builtInAgent","agentId":"codex"},"instructions":"Summarize recent changes.","permissionMode":"read_only","retentionPolicy":"ephemeral","runClass":"bounded","ioMode":"request_response"}',
       },
     },
     surfaces: {
@@ -1536,7 +1599,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ui_slash_command: false,
       voice_tool: true,
       voice_action_block: true,
-      session_agent: false,
+      session_agent: true,
       mcp: true,
       cli: true,
     },
@@ -1696,6 +1759,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
     title: 'Fork session',
     description: 'Create a new session from the latest state of the selected session.',
     safety: 'safe',
+    operation: { version: 1, visibility: 'activity', progress: 'indeterminate' },
     approval: APPROVAL_RESULT_OPTIONAL_DEFERRED,
     placements: ['session_action_menu', 'session_info', 'command_palette', 'slash_command', 'voice_panel', 'agent_input_chips'],
     slash: { tokens: ['fork'] },
@@ -1717,7 +1781,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       description: 'Forks from the latest message in the session.',
       fields: [{ path: 'sessionId', title: 'Session id', widget: 'text' }],
     },
-    inputSchema: SessionForkInputSchema,
+    inputSchema: SessionForkActionInputSchema,
   },
   {
     id: 'session.rollback',
@@ -1747,6 +1811,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
     title: 'Hand off session',
     description: 'Move the current session to another machine while keeping the same session id.',
     safety: 'safe',
+    operation: { version: 1, visibility: 'activity', progress: 'reported' },
     approval: APPROVAL_RESULT_OPTIONAL_DEFERRED,
     placements: ['session_action_menu', 'session_info'],
     examples: {
@@ -1775,6 +1840,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
     id: 'session.spawn_new',
     title: 'Create session',
     safety: 'safe',
+    operation: { version: 1, visibility: 'activity', progress: 'reported' },
     approval: APPROVAL_RESULT_OPTIONAL_DEFERRED,
     placements: ['command_palette', 'session_info', 'voice_panel'],
     prompting: { voiceHotPath: true },
@@ -2259,6 +2325,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       mcp: true,
       cli: true,
     },
+    contextualDefaults: { sessionId: 'current_session' },
     inputHints: {
       title: 'Set title',
       fields: [
@@ -2398,6 +2465,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       mcp: true,
       cli: true,
     },
+    contextualDefaults: { sessionId: 'current_session' },
     inputHints: {
       title: 'Get session status',
       fields: [
@@ -3438,6 +3506,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       mcp: false,
       cli: false,
     },
+    contextualDefaults: { machineId: 'current_session_machine' },
     inputSchema: MemorySearchInputSchema,
   },
   {
@@ -3467,6 +3536,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       mcp: false,
       cli: false,
     },
+    contextualDefaults: { machineId: 'current_session_machine' },
     examples: {
       voice: { argsExample: '{"machineId":"{{machineId}}","sessionId":"{{sessionId}}","seqFrom":120,"seqTo":124}' },
       mcp: { argsExample: '{"machineId":"{{machineId}}","sessionId":"{{sessionId}}","seqFrom":120,"seqTo":124}' },

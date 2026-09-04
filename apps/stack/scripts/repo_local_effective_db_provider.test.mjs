@@ -2,30 +2,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { runNodeCapture } from './testkit/core/run_node_capture.mjs';
+import { resolveRepoStackIdentity } from './utils/stack/repo_stack_identity.mjs';
 
 const repoRoot = join(import.meta.dirname, '..', '..', '..');
 const repoLocalScript = join(import.meta.dirname, 'repo_local.mjs');
-
-function sanitizeStackNameToken(value) {
-  return String(value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'repo';
-}
 
 async function createFixture(t, lines) {
   const root = await mkdtemp(join(tmpdir(), 'hstack-repo-local-provider-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
   const storageDir = join(root, 'storage');
-  const id = (await readFile(join(repoRoot, '.git', 'happier-stack-stackless-id'), 'utf8')).trim();
-  const stackName = `repo-${sanitizeStackNameToken(basename(repoRoot))}-${id.slice(0, 10)}`;
-  const stackDir = join(storageDir, stackName);
+  const { stackBaseDir: stackDir } = resolveRepoStackIdentity({
+    repoRoot,
+    stacksStorageRoot: storageDir,
+  });
   const envPath = join(stackDir, 'env');
   await mkdir(stackDir, { recursive: true });
   await writeFile(envPath, [...lines, ''].join('\n'), 'utf8');
@@ -36,6 +29,7 @@ async function createFixture(t, lines) {
   }
   Object.assign(env, {
     HAPPIER_STACK_STORAGE_DIR: storageDir,
+    HAPPIER_STACK_HOME_DIR: join(root, 'stack-home'),
     HAPPIER_STACK_REPO_LOCAL_AUTO_INSTALL: '0',
     HAPPIER_STACK_REPO_LOCAL_PREFLIGHT_ONLY: '1',
   });
@@ -138,7 +132,7 @@ test('repo-local child receives canonical persisted authority instead of exporte
   assert.deepEqual(captured, {
     component: 'happier-server-light',
     primary: 'sqlite',
-    legacy: null,
+    legacy: 'sqlite',
     databaseUrl: null,
   });
 });
@@ -161,7 +155,7 @@ test('repo-local child retains compatible persisted external Postgres authority'
   assert.deepEqual(captured, {
     component: 'happier-server',
     primary: 'postgres',
-    legacy: null,
+    legacy: 'postgres',
     databaseUrl,
   });
 });

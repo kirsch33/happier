@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PendingActivationAuthorizationV1Schema } from './sessionControl/pendingActivationAuthorizationV1.js';
 import { AccountSettingsV2GetResponseSchema } from './account/settings/accountSettingsApiV2.js';
 import { DirectTranscriptRawMessageV1Schema } from './directSessions/daemonRpcV1.js';
 import { ExecutionRunPublicStateSchema } from './executionRuns.js';
@@ -15,6 +16,7 @@ import {
   SessionRuntimeActivityActiveCountSchema,
   SessionRuntimeActivityStateSchema,
 } from './sessionRuntimeActivity/projection.js';
+import { ActionOperationRevisionEphemeralV1Schema } from './actions/operations/actionOperationV1.js';
 
 const TimestampMsSchema = z.number().int().min(0);
 const Base64Schema = z.string();
@@ -126,6 +128,7 @@ export const UpdateBodySchema = z.discriminatedUnion('t', [
     meaningfulActivityAt: TimestampMsSchema.optional(),
     changedByAccountId: z.string().optional(),
     pendingActivationRequestId: z.string().trim().min(1).optional(),
+    pendingActivationAuthorization: PendingActivationAuthorizationV1Schema.nullable().optional(),
   }).passthrough(),
   z.object({
     t: z.literal('automation-upsert'),
@@ -372,6 +375,7 @@ export const DirectSessionTranscriptDeltaEphemeralSchema = z.object({
 });
 
 export const EphemeralUpdateSchema = z.discriminatedUnion('type', [
+  ActionOperationRevisionEphemeralV1Schema,
   // Hottest live event first: delta ticks stream at the live cadence (~25Hz per active segment).
   z.object({
     type: z.literal('transcript-stream-segment-delta'),

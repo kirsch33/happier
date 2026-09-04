@@ -32,7 +32,7 @@ import { buildMissingJavaScriptRuntimeMessage } from '@/runtime/js/buildMissingJ
 import { stripNestedSessionDetectionEnv } from '@/utils/processEnv/stripNestedSessionDetectionEnv'
 import { resolveWindowsCommandInvocation } from '@happier-dev/cli-common/process'
 import { resolveExistingManagedJavaScriptRuntimeCommand } from '@happier-dev/cli-common/providers'
-import { killProcessTree } from '@/agent/acp/killProcessTree'
+import { killProcessTree } from '@/agent/runtime/process/killProcessTree'
 import { isolateClaudeRuntimeAuthEnv } from '@/backends/claude/spawn/isolateClaudeRuntimeAuthEnv'
 import { logClaudeRuntimeAuthEnvDiagnostic } from '@/backends/claude/spawn/logClaudeRuntimeAuthEnvDiagnostic'
 import { HAPPIER_SPAWN_EXPLICIT_ENV_KEYS_JSON_ENV_VAR } from '@/daemon/spawn/spawnExplicitEnvKeysMarker'
@@ -314,6 +314,7 @@ export function query(config: {
 	            maxTurns,
 	            pathToClaudeCodeExecutable = getDefaultClaudeCodePath(),
 	            permissionMode = 'default',
+	            forcePermissionMode = false,
 	            continue: continueConversation,
 	            resume,
 	            model,
@@ -350,7 +351,9 @@ export function query(config: {
 	    // Omit `--permission-mode default` so the Claude CLI honors the user's
 	    // `permissions.defaultMode` from `.claude/settings.json` (user/project/local).
 	    // Any non-'default' mode still wins, overriding settings.json as before.
-	    if (permissionMode && permissionMode !== 'default') args.push('--permission-mode', permissionMode)
+	    if (permissionMode && (forcePermissionMode || permissionMode !== 'default')) {
+	        args.push('--permission-mode', permissionMode)
+	    }
 	    if (settingsPath) args.push('--settings', settingsPath)
 
 	    if (fallbackModel) {

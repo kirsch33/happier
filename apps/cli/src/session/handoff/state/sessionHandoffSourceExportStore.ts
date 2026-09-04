@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 
 import { z } from 'zod';
@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { TransferEndpointCandidateSchema } from '@happier-dev/protocol';
 
 import type { SessionHandoffProviderBundle } from '../types';
-import { SessionHandoffProviderBundleSchema } from '../sessionHandoffProviderBundleSchema';
+import { writeSessionHandoffProviderBundleArtifact } from '../sessionHandoffProviderBundleFile';
 import { buildSessionHandoffProviderBundleTransferId } from '../sessionHandoffProviderBundleTransferPublication';
 import {
   buildSessionHandoffWorkspaceManifestTransferId,
@@ -87,7 +87,11 @@ function resolveRecordPath(activeServerDir: string, handoffId: string): string {
 }
 
 function resolveProviderBundleFilePath(activeServerDir: string, handoffId: string): string {
-  return join(resolveHandoffDirectory(activeServerDir, handoffId), 'provider-bundle.json');
+  return join(resolveHandoffDirectory(activeServerDir, handoffId), 'provider-bundle.bin');
+}
+
+function resolveReceivedProviderBundleFilePath(activeServerDir: string, handoffId: string): string {
+  return join(resolveHandoffDirectory(activeServerDir, handoffId), 'received-provider-bundle.bin');
 }
 
 function resolveWorkspaceManifestFilePath(activeServerDir: string, handoffId: string): string {
@@ -119,36 +123,51 @@ async function atomicWriteJson(filePath: string, payload: unknown): Promise<void
   await writeJsonAtomic(filePath, payload);
 }
 
+async function readPersistedSourceExportRecord(
+  activeServerDir: string,
+  handoffId: string,
+): Promise<SessionHandoffSourceExportRecord | null> {
+  const recordPath = resolveRecordPath(activeServerDir, handoffId);
+  let raw: string;
+  try {
+    raw = await readFile(recordPath, 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    throw new Error('Invalid session handoff source export record');
+  }
+  const parsed = SourceExportRecordSchemaV1.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new Error('Invalid session handoff source export record');
+  }
+  return parsed.data;
+}
+
 export function createSessionHandoffSourceExportStore(input: Readonly<{ activeServerDir: string }>) {
   const activeServerDir = input.activeServerDir;
 
   return {
+    async prepareReceivedProviderBundleFilePath(handoffIdRaw: string): Promise<string> {
+      const handoffId = assertSafeHandoffId(handoffIdRaw);
+      await mkdir(resolveHandoffDirectory(activeServerDir, handoffId), { recursive: true });
+      return resolveReceivedProviderBundleFilePath(activeServerDir, handoffId);
+    },
+
     async load(handoffIdRaw: string): Promise<SessionHandoffSourceExportRecord | null> {
       const handoffId = assertSafeHandoffId(handoffIdRaw);
-      const recordPath = resolveRecordPath(activeServerDir, handoffId);
-      let raw: string;
-      try {
-        raw = await readFile(recordPath, 'utf8');
-      } catch (error) {
-        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-          return null;
-        }
-        throw error;
-      }
-
-      let parsedJson: unknown;
-      try {
-        parsedJson = JSON.parse(raw);
-      } catch {
-        throw new Error('Invalid session handoff source export record');
-      }
-      const parsed = SourceExportRecordSchemaV1.safeParse(parsedJson);
-      if (!parsed.success) {
-        throw new Error('Invalid session handoff source export record');
-      }
+      const persistedRecord = await readPersistedSourceExportRecord(activeServerDir, handoffId);
+      if (!persistedRecord) return null;
 
       // Rehydrate persisted relative paths to absolute paths under activeServerDir.
-      const record = parsed.data;
+      const record = persistedRecord;
       try {
         return {
           ...record,
@@ -214,26 +233,36 @@ export function createSessionHandoffSourceExportStore(input: Readonly<{ activeSe
     async writeProviderBundleFile(params: Readonly<{
       handoffId: string;
       providerBundle: SessionHandoffProviderBundle;
+      onProgress?: (progress: Readonly<{ currentBytes: number; totalBytes: number }>) => void;
     }>): Promise<z.infer<typeof ProviderBundleFileSchema>> {
       const handoffId = assertSafeHandoffId(params.handoffId);
       assertCanonicalSessionHandoffProviderBundle(params.providerBundle);
       const directory = resolveHandoffDirectory(activeServerDir, handoffId);
       await mkdir(directory, { recursive: true });
       const filePath = resolveProviderBundleFilePath(activeServerDir, handoffId);
-      const normalized = SessionHandoffProviderBundleSchema.parse(params.providerBundle);
-      await atomicWriteJson(filePath, normalized);
-      const stats = await stat(filePath);
-      const manifestHash = await resolveTransferPayloadManifestHash({
-        kind: 'file',
+      const artifact = await writeSessionHandoffProviderBundleArtifact({
+        providerBundle: params.providerBundle,
         filePath,
-        sizeBytes: stats.size,
+        ...(params.onProgress ? { onProgress: params.onProgress } : {}),
       });
       return {
         transferId: buildSessionHandoffProviderBundleTransferId(handoffId),
         filePath,
-        sizeBytes: stats.size,
-        manifestHash,
+        ...artifact,
       };
+    },
+
+    async releaseTransferFiles(handoffIdRaw: string): Promise<void> {
+      const handoffId = assertSafeHandoffId(handoffIdRaw);
+      const record = await readPersistedSourceExportRecord(activeServerDir, handoffId);
+      if (record?.providerBundle) {
+        const { providerBundle: _releasedProviderBundle, ...durableRecord } = record;
+        await atomicWriteJson(resolveRecordPath(activeServerDir, handoffId), durableRecord);
+      }
+      await Promise.all([
+        rm(resolveProviderBundleFilePath(activeServerDir, handoffId), { force: true }),
+        rm(resolveReceivedProviderBundleFilePath(activeServerDir, handoffId), { force: true }),
+      ]);
     },
 
     async writeWorkspaceReplicationManifestFile(params: Readonly<{

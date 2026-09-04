@@ -3,6 +3,7 @@ import type { AgentState, Metadata, PermissionMode, UserMessage } from '@/api/ty
 import { pushMessageToQueueWithSpecialCommands, type SpecialCommandQueue } from '@/agent/runtime/queueSpecialCommands';
 import { resolveAppendSystemPromptModeOverride } from '@/agent/runtime/permission/appendSystemPromptField';
 import { resolveProviderPromptForDispatch } from '@/agent/runtime/prompt/resolveProviderPromptForDispatch';
+import { createProviderPromptAcceptanceSettlement } from '@/agent/runtime/prompt/createProviderPromptAcceptanceSettlement';
 import { isNonSteerablePromptPayload } from '@/cli/parsers/specialCommands';
 
 import { resolvePermissionModeUpdatedAtFromMessage } from './permissionModeCanonical';
@@ -55,6 +56,7 @@ export type InFlightSteerController = Readonly<{
   steerText: (
     text: string,
     identity?: InFlightSteerDeliveryIdentity,
+    callbacks?: Readonly<{ onProviderPromptAccepted?: () => void }>,
   ) => Promise<void>;
   /** Cancel the active provider turn before executing an `interrupt_and_send` Pending action. */
   cancelActiveTurn?: (() => Promise<void>) | undefined;
@@ -81,6 +83,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
   inFlightSteer?: InFlightSteerController | null;
 }): { bindSession: (session: PermissionModeQueueSessionBinding) => void } {
   let steerSequence: Promise<void> = Promise.resolve();
+  const steerReplaySeedRetirement = createProviderPromptAcceptanceSettlement();
   let didReplaySeedBootstrapForSteer = false;
   let currentSession = opts.session;
   let bindingGeneration = 0;
@@ -146,11 +149,15 @@ export function registerPermissionModeMessageQueueBinding(opts: {
         // Best-effort fallback: queueing should not be able to crash the process if a steer fails.
       }
     };
-    const blockPendingDelivery = async (reason: PendingQueueDeliveryBlockedReason) => {
+    const blockPendingDelivery = async (
+      reason: PendingQueueDeliveryBlockedReason,
+      providerEffect?: 'none',
+    ) => {
       if (!isCurrentBinding(session, messageBindingGeneration)) return;
       await session.blockPendingMessageDelivery?.({
         localIds: deliveryIdentity.queueOptions.userMessageLocalIds,
         reason,
+        ...(providerEffect ? { providerEffect } : {}),
       });
     };
     const claimedProviderAction = deliveryInfo?.pendingProviderAction;
@@ -189,7 +196,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
 
     if (isClaimedSteer && !canSteerNow) {
       steerSequence = steerSequence.then(async () => {
-        await blockPendingDelivery('steering_unavailable');
+        await blockPendingDelivery('steering_unavailable', 'none');
       });
       return steerSequence;
     }
@@ -210,7 +217,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
           if (!isCurrentBinding(session, messageBindingGeneration)) return;
           if (configOutcome.status !== 'applied' && configOutcome.status !== 'scheduled_in_turn') {
             if (isClaimedSteer) {
-              await blockPendingDelivery('steering_unavailable');
+              await blockPendingDelivery('steering_unavailable', 'none');
               return;
             }
             // The backend cannot own the config mid-turn: legacy queue path (the mode applies when
@@ -221,6 +228,8 @@ export function registerPermissionModeMessageQueueBinding(opts: {
           }
         }
         try {
+          if (!isCurrentBinding(session, messageBindingGeneration)) return;
+          await steerReplaySeedRetirement.drain();
           if (!isCurrentBinding(session, messageBindingGeneration)) return;
           let providerText = text;
           let settleReplaySeedOnProviderAcceptance: (() => Promise<unknown>) | null = null;
@@ -238,12 +247,10 @@ export function registerPermissionModeMessageQueueBinding(opts: {
                 session: {
                   getMetadataSnapshot: () =>
                     isCurrentBinding(session, messageBindingGeneration) ? session.getMetadataSnapshot?.() : {},
-                  updateMetadata: (updater) => {
-                    if (!isCurrentBinding(session, messageBindingGeneration)) return;
-                    return session.updateMetadata((current) =>
-                      isCurrentBinding(session, messageBindingGeneration) ? updater(current) : current,
-                    );
-                  },
+                  // Resolution is generation-guarded above and below. This writer is retained
+                  // only by the exact provider-acceptance settlement, which must still retire
+                  // the seed on its original Session after the queue binding moves elsewhere.
+                  updateMetadata: (updater) => session.updateMetadata(updater),
                   ...(typeof session.refreshSessionSnapshotFromServerBestEffort === 'function'
                     ? {
                         refreshSessionSnapshotFromServerBestEffort: (refreshOpts?: {
@@ -275,14 +282,40 @@ export function registerPermissionModeMessageQueueBinding(opts: {
           }
 
           if (!isCurrentBinding(session, messageBindingGeneration)) return;
+          steerReplaySeedRetirement.register(
+            deliveryIdentity.localId,
+            settleReplaySeedOnProviderAcceptance,
+          );
+          const acceptedLocalId = deliveryIdentity.localId;
+          const onProviderPromptAccepted = settleReplaySeedOnProviderAcceptance
+            ? acceptedLocalId
+              ? () => steerReplaySeedRetirement.confirmProviderAccepted([acceptedLocalId])
+              : steerReplaySeedRetirement.createPromptLocalAcceptanceCallback(
+                  settleReplaySeedOnProviderAcceptance,
+                )
+            : null;
           if (deliveryIdentity.steerOptions === undefined) {
-            await steer.steerText(providerText);
+            if (onProviderPromptAccepted) {
+              await steer.steerText(providerText, undefined, { onProviderPromptAccepted });
+            } else {
+              await steer.steerText(providerText);
+            }
+          } else if (onProviderPromptAccepted) {
+            await steer.steerText(
+              providerText,
+              deliveryIdentity.steerOptions,
+              { onProviderPromptAccepted },
+            );
           } else {
             await steer.steerText(providerText, deliveryIdentity.steerOptions);
           }
-          // The steered text — seed included — is with the provider only now. A steer that
-          // threw above bounces to the queue, and the seed must survive for that retry.
-          if (settleReplaySeedOnProviderAcceptance) await settleReplaySeedOnProviderAcceptance();
+          // Exact runtimes confirm before returning and are drained here. A runtime that returns
+          // at transport custody confirms later. Each callback closes over its own settler so a
+          // late ACK cannot retire context for a newer steer; the next serialized steer drains any
+          // settlement that has begun before it reads replaySeedV1 again.
+          if (onProviderPromptAccepted) {
+            await steerReplaySeedRetirement.drain();
+          }
           if (!isCurrentBinding(session, messageBindingGeneration)) return;
           return;
         } catch {
@@ -356,6 +389,7 @@ type PermissionModeQueueSessionBinding = {
   blockPendingMessageDelivery?: (params: Readonly<{
     localIds: readonly string[] | null | undefined;
     reason: PendingQueueDeliveryBlockedReason;
+    providerEffect?: 'none';
   }>) => Promise<boolean>;
 };
 

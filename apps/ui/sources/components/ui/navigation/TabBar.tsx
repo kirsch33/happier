@@ -38,7 +38,6 @@ const styles = StyleSheet.create((theme) => ({
     tab: {
         alignItems: 'center',
         justifyContent: 'center',
-        minWidth: 50,
         flexShrink: 1,
     },
     tabContent: {
@@ -110,7 +109,11 @@ export const TabBar = React.memo(({ activeTab, onTabPress, trailingAccessory }: 
                         <Pressable
                             key={tab.key}
                             testID={`tabbar-tab-${tab.key}`}
-                            style={[styles.tab, { paddingVertical: metrics.tabPaddingVertical, paddingHorizontal: metrics.tabPaddingHorizontal }]}
+                            style={[styles.tab, {
+                                minWidth: metrics.tabMinWidth,
+                                paddingVertical: metrics.tabPaddingVertical,
+                                paddingHorizontal: metrics.tabPaddingHorizontal,
+                            }]}
                             onPress={() => onTabPress(tab.key)}
                             hitSlop={8}
                         >
@@ -124,9 +127,9 @@ export const TabBar = React.memo(({ activeTab, onTabPress, trailingAccessory }: 
                                 {tab.key === 'friends' && friendsBadgeEnabled && friendRequests.length > 0 && (
                                     <TabBadge variant="count" value={friendRequests.length} />
                                 )}
-                                {tab.key === 'inbox' && inboxBadgeEnabled && inboxHasContent && (
+                                {tab.key === 'inbox' && inboxBadgeEnabled && inboxHasContent ? (
                                     <TabBadge variant="dot" />
-                                )}
+                                ) : null}
                             </View>
                             {metrics.showLabels ? (
                                 <Text

@@ -22,6 +22,7 @@ type JsonRpcResponse = Readonly<{
 async function withFakeServer<T>(
   params: Readonly<{
     initialGoal?: NonNullable<Parameters<typeof writeFakeCodexAppServerScript>[0]['initialGoal']>;
+    expectedResumeThreadId?: NonNullable<Parameters<typeof writeFakeCodexAppServerScript>[0]['expectedResumeThreadId']>;
     goalSetBehavior?: NonNullable<Parameters<typeof writeFakeCodexAppServerScript>[0]['goalSetBehavior']>;
     vendorPlugins?: NonNullable<Parameters<typeof writeFakeCodexAppServerScript>[0]['vendorPlugins']>;
     skills?: NonNullable<Parameters<typeof writeFakeCodexAppServerScript>[0]['skills']>;
@@ -38,6 +39,7 @@ async function withFakeServer<T>(
     dir: testDir,
     requestLogPath,
     initialGoal: params.initialGoal,
+    expectedResumeThreadId: params.expectedResumeThreadId,
     goalSetBehavior: params.goalSetBehavior,
     vendorPlugins: params.vendorPlugins,
     skills: params.skills,
@@ -143,6 +145,40 @@ async function withPersistentFakeServer<T>(
 }
 
 describe('fake Codex app-server harness', () => {
+  it('models native thread forks used by shared UI and runtime scenarios', async () => {
+    await withFakeServer({}, async ({ request, requestLogPath }) => {
+      await expect(request('thread/fork', { threadId: 'thread-started' })).resolves.toMatchObject({
+        result: {
+          threadId: 'thread-forked',
+          model: 'gpt-5.4',
+          serviceTier: null,
+        },
+      });
+
+      const requests = await readFakeCodexAppServerRequestLog(requestLogPath);
+      expect(requests).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          method: 'thread/fork',
+          params: { threadId: 'thread-started' },
+        }),
+      ]));
+    });
+  });
+
+  it('rejects a resume request for the wrong native thread when the test requires an exact identity', async () => {
+    await withFakeServer(
+      { expectedResumeThreadId: 'thread-started' },
+      async ({ request }) => {
+        await expect(request('thread/resume', { threadId: 'wrong-thread' })).resolves.toMatchObject({
+          error: expect.objectContaining({ code: -32602 }),
+        });
+        await expect(request('thread/resume', { threadId: 'thread-started' })).resolves.toMatchObject({
+          result: expect.objectContaining({ threadId: 'thread-started' }),
+        });
+      },
+    );
+  });
+
   it('models connected-service account login, account reads, and rate-limit reads', async () => {
     await withFakeServer(
       {},

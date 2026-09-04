@@ -52,6 +52,16 @@ const SIMPLE_NEW_SESSION_MIN_TOP_GAP = 8;
  * roughly this much of the same space, so the card reads as rising into the layer the tab bar just
  * vacated rather than sliding in from off-screen.
  */
+/**
+ * How far the composer's frosted band reaches above the card.
+ *
+ * Taller than the shared `OVERLAY_SCRIM_RAMP_HEIGHT` default: this composer floats over the session
+ * list rather than over a single quiet surface, so it needs a longer run to settle against busy,
+ * scrolling content. Still far short of veiling the list - keeping it readable while you type is the
+ * reason this is a floating composer and not a sheet.
+ */
+const SIMPLE_NEW_SESSION_SCRIM_RAMP_HEIGHT = 128;
+
 const SIMPLE_NEW_SESSION_ENTER_TRAVEL_PX = 32;
 
 /** Shared modal arrival scale; the card grows into place rather than only sliding. */
@@ -64,6 +74,9 @@ const SIMPLE_NEW_SESSION_EXIT_TRAVEL_PX = 12;
 const SIMPLE_NEW_SESSION_DISMISS_SAFETY_MS = 1000;
 
 export type NewSessionSimplePanelProps = Readonly<{
+    composerTopContent?: React.ReactNode;
+    statusBadges?: React.ComponentProps<typeof AgentInput>['statusBadges'];
+    statusTrailingActions?: React.ReactNode;
     popoverBoundaryRef: React.RefObject<View | null>;
     headerHeight: number;
     safeAreaTop: number;
@@ -122,6 +135,7 @@ export type NewSessionSimplePanelProps = Readonly<{
     profilePopover?: React.ComponentProps<typeof AgentInput>['profilePopover'];
     targetServerId?: string | null;
     attachmentFlowId?: string | null;
+    resumePersistedLaunchKey?: string | null;
 }>;
 
 /**
@@ -305,6 +319,7 @@ export const NewSessionSimplePanel = React.memo(function NewSessionSimplePanel(p
         selectedMachineHomeDir: props.selectedMachineHomeDir,
         selectedPath: props.selectedPath,
         baseActionChips: props.agentInputExtraActionChips,
+        resumePersistedLaunchKey: props.resumePersistedLaunchKey,
     });
 
     return (
@@ -349,7 +364,8 @@ export const NewSessionSimplePanel = React.memo(function NewSessionSimplePanel(p
                     ]
                     : [
                         {
-                            justifyContent: 'center' as const,
+                            justifyContent: 'flex-start' as const,
+                            paddingTop: 0,
                         },
                     ]),
             ]}
@@ -392,7 +408,11 @@ export const NewSessionSimplePanel = React.memo(function NewSessionSimplePanel(p
                           */}
                         <View>
                             {isFloatingComposer ? (
-                                <OverlayScrim progress={enterProgress} testID="new-session-scrim" />
+                                <OverlayScrim
+                                    progress={enterProgress}
+                                    rampHeight={SIMPLE_NEW_SESSION_SCRIM_RAMP_HEIGHT}
+                                    testID="new-session-scrim"
+                                />
                             ) : null}
                             <NewSessionSimplePanelComposer
                                 panelProps={props}
@@ -408,7 +428,7 @@ export const NewSessionSimplePanel = React.memo(function NewSessionSimplePanel(p
                 style={{
                     flex: 1,
                     width: '100%',
-                    justifyContent: shouldBottomAnchor ? 'flex-end' : 'center',
+                    justifyContent: shouldBottomAnchor ? 'flex-end' : 'flex-start',
                 }}
             >
                 {shouldBottomAnchor ? (
@@ -470,6 +490,7 @@ function NewSessionSimplePanelComposer({
                 <View
                     style={{ width: '100%', alignSelf: 'center' }}
                 >
+                    {props.composerTopContent}
                     <AgentInput
                         value={sessionPrompt}
                         onChangeText={props.setSessionPrompt}
@@ -514,6 +535,9 @@ function NewSessionSimplePanelComposer({
                         acpConfigOptionOverridesOverride={props.acpConfigOptionOverrides ?? null}
                         onSessionConfigOptionChange={props.setSessionConfigOptionOverride}
                         connectionStatus={props.connectionStatus}
+                        statusBadges={props.statusBadges}
+                        statusTrailingActions={props.statusTrailingActions}
+                        showStatusPermissionMode={false}
                         machineName={props.machineName}
                         machinePopover={props.machinePopover}
                         onMachineClick={undefined}

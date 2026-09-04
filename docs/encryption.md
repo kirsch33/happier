@@ -244,6 +244,23 @@ sequenceDiagram
 - `UserKVStore.value` is encrypted bytes encoded as base64 on the wire.
 - `kvMutate` expects base64 strings; `kvGet/list/bulk` return base64 strings.
 
+Session drafts reserve a typed `UserKVStore` key prefix instead of exposing their rows through the
+generic KV API. The draft routes carry an explicit content envelope and enforce its owner:
+
+- a new-Session draft follows the Account encryption mode and uses Account-scoped key material;
+- an existing-Session draft follows that Session's fixed encryption mode and, in E2EE mode, uses
+  the Session data-encryption key;
+- raw attachment bytes, local file handles and URIs, credentials, secret values, and local
+  presentation state are not part of synchronized draft content.
+
+This keeps one draft document and synchronization contract without weakening the different key
+ownership of Account-scoped and Session-scoped data.
+
+Snapshot hydration distinguishes a temporarily unavailable existing-Session key/context from an
+invalid envelope or payload. It may skip only the unavailable Session record while continuing to
+materialize other Account drafts; malformed or mode-incompatible content fails the snapshot so it
+cannot be silently classified as a local key-loading condition.
+
 ## On-wire formats (encrypted fields)
 
 ```mermaid
@@ -574,6 +591,12 @@ Feature gates:
 
 Do not gate plaintext behavior on raw env vars or `capabilities` fields.
 
+When Account encryption mode changes, every active new-Session draft participates in the same
+atomic mode transition as the other Account-scoped encrypted records. Existing-Session drafts do
+not participate: their envelope remains bound to the owning Session. A missing or incomplete draft
+census, a revision mismatch, or a wrong envelope kind aborts the Account transition without
+partially changing the mode.
+
 ## Terminal pairing authentication rollout
 
 Terminal pairing v3 adds a 32-byte secret to the QR/deep link and authenticates the sealed
@@ -588,7 +611,7 @@ Users who want to opt into enforcement during the expansion phase can require th
 authenticated protocol locally:
 
 ```bash
-HAPPIER_TERMINAL_PAIRING_REQUIRE=v3 happier auth
+HAPPIER_TERMINAL_PAIRING_REQUIRE=v3 happier auth login
 ```
 
 `v3` is a minimum accepted pairing-protocol requirement: legacy v1/v2 responses are rejected, and

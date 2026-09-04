@@ -1,7 +1,14 @@
 import React from 'react';
 import { Platform } from 'react-native';
 
-import { storage } from '@/sync/domains/state/storage';
+import { storage, useActiveServerAccountScope } from '@/sync/domains/state/storage';
+import { createServerAccountScope, type ServerAccountScope } from '@/sync/domains/scope/serverAccountScope';
+import {
+    deleteSessionDraft,
+    getExistingSessionDraftProjection,
+    subscribeSessionDraft,
+    type ExistingSessionDraftProjection,
+} from '@/sync/ops/sessionDrafts/sessionDraftRepository';
 import type { SessionListViewItem } from '@/sync/domains/session/listing/sessionListViewData';
 import {
     createSessionListRowStoreStateSelector,
@@ -36,6 +43,7 @@ import type {
     SessionListRowStoreState,
 } from './sessionListRowModelTypes';
 import type { SessionListRowStoreSubscriptionMode } from './sessionListVisibleRowStoreScopes';
+import type { SessionItemProps } from '../SessionItem';
 
 const EMPTY_SESSION_LIST_ROW_STORE_STATE: SessionListRowStoreState = Object.freeze({});
 const EMPTY_FOLDER_MOVE_MENU_ITEMS: readonly DropdownMenuItem[] = Object.freeze([]);
@@ -56,6 +64,7 @@ export type SessionListRowModelBoundaryProps = Readonly<{
     draggingSessionKey: string | null;
     folderMoveMenuItems?: readonly DropdownMenuItem[];
     folderViewEnabled: boolean;
+    forkActionContext?: SessionItemProps['forkActionContext'];
     getRowMoveActionHandlers: (input: Readonly<{
         item: SessionListRowSessionItem;
         sourceLabel: string;
@@ -88,6 +97,28 @@ function subscribeToNoRowStoreUpdates(): () => void {
 
 function readEmptyRowStoreState(): SessionListRowStoreState {
     return EMPTY_SESSION_LIST_ROW_STORE_STATE;
+}
+
+function readNoExistingSessionDraft(): ExistingSessionDraftProjection | null {
+    return null;
+}
+
+function useExistingSessionDraftProjection(input: Readonly<{
+    enabled: boolean;
+    scope: ServerAccountScope | null;
+    sessionId: string;
+}>): ExistingSessionDraftProjection | null {
+    const { enabled, scope, sessionId } = input;
+    const address = React.useMemo(() => ({ kind: 'session' as const, sessionId }), [sessionId]);
+    const subscribe = React.useMemo(() => {
+        if (!enabled || !scope) return subscribeToNoRowStoreUpdates;
+        return (listener: () => void) => subscribeSessionDraft(scope, address, listener);
+    }, [address, enabled, scope]);
+    const getSnapshot = React.useMemo(() => {
+        if (!enabled || !scope) return readNoExistingSessionDraft;
+        return () => getExistingSessionDraftProjection(scope, sessionId);
+    }, [enabled, scope, sessionId]);
+    return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /**
@@ -143,10 +174,19 @@ function useSessionListRowStoreState(input: Readonly<{
 export const SessionListRowModelBoundary = React.memo(function SessionListRowModelBoundary(
     props: SessionListRowModelBoundaryProps,
 ) {
+    const activeScope = useActiveServerAccountScope();
+    const draftScope = React.useMemo(() => activeScope
+        ? createServerAccountScope(props.item.serverId ?? activeScope.serverId, activeScope.accountId)
+        : null, [activeScope, props.item.serverId]);
     const liveRowStoreState = useSessionListRowStoreState({
         activeServerId: props.activeServerId,
         enabled: props.rowStoreSubscriptionEnabled,
         serverId: props.item.serverId,
+        sessionId: props.item.session.id,
+    });
+    const liveDraftProjection = useExistingSessionDraftProjection({
+        enabled: props.rowStoreSubscriptionEnabled,
+        scope: draftScope,
         sessionId: props.item.session.id,
     });
     // `null` means "this row has never held a live snapshot", which is different from "its live
@@ -159,28 +199,40 @@ export const SessionListRowModelBoundary = React.memo(function SessionListRowMod
     // away. MEASURED as the reported symptom: half-swipe back immediately after opening a session
     // and the list is blank; wait first and it is populated but scrolled to the top.
     const frozenRowStoreStateRef = React.useRef<SessionListRowStoreState | null>(null);
+    const frozenDraftProjectionRef = React.useRef<ExistingSessionDraftProjection | null>(null);
     if (props.dataActive) {
         frozenRowStoreStateRef.current = liveRowStoreState;
+        frozenDraftProjectionRef.current = liveDraftProjection;
     } else if (frozenRowStoreStateRef.current === null) {
         frozenRowStoreStateRef.current = readSessionListRowStoreStateOnce({
             activeServerId: props.activeServerId,
             serverId: props.item.serverId,
             sessionId: props.item.session.id,
         });
+        frozenDraftProjectionRef.current = draftScope
+            ? getExistingSessionDraftProjection(draftScope, props.item.session.id)
+            : null;
     }
     const rowStoreState = props.dataActive
         ? liveRowStoreState
         : frozenRowStoreStateRef.current ?? EMPTY_SESSION_LIST_ROW_STORE_STATE;
+    const draftProjection = props.dataActive
+        ? liveDraftProjection
+        : frozenDraftProjectionRef.current;
 
     return (
         <SessionListRowModelBoundaryContent
             {...props}
+            draftProjection={draftProjection}
+            draftScope={draftScope}
             rowStoreState={rowStoreState}
         />
     );
 });
 
 type SessionListRowModelBoundaryContentProps = SessionListRowModelBoundaryProps & Readonly<{
+    draftProjection: ExistingSessionDraftProjection | null;
+    draftScope: ServerAccountScope | null;
     rowStoreState: SessionListRowStoreState;
 }>;
 
@@ -201,10 +253,16 @@ const SessionListRowModelBoundaryContent = React.memo(function SessionListRowMod
         runtimeNowMs,
     }), [props.settings, relativeNowMs, runtimeNowMs]);
     const rowModelsCacheRef = React.useRef(createSessionListRowModelsCache());
-    const snapshot = selectSessionListRowStateSnapshot(props.rowStoreState, {
+    const storeSnapshot = selectSessionListRowStateSnapshot(props.rowStoreState, {
         sessionId: props.item.session.id,
         serverId: props.item.serverId,
     });
+    const snapshot = React.useMemo(() => ({
+        ...storeSnapshot,
+        draft: props.draftProjection
+            ? { preview: props.draftProjection.preview }
+            : null,
+    }), [props.draftProjection, storeSnapshot]);
     const adjacency = React.useMemo(
         () => resolveSessionListRowModelAdjacency(props.items, props.dataIndex),
         [props.dataIndex, props.items],
@@ -243,6 +301,14 @@ const SessionListRowModelBoundaryContent = React.memo(function SessionListRowMod
         sourceLabel: props.item.session.id,
         item: props.item,
     });
+    const onDeleteDraft = React.useMemo(() => {
+        const scope = props.draftScope;
+        if (!scope || !props.draftProjection) return null;
+        return () => deleteSessionDraft({
+            scope,
+            address: { kind: 'session', sessionId: props.item.session.id },
+        });
+    }, [props.draftProjection, props.draftScope, props.item.session.id]);
 
     return (
         <SessionListRow
@@ -270,6 +336,7 @@ const SessionListRowModelBoundaryContent = React.memo(function SessionListRowMod
             showServerBadge={rowModel.showServerBadge}
             pinned={rowModel.isPinned}
             onTogglePinned={onTogglePinned}
+            onDeleteDraft={onDeleteDraft}
             tags={rowModel.tags}
             allKnownTags={rowModel.allKnownTags}
             onSetTags={onSetTags}
@@ -282,6 +349,7 @@ const SessionListRowModelBoundaryContent = React.memo(function SessionListRowMod
             activityTimeMode={rowModel.activity.mode === 'updatedAt' ? 'updatedAt' : undefined}
             folderDepth={rowModel.folder.depth}
             folderMoveMenuItems={props.folderViewEnabled ? props.folderMoveMenuItems ?? EMPTY_FOLDER_MOVE_MENU_ITEMS : EMPTY_FOLDER_MOVE_MENU_ITEMS}
+            forkActionContext={props.forkActionContext}
             onMoveToFolder={props.folderViewEnabled ? moveActionHandlers.onMoveToFolder : undefined}
             onMoveToWorkspaceRoot={props.folderViewEnabled ? moveActionHandlers.onMoveToWorkspaceRoot : undefined}
             onMoveUp={props.folderViewEnabled ? moveActionHandlers.onMoveUp : undefined}

@@ -69,6 +69,7 @@ async function setupHarness() {
             refreshAutomations: vi.fn(async () => {}),
             refreshSessions: vi.fn(async () => {}),
             sendMessage: vi.fn(async () => {}),
+            acquireUserRequestLease: () => () => {},
             prepareAccountSettingsForDaemonSpawn: prepareAccountSettingsForDaemonSpawnMock,
         },
     }));
@@ -76,6 +77,12 @@ async function setupHarness() {
         useApplySettings: () => applySettingsMock,
     }));
     vi.doMock('@/sync/domains/state/persistence', () => ({
+        getPersistenceStorage: () => ({
+            getString: () => undefined,
+            set: vi.fn(),
+            delete: vi.fn(),
+            getAllKeys: () => [],
+        }),
         loadSettings: () => ({ settings: {}, version: null }),
         loadDeviceAnalyticsId: () => null,
         saveDeviceAnalyticsId: vi.fn(),
@@ -240,6 +247,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
@@ -306,6 +314,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
@@ -370,6 +379,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
@@ -431,6 +441,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
@@ -502,6 +513,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',
@@ -605,6 +617,7 @@ describe('useCreateNewSession configured ACP backend spawning', () => {
 
         function Test() {
             const hook = useCreateNewSession({
+        draftId: '8e0a5dd1-b1df-43dd-b51e-b7787b30362e',
         launchIntentSignature: 'test-launch-intent',
                 router: { push: vi.fn(), replace: vi.fn() },
                 selectedMachineId: 'm1',

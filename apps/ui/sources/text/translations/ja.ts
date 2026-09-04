@@ -725,6 +725,17 @@ export const ja: TranslationStructure = {
     permissions: "権限",
     unreadSessions: "未読のセッション",
     updates: "アクティビティ",
+    actionOperations: {
+      sections: { inProgress: "進行中", needsAttention: "確認が必要", recent: "最近" },
+      clearRecent: "最近の項目を消去",
+      status: { accepted: "受け付け済み", running: "実行中", succeeded: "完了", failed: "失敗", cancelled: "キャンセル済み", reconnecting: "再接続中", unavailable: "状態を確認できません", setupNeedsAttention: "セッションは作成されました。設定を確認してください" },
+      empty: "時間のかかるアクションはここに表示されます。",
+      openHint: "アクションの詳細を開きます",
+      stop: "停止",
+      dismiss: "非表示",
+      stopFailed: "この操作を停止できませんでした。まだ実行中の可能性があります。",
+      detail: { status: "状態", progress: "進捗", error: "エラー", warning: "警告", result: "結果", recoveryReference: "復旧参照" },
+    },
   },
 
   approvals: {
@@ -2129,13 +2140,14 @@ export const ja: TranslationStructure = {
         backendsSubtitle: "設定済みバックエンドとカスタム起動先。",
       },
       enableInjection: {
-        title: "ガイダンス注入を有効化",
+        title: "Happier 実行の指示",
+        subtitle: "オフにすると、ネイティブ優先ルーティングと Happier 実行の仕組みがコーディングエージェントのシステムプロンプトから削除されます。",
       },
       characterBudget: {
-        title: "文字数上限",
+        title: "カスタムルールの文字数上限",
         subtitle: ({ value }: { value: string }) => `${value} 文字`,
-        promptTitle: "文字数上限",
-        promptBody: "システムプロンプトに追加する最大文字数。",
+        promptTitle: "カスタムルールの文字数上限",
+        promptBody: "システムプロンプト内のカスタム実行ルールに使用する最大文字数。",
       },
       rules: {
         groupTitle: "ガイダンスルール",
@@ -4591,9 +4603,9 @@ localTailscale: {
     showLineNumbersInDiffsDescription: "コード差分に行番号を表示",
     showLineNumbersInToolViews: "ツールビューに行番号を表示",
     showLineNumbersInToolViewsDescription: "ツールビューの差分に行番号を表示",
-    wrapLinesInDiffs: "差分で行を折り返し",
+    wrapLinesInDiffs: "コードビューで行を折り返す",
     wrapLinesInDiffsDescription:
-      "差分表示で水平スクロールの代わりに長い行を折り返す",
+      "コードのプレビューやエディターで、水平スクロールの代わりに長い行を折り返す",
     alwaysShowContextSize: "常にコンテキストサイズを表示",
     alwaysShowContextSizeDescription:
       "上限に近づいていなくてもコンテキスト使用量を表示",
@@ -5075,6 +5087,8 @@ localTailscale: {
     daemonRpcUnavailableBody:
       "このマシン上のデーモンに接続できません。オフライン、起動中、またはサーバーから切断されている可能性があります。",
     launchStillPendingTitle: "起動処理はまだ進行中です",
+    createdWithSetupIssueTitle: "セッションを作成しました",
+    createdWithSetupIssueBody: "セッションは作成されましたが、初期設定が完了しませんでした。この画面から再試行しても、新しいセッションは作成されません。",
     launchStillPendingBody:
       "Happier はまだ新しいセッションを確認できていません。起動リクエストは保存されています。重複するセッションを作成せずに同じ起動を続けるには、再試行してください。",
     connectedServiceSwitchUnavailable: {
@@ -5542,10 +5556,15 @@ localTailscale: {
 	    },
 	    resuming: "再開中...",
 	    resumeFailed: "セッションの再開に失敗しました",
-	    pendingQueuedResumeFailedTitle: "メッセージはキューに保存されました",
-	    pendingQueuedResumeFailedBody:
-	      "メッセージは保留キューに保存されましたが、Happier はこのセッションを再開できませんでした。再試行して開始してください。",
-	    composerBanners: {
+        pendingActivation: {
+            waiting_offline: { title: 'このマシン用にメッセージをキューへ保存しました', body: 'このマシンとデーモンがオンラインに戻ると処理されます。' },
+            waiting: { title: '再開を待っています', body: 'デーモンがこのセッションを再開する間、メッセージは安全にキューへ保存されています。' },
+            failed: { title: 'セッションを再開できませんでした', body: 'メッセージは引き続き安全にキューへ保存されています。準備ができたら再試行してください。' },
+            queued: { title: 'メッセージをキューへ保存しました', body: 'この非アクティブなセッションにはキュー内のメッセージがあります。準備ができたら再開してください。' },
+            queued_offline: { title: '手動再開待ちのメッセージ', body: 'このセッションを再開するまでキューに残ります。' },
+            actions: { retry: '再試行', resume: '再開', process_when_online: 'オンライン時に処理', keepQueued: 'キューに残す', autoResumeOptions: '自動再開オプション' },
+        },
+        composerBanners: {
             showBannerAction: 'バナーを表示',
             hideBannerAction: 'バナーを非表示',
 	    },
@@ -5565,6 +5584,18 @@ localTailscale: {
 	      hideBannerAction: "古い CLI の通知を非表示",
 	      errorTitle: "ランナーの再起動は利用できません",
 	      errorBody: "daemon はこのセッションランナーを再起動できませんでした。セッションは引き続き利用できます。",
+	    },
+	    mcpRestartRequired: {
+	        title: "MCP サーバーの変更を適用するには再起動してください",
+	        body: "MCP サーバーはセッション開始時に適用されます。更新した選択を使うには、このランナーを再起動してください。",
+	        failureBody: "Happier はこのランナーを再起動できませんでした。MCP の選択は保存され、次回の開始時に適用されます。",
+	        restartAction: "セッションを再起動",
+	        restartPendingAction: "再起動中…",
+	        badgeLabel: "MCP の変更",
+	        showBannerAction: "MCP 再起動のお知らせを表示",
+	        hideBannerAction: "MCP 再起動のお知らせを非表示",
+	        errorTitle: "セッションを再起動できません",
+	        errorBody: "ランナーを再起動できませんでした。MCP の選択は保存され、次回のセッション開始時に適用されます。",
 	    },
 	    invalidLinkTitle: "無効なセッションリンク",
 	    invalidLinkDescription: "セッションリンクが見つからないか無効です。URL を確認してもう一度お試しください。",
@@ -5587,7 +5618,7 @@ localTailscale: {
       `このセッションは終了しており、${provider} がここでコンテキストの復元をサポートしていないため再開できません。続けるには新しいセッションを開始してください。`,
     machineOfflineNoticeTitle: "マシンがオフラインです",
     machineOfflineNoticeBody: ({ machine }: { machine: string }) =>
-      `“${machine}” がオフラインのため、Happier はまだこのセッションを再開できません。オンラインに戻して続行してください。`,
+      `“${machine}” はオフラインです。今すぐメッセージをキューに追加でき、マシンがオンラインに戻ると Happier が続行します。`,
       machineOfflineCannotResume:
         "マシンがオフラインです。オンラインに戻してこのセッションを再開してください。",
         openRuns: "セッションの実行を開く",
@@ -6343,6 +6374,12 @@ localTailscale: {
     newTagConfirm: "追加",
   },
 
+  sessionDrafts: {
+    sectionTitle: '下書き', badge: '下書き', untitled: '無題の下書き', continueEditing: '編集を続ける', startAnother: '別の下書きを開始',
+    status: { offline: 'オフライン', syncing: '同期中', conflict: '競合', machineUnavailable: 'マシンを利用できません', attachmentNeedsAttention: '添付ファイルの確認が必要です', startInterrupted: '開始が中断されました' },
+    new: { action: '新しい下書き' }, delete: { action: '下書きを削除', confirmTitle: '下書きを削除しますか？', confirmDescription: 'この下書きはデバイスから削除されます。' },
+    conflict: { title: '下書きの競合', description: 'このフィールドは別のデバイスで変更されました。', mine: 'このデバイス', synced: '同期済み', useSynced: '同期版を使用', keepDevice: 'デバイス版を保持', copyMine: '自分の版をコピー', copied: 'コピーしました', copyFailed: 'コピーできませんでした', field: { text: 'テキスト', mentions: 'メンション', attachments: '添付ファイル', recipient: '受信者', agentContinuation: 'エージェント継続', executionRunDelivery: '実行配信' } },
+  },
   sessionsList: {
     serverHeader: ({ server }: { server: string }) => `サーバー: ${server}`,
     storagePersistedTab: "Happier",
@@ -6458,6 +6495,7 @@ localTailscale: {
     browseSourceCodexConnectedServices: ({ service }: { service: string }) => `${service} connected services`,
     browseSourceClaudeDefault: "デフォルトの Claude 設定",
     browseSourceOpenCodeDefault: "デフォルトの OpenCode サーバー",
+    browseSourcePiDefault: "デフォルトの Pi エージェントディレクトリ",
     browseCandidates: "利用可能なセッション",
     browseNoMachines: "直接セッションに利用できるマシンはまだありません。",
     browseNoCandidates: "このマシンとプロバイダーに対するセッションは見つかりませんでした。",
@@ -6577,7 +6615,8 @@ localTailscale: {
     viewSessionLogTitle: "セッションログを表示",
     viewSessionLogSubtitle: "このセッションのライブログ末尾を開く",
     pinSession: "セッションをピン留め",
-    unpinSession: "ピン留め解除",
+        unpinSession: "ピン留め解除",
+        pinLimitExceeded: ({ count }: { count: number }) => `${count.toLocaleString()} 件までセッションをピン留めできます。別のセッションのピン留めを解除して、もう一度お試しください。`,
     copyResumeCommand: "再開コマンドをコピー",
     resumeCommand: ({ sessionId }: { sessionId: string }) => `happier resume ${sessionId}`,
     viewMachine: "マシンを表示",
@@ -7834,6 +7873,14 @@ localTailscale: {
         runClass: "実行クラス",
         ioMode: "I/Oモード",
       },
+      launchOrigin: {
+        crossSession: ({ sessionId }: { sessionId: string }) => `セッション ${sessionId} から開始`,
+        externalCli: "CLI から外部で開始",
+        externalMcp: "MCP 経由で外部から開始",
+        externalAction: "Happier アクション経由で外部から開始",
+        externalUnknown: "外部から開始（開始元不明）",
+        legacyUnknown: "開始元不明",
+      },
       timestamps: {
         started: "開始",
         finished: "完了",
@@ -8005,6 +8052,14 @@ localTailscale: {
     },
 
 settingsSession: {
+    newSessionDraftEntry: {
+        title: '新しいセッションの下書き',
+        footer: '「新しいセッション」でこのデバイスの下書きを続けるか、新規作成するかを選びます。',
+        resumeTitle: '前の下書きを再開',
+        resumeSubtitle: 'このデバイスで「新しいセッション」から始めた下書きを続けます。',
+        freshTitle: '常に新しく始める',
+        freshSubtitle: '「新しいセッション」を選ぶたびに新しい下書きを開きます。',
+    },
 	    sessionList: {
 	        title: 'セッション一覧',
 	        footer: '各セッション行に表示する内容をカスタマイズします。',
@@ -8175,6 +8230,16 @@ settingsSession: {
         title: '詳細',
     },
     messageSending: {
+      inactiveResumePolicyTitle: "送信後の自動再開",
+      inactiveResumePolicySubtitle: "非アクティブなセッションへ送信した後の Happier の動作を選択します。",
+      inactiveResumePolicy: {
+        whenAvailableTitle: "今すぐ、またはマシン復帰時",
+        whenAvailableSubtitle: "到達可能ならすぐ再開し、そうでなければデーモン再接続時に処理します。",
+        onlineOnlyTitle: "マシンがオンラインの場合のみ",
+        onlineOnlySubtitle: "送信時に一度だけ試します。利用できない場合はメッセージをキューに残します。",
+        manualTitle: "自動では再開しない",
+        manualSubtitle: "セッションを再開するまで、常にメッセージをキューに残します。",
+      },
       title: "メッセージ送信",
       footer:
         "エージェント実行中にメッセージを送信したときの挙動を設定します。",
@@ -8593,6 +8658,9 @@ settingsSession: {
         wizardColumnsTitle: "2列レイアウト",
         wizardColumnsEnabledSubtitle: "広い画面で関連する選択欄を横に並べます。",
         wizardColumnsDisabledSubtitle: "すべてのウィザード選択欄を1列に積みます。",
+        defaultWorktreeTitle: "新しいセッション用にワークツリーを作成",
+        defaultWorktreeEnabledSubtitle: "新しい Git セッションを既定で新規ワークツリーから開始します。",
+        defaultWorktreeDisabledSubtitle: "新しい Git セッションを既定で選択したフォルダーから開始します。",
         wizardPresentationTitle: "ウィザード選択欄のレイアウト",
         wizardPresentationFooter:
           "Auto は短いセクションをリストのままにし、長いセクションを検索可能なドロップダウンに切り替えます。",

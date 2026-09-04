@@ -39,7 +39,6 @@ import {
   normalizePublicReleaseChannel,
 } from './release/lib/public-release-rings.mjs';
 import { resolveRemoteReleasePlanningRefs } from './release/lib/release-planning-remote-refs.mjs';
-import { MATERIALIZED_RELEASE_BUMP_ADMISSION_MESSAGE } from './release/resolve-bump-plan.mjs';
 import {
   resolvePublicReleaseValidationProfile,
 } from './release/public-release-contract.mjs';
@@ -2106,7 +2105,13 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
         const scriptArgs =
           subcommand === 'release-compute-deploy-plan' ? ['--deploy-environment', deployEnvironment, ...passthrough] : passthrough;
 
-        if (subcommand === 'release-analyze' || (subcommand === 'release-local-candidates' && dryRun)) {
+        const isHermeticInstallerProjectionCheck =
+          subcommand === 'release-sync-installers' && passthrough.includes('--check');
+        if (
+          subcommand === 'release-analyze' ||
+          (subcommand === 'release-local-candidates' && dryRun) ||
+          isHermeticInstallerProjectionCheck
+        ) {
           runReleaseWrappedScript({
             repoRoot,
             env: process.env,
@@ -3490,12 +3495,14 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
 
       const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
       const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
-        const { env: mergedEnv, usedKeychain } = loadSecrets({
-          baseEnv: env,
-          secretsSource,
-          keychainService,
-          keychainAccount,
-        });
+      const { env: mergedEnv, usedKeychain } = dryRun
+        ? { env, usedKeychain: false }
+        : loadSecrets({
+            baseEnv: env,
+            secretsSource,
+            keychainService,
+            keychainAccount,
+          });
       if (sources.length > 0) {
         console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
         console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
@@ -3553,7 +3560,9 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
 
       const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
       const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
-          const { env: mergedEnv, usedKeychain } = loadSecrets({
+      const { env: mergedEnv, usedKeychain } = dryRun
+        ? { env, usedKeychain: false }
+        : loadSecrets({
             baseEnv: env,
             secretsSource,
             keychainService,
@@ -4310,13 +4319,17 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               'deploy-environment': { type: 'string', default: 'preview' },
               'deploy-targets': { type: 'string', default: 'ui,server,website,docs' },
               'force-deploy': { type: 'string', default: 'false' },
-              bump: { type: 'string', default: 'none' },
+              'waive-ci': { type: 'string', default: 'false' },
+              'include-validation-suites': { type: 'string', default: '' },
+              'waive-validation-suites': { type: 'string', default: '' },
+              'override-reason': { type: 'string', default: '' },
               'ui-expo-action': { type: 'string', default: 'none' },
               'desktop-mode': { type: 'string', default: 'none' },
               'release-profile': { type: 'string', default: '' },
               'source-sha': { type: 'string', default: '' },
               'workflow-control-sha': { type: 'string', default: '' },
               'resume-run-id': { type: 'string', default: '' },
+              'ci-run-id': { type: 'string', default: '' },
               'operation-id': { type: 'string', default: '' },
               'attempt-id': { type: 'string', default: 'attempt_1' },
               'release-notes-id': { type: 'string', default: '' },
@@ -4375,10 +4388,21 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           const dryRun = values['dry-run'] === true;
           const jsonOutput = values.json === true;
           const forceDeploy = parseBoolString(values['force-deploy'], '--force-deploy');
-          const bumpPreset = String(values.bump ?? '').trim() || 'none';
+          const bumpPreset = 'none';
+          const waiveCi = parseBoolString(values['waive-ci'], '--waive-ci');
+          const includeValidationSuites = parseCsvList(String(values['include-validation-suites'] ?? ''));
+          const waiveValidationSuites = parseCsvList(String(values['waive-validation-suites'] ?? ''));
+          const overrideReason = String(values['override-reason'] ?? '').trim();
+          if ((waiveCi || waiveValidationSuites.length > 0) && !overrideReason) {
+            fail('--override-reason is required when CI or validation evidence is waived.');
+          }
+          if (overrideReason.length > 500 || /[\r\n]/u.test(overrideReason)) {
+            fail('--override-reason must be a single line of at most 500 characters.');
+          }
           const authorizedPromotionSourceSha = String(values['source-sha'] ?? '').trim().toLowerCase();
           const workflowControlSha = String(values['workflow-control-sha'] ?? '').trim();
           const resumeRunId = String(values['resume-run-id'] ?? '');
+          const ciRunId = String(values['ci-run-id'] ?? '');
           const operationId = String(values['operation-id'] ?? '').trim();
           const attemptId = String(values['attempt-id'] ?? '').trim();
           const releaseNotesId = String(values['release-notes-id'] ?? '').trim();
@@ -4390,16 +4414,13 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             fail('--qualified-v4-activation-approval is not supported by this release line because it has no Qualified V4 activation path.');
           }
           const promotionSourceBranch = resolveReleasePromotionSourceBranch(action);
+          const productionPromotionMode = action === 'reset main from preview' || action === 'reset main from dev'
+            ? 'reset'
+            : 'fast-forward';
 
           const uiExpoAction = String(values['ui-expo-action'] ?? '').trim() || 'none';
           const desktopMode = String(values['desktop-mode'] ?? '').trim() || 'none';
 
-          if (!['none', 'patch', 'minor', 'major'].includes(bumpPreset)) {
-            fail(`--bump must be one of: none, patch, minor, major (got: ${bumpPreset})`);
-          }
-          if (bumpPreset !== 'none') {
-            fail(MATERIALIZED_RELEASE_BUMP_ADMISSION_MESSAGE);
-          }
           if (jsonOutput && !dryRun) {
             fail('--json is supported only with --dry-run.');
           }
@@ -4418,6 +4439,9 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           if (workflowControlSha && !FULL_GIT_SHA.test(workflowControlSha)) {
             fail('--workflow-control-sha must be a full 40-character lowercase Git commit SHA.');
           }
+          if (ciRunId && !/^[1-9][0-9]*$/u.test(ciRunId)) {
+            fail('--ci-run-id must be a positive GitHub Actions run ID.');
+          }
           if (resumeRunId && !/^[1-9][0-9]*$/u.test(resumeRunId)) {
             fail('--resume-run-id must be a positive GitHub Actions run ID.');
           }
@@ -4427,11 +4451,17 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           if (releaseNotesId && !RELEASE_NOTES_ID.test(releaseNotesId)) {
             fail('--release-notes-id must contain only lowercase letters, digits, dots, underscores, or hyphens.');
           }
-          if (!['none', 'ota', 'native', 'native_submit'].includes(uiExpoAction)) {
-            fail(`--ui-expo-action must be one of: none, ota, native, native_submit (got: ${uiExpoAction})`);
+          if (!['none', 'ota', 'native', 'native_submit', 'full'].includes(uiExpoAction)) {
+            fail(`--ui-expo-action must be one of: none, ota, native, native_submit, full (got: ${uiExpoAction})`);
           }
           if (!['none', 'build_only', 'build_and_publish'].includes(desktopMode)) {
             fail(`--desktop-mode must be one of: none, build_only, build_and_publish (got: ${desktopMode})`);
+          }
+          if (!deployTargets.includes('ui') && uiExpoAction !== 'none') {
+            fail('--ui-expo-action requires --deploy-targets to include ui.');
+          }
+          if (!deployTargets.includes('ui') && desktopMode !== 'none') {
+            fail('--desktop-mode requires --deploy-targets to include ui.');
           }
 
           const requestedReleaseProfileId = String(values['release-profile'] ?? '').trim();
@@ -4463,13 +4493,22 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
                 kind: 'happier.release-dispatch-plan.v3',
                 schemaVersion: 3,
                 sourceBranch: promotionSourceBranch,
+                productionPromotionMode,
                 authorizedPromotionSourceSha: authorizedPromotionSource.sha,
                 effectiveDeployTargets: deployTargets,
+                uiExpoAction,
+                desktopMode,
                 validationProfile: releaseProfile.id,
                 operationId,
                 releaseNotesId,
                 ...(resumeRunId ? { resumeRunId } : {}),
                 approvals: { qualifiedV4Activation: qualifiedV4ActivationApproval },
+                overrides: {
+                  waiveCi,
+                  includeValidationSuiteIds: includeValidationSuites,
+                  waiveValidationSuiteIds: waiveValidationSuites,
+                  reason: overrideReason,
+                },
               })}\n`,
             );
             return;
@@ -4504,12 +4543,16 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               '-f', `force_deploy=${forceDeploy}`,
               '-f', `ui_expo_action=${uiExpoAction}`,
               '-f', `desktop_mode=${desktopMode}`,
-              '-f', `bump=${bumpPreset}`,
+              '-f', `waive_ci=${waiveCi}`,
+              '-f', `include_validation_suites=${includeValidationSuites.join(',')}`,
+              '-f', `waive_validation_suites=${waiveValidationSuites.join(',')}`,
+              '-f', `override_reason=${overrideReason}`,
               '-f', `authorized_promotion_source_sha=${authorizedPromotionSource.sha}`,
               '-f', `release_notes_id=${releaseNotesId}`,
               '-f', `qualified_v4_activation_approval=${qualifiedV4ActivationApproval}`,
               ...(workflowControlSha ? ['-f', `workflow_control_sha=${workflowControlSha}`] : []),
               ...(resumeRunId ? ['-f', `resume_run_id=${resumeRunId}`] : []),
+              ...(ciRunId ? ['-f', `ci_run_id=${ciRunId}`] : []),
               ...(operationId ? ['-f', `hmaint_operation_id=${operationId}`] : []),
               ...(operationId ? ['-f', `hmaint_attempt_id=${attemptId}`] : []),
               '-f', `confirm=${action}`,
@@ -4726,9 +4769,12 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             console.log(`- force_deploy: ${forceDeploy}`);
             console.log(`- ui_expo_action: ${uiExpoAction}`);
             console.log(`- desktop_mode: ${desktopMode}`);
-            console.log(`- bump: ${bumpPreset}`);
             console.log(`- confirm: ${action}`);
             console.log(`- release_profile: ${releaseProfile.id}`);
+            console.log(`- waive_ci: ${waiveCi}`);
+            console.log(`- include_validation_suites: ${includeValidationSuites.join(',') || 'none'}`);
+            console.log(`- waive_validation_suites: ${waiveValidationSuites.join(',') || 'none'}`);
+            if (overrideReason) console.log(`- override_reason: ${overrideReason}`);
             return;
           }
 

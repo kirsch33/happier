@@ -1,12 +1,14 @@
 import { Socket } from "socket.io";
 import type { LinkedProvider } from "@/app/auth/providers/linkedProviders";
 import type {
+    ActionOperationRevisionEphemeralV1,
     DirectSessionTranscriptDeltaEphemeral,
     ExecutionRunPublicState,
     PrimaryTurnStatusV1,
     SessionRuntimeActivityState,
     SessionMessageAttentionImpact,
     SessionRuntimeIssueV1,
+    SessionDraftSocketUpdateV1,
     SessionStoredMessageContent,
 } from "@happier-dev/protocol";
 
@@ -130,6 +132,7 @@ export type UpdateEvent = {
     pendingBlockedCount?: number;
     meaningfulActivityAt?: number;
     changedByAccountId?: string;
+    pendingActivationAuthorization?: import('@happier-dev/protocol').PendingActivationAuthorizationV1 | null;
 } | {
     type: 'automation-upsert';
     automationId: string;
@@ -336,7 +339,7 @@ export type EphemeralEvent = {
         createdAt: number;
         updatedAt: number;
     };
-} | DirectSessionTranscriptDeltaEphemeral | {
+} | DirectSessionTranscriptDeltaEphemeral | ActionOperationRevisionEphemeralV1 | {
     type: 'machine-activity';
     id: string;
     active: boolean;
@@ -353,7 +356,9 @@ export type EphemeralEvent = {
     machineId: string;
     online: boolean;
     timestamp: number;
-};
+} | ({
+    type: 'session-draft-updated';
+} & SessionDraftSocketUpdateV1);
 
 // === EVENT PAYLOAD TYPES ===
 
