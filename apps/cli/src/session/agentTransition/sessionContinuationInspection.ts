@@ -79,16 +79,20 @@ function buildSessionContinuationInspectionKey(
   return JSON.stringify(request);
 }
 
-async function withSessionContinuationInspectionTimeout<T>(promise: Promise<T>): Promise<T> {
+async function withSessionContinuationInspectionTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
     return await Promise.race([
-      promise,
+      operation(controller.signal),
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => {
           reject(new Error(
             `Session continuation inspection timed out after ${SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS}ms`,
           ));
+          controller.abort();
         }, SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS);
       }),
     ]);
@@ -165,7 +169,7 @@ export async function inspectSessionContinuation(params: Readonly<{
   activeSessionContinuationInspections.add(inspectionKey);
   try {
     return await withSessionContinuationInspectionTimeout(
-      inspectSessionContinuationUnbounded(params),
+      async (signal) => await inspectSessionContinuationUnbounded({ ...params, signal }),
     );
   } finally {
     activeSessionContinuationInspections.delete(inspectionKey);
@@ -175,10 +179,12 @@ export async function inspectSessionContinuation(params: Readonly<{
 async function inspectSessionContinuationUnbounded(params: Readonly<{
   credentials: Credentials;
   request: SessionContinuationInspectionRequestV1;
+  signal: AbortSignal;
 }>): Promise<SessionContinuationInspectionV1> {
   const rawSession = await fetchSessionByIdCompat({
     token: params.credentials.token,
     sessionId: params.request.sourceSessionId,
+    signal: params.signal,
   }).catch((error: unknown) => {
     if (isAuthenticationError(error)) throw error;
     return null;

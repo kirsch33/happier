@@ -203,10 +203,11 @@ process does not prove it opened the incumbent database.
 
 - Viewing a Session must not launch continuation-inspection RPCs. Hover, focus,
   or `onPressIn` is the earliest legitimate demand signal for the Agent picker.
-- Advisory inspection RPCs need both admission control and a hard deadline. A
-  reconnect or status refresh must not admit another copy of the same exact
-  question while its predecessor is still running. A transport failure is
-  indeterminate; it is not proof that the CLI needs an update.
+- Advisory inspection RPCs need admission control and a hard deadline that
+  cancels their underlying I/O. A reconnect or status refresh must not admit
+  another copy of the same exact question while its predecessor is still
+  running. A transport failure is indeterminate; it is not proof that the CLI
+  needs an update.
 - If daemon logs show `session.continuation.inspect` calls materially outnumber
   returns, stop heavy work, confirm its process group exited, inspect the saved
   log and static daemon state, and restart only the daemon if recovery requires

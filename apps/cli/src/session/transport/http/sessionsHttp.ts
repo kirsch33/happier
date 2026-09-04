@@ -135,7 +135,12 @@ function looksLikeMissingV2SessionRoute404(data: unknown, sessionId: string): bo
   );
 }
 
-export async function fetchSessionByIdCompat(params: Readonly<{ token: string; sessionId: string; reason?: SessionSnapshotRefreshReasonInput }>): Promise<RawSessionRecord | null> {
+export async function fetchSessionByIdCompat(params: Readonly<{
+  token: string;
+  sessionId: string;
+  reason?: SessionSnapshotRefreshReasonInput;
+  signal?: AbortSignal;
+}>): Promise<RawSessionRecord | null> {
   const response = await getSessionByIdResponse(params);
   enforceSessionCompatibilityResponse(response);
 
@@ -145,7 +150,12 @@ export async function fetchSessionByIdCompat(params: Readonly<{ token: string; s
     let cursor: string | undefined = undefined;
     const seenCursors = new Set<string>();
     while (true) {
-      const res = await fetchSessionsPage({ token: params.token, cursor, limit: 200 });
+      const res = await fetchSessionsPage({
+        token: params.token,
+        cursor,
+        limit: 200,
+        ...(params.signal ? { signal: params.signal } : {}),
+      });
       const match = res.sessions.find((row) => (row as any) && String((row as any).id ?? '') === params.sessionId);
       if (match) return match as unknown as RawSessionRecord;
       if (!res.hasNext || !res.nextCursor) return null;

@@ -87,6 +87,32 @@ describe('sessionControl.sessionsHttp.fetchSessionByIdCompat', () => {
     expect(String(getSpy.mock.calls[1]?.[0])).toContain('/v2/sessions');
   });
 
+  it('carries caller cancellation through both the detail request and compat page fallback', async () => {
+    const getSpy = vi.spyOn(axios, 'get');
+    const controller = new AbortController();
+    getSpy
+      .mockResolvedValueOnce({
+        status: 404,
+        data: { error: 'Not found', path: '/v2/sessions/s1', method: 'GET' },
+      } as any)
+      .mockResolvedValueOnce({
+        status: 200,
+        data: createSessionListResponseFixture([
+          createSessionRecordFixture({ id: 's1', metadataVersion: 0, agentStateVersion: 0, dataEncryptionKey: 'dek' }),
+        ]),
+      } as any);
+
+    await expect(fetchSessionByIdCompat({
+      token: 't',
+      sessionId: 's1',
+      signal: controller.signal,
+    })).resolves.toMatchObject({ id: 's1' });
+
+    expect(getSpy).toHaveBeenCalledTimes(2);
+    expect(getSpy.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+    expect(getSpy.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+  });
+
   it('does not scan /v2/sessions when the session is missing (404 Session not found)', async () => {
     const getSpy = vi.spyOn(axios, 'get');
     getSpy.mockResolvedValueOnce({

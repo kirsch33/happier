@@ -194,10 +194,14 @@ describe('inspectSessionContinuation', () => {
 
     await expect(duplicate).rejects.toThrow('already in progress');
     expect(mocks.fetchSessionByIdCompat).toHaveBeenCalledTimes(1);
+    const fetchSignal = mocks.fetchSessionByIdCompat.mock.calls[0]?.[0]?.signal as AbortSignal | undefined;
+    expect(fetchSignal).toBeInstanceOf(AbortSignal);
+    expect(fetchSignal?.aborted).toBe(false);
 
     const firstRejection = expect(first).rejects.toThrow('timed out');
     await vi.advanceTimersByTimeAsync(SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS);
     await firstRejection;
+    expect(fetchSignal?.aborted).toBe(true);
     vi.useRealTimers();
   });
 });
