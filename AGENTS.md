@@ -48,10 +48,12 @@ one.
   load and available memory first, give typechecks and builds a sensible
   timeout, and stop a check that ceases making progress before starting another
   validation. Treat integration-test setup that builds packages as a build.
-- The RPi session is also the operator's communication path. Launch any command
-  that might exceed one minute with an early yield, return to a message boundary
-  every 30–60 seconds, and keep the operator interruptible. A progressing build
-  is not permission to strand queued steering behind one foreground tool call.
+- The RPi session is also the operator's communication path. Never run a build,
+  typecheck, or other memory-heavy job inside the live session runner's cgroup
+  or as a foreground tool call. Launch it as a detached, bounded native service
+  in the dedicated build slice, inspect it with short status/log reads, and
+  return to a message boundary every 30–60 seconds. A progressing build is not
+  permission to strand queued steering.
 - Product runtime paths are binary-safe: do not directly spawn `node`, `npm`,
   `npx`, `pnpm`, `yarn`, or `bunx`.
 - Keep compatibility, persistence, encryption, version-skew, and recovery
@@ -130,19 +132,24 @@ process does not prove it opened the incumbent database.
   narrowest relevant test; a CLI typecheck can consume several GiB and must be
   stopped if it ceases making progress. Never overlap a stalled typecheck,
   build, Git operation, or release gate with another heavy check.
-- Keep daemon/control-plane processes in `happier-critical.slice` and session
-  runners plus their descendants in `happier-jobs.slice`; verify the actual
-  `/proc/<pid>/cgroup` placement before relying on it. On the RPi the jobs slice
-  has lower CPU/IO weight and memory pressure management, while the critical
-  slice has protected memory. Run heavy build commands as session-job
-  descendants; do not move them into the protected control-plane slice or run
-  an unscoped competing build outside the managed hierarchy.
+- Keep daemon/control-plane processes in `happier-critical.slice`, interactive
+  session runners in `happier-jobs.slice`, and builds/typechecks in the sibling
+  `happier-build.slice`; verify the actual `/proc/<pid>/cgroup` placement before
+  relying on it. The build slice must impose an explicit CPU quota, low CPU/IO
+  weights, memory high/max limits, and a bounded swap limit. Start the build as
+  a detached `systemd-run --user` service with `Slice=happier-build.slice`, a
+  unique unit name, the repository working directory, and the outer timeout.
+  Never place a build in the protected control-plane slice, leave it inside an
+  interactive runner's scope, or run it unscoped. If isolation cannot be proven
+  with a harmless transient command first, do not start the heavy job.
 - The current CLI bundle takes about 18 minutes on the RPi while remaining
   CPU-active; pkgroll's 10-minute default is therefore too short on this host.
   For the one canonical versioned CLI build, set
-  `HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1200000` and monitor CPU, available memory,
-  and output at least every 30 seconds. Do not raise the bound or retry merely
-  because pkgroll is quiet. Once `apps/cli/dist/.build-manifest.json` records
+  `HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1200000` and inspect the detached unit, its
+  cgroup, CPU, available memory, and saved output at least every 30–60 seconds
+  using short reads. Do not attach a long-lived foreground poll, raise the
+  bound, or retry merely because pkgroll is quiet. Once
+  `apps/cli/dist/.build-manifest.json` records
   the intended version, the multi-target release command must reuse that dist;
   stop and diagnose if packaging starts another full CLI bundle.
 - Verify artifact architecture, archive root, embedded version, and checksum
@@ -204,6 +211,18 @@ process does not prove it opened the incumbent database.
   returns, stop heavy work, confirm its process group exited, inspect the saved
   log and static daemon state, and restart only the daemon if recovery requires
   it. Do not use repeated live-status polling against a backed-up daemon.
+- Count compactions from the provider rollout, not from guessed UI meaning: one
+  lifecycle can contain a started and completed record, while separate rollout
+  timestamps are separate provider compactions. A compaction is not evidence
+  that Happier retried or redelivered a Pending message. Check provider turn ids
+  and Pending custody before making either claim.
+- Do not repeatedly resume a provider thread that already compacted during a
+  failed recovery attempt and then made no progress. Once its runner is absent,
+  use the existing fail-closed `session resume-fresh` path when its exact
+  preconditions hold: the same Happier session, one known Pending operator
+  message, and a newly proven provider id. Never discard or merge operator
+  messages to manufacture those preconditions, and never invent an automatic
+  context-reset policy from the number of compaction rows.
 - “CLI Update Required” is valid only for a parseable runner version proven
   older than the required version. Unknown or malformed metadata must not be
   relabeled as old. The warning must state the exact runner version and minimum;
