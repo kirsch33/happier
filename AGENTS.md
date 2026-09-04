@@ -142,6 +142,21 @@ process does not prove it opened the incumbent database.
   Never place a build in the protected control-plane slice, leave it inside an
   interactive runner's scope, or run it unscoped. If isolation cannot be proven
   with a harmless transient command first, do not start the heavy job.
+- On the 8 GiB RPi, the proven protective hierarchy is a `user@0.service`
+  boundary of `MemoryHigh=6G`, `MemoryMax=7G`, and `MemorySwapMax=2G`, with the
+  build slice at `CPUQuota=200%`, `CPUWeight=10`, `IOWeight=10`,
+  `MemoryHigh=4G`, `MemoryMax=4608M`, and `MemorySwapMax=1G`. Keep pressure-based
+  OOM handling at the parent and set `ManagedOOMMemoryPressure=auto` on the
+  already hard-capped child: enabling pressure kill on that throttled child
+  killed a healthy progressing compiler while the host still had roughly
+  2 GiB available. These are measured RPi values, not fleet-wide defaults;
+  remeasure before applying the pattern to a host with different capacity.
+- A CLI typecheck under that hierarchy remained CPU-active at roughly 4 GiB
+  but did not finish inside a 10-minute outer timeout. Treat that result as an
+  inconclusive bounded gate, not a type error or permission to retry unchanged.
+  Use the focused owner tests and canonical release build next, or move the
+  broad typecheck to a better-provisioned builder when it is independently
+  required.
 - The current CLI bundle takes about 18 minutes on the RPi while remaining
   CPU-active; pkgroll's 10-minute default is therefore too short on this host.
   For the one canonical versioned CLI build, set
