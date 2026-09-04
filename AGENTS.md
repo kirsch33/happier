@@ -44,6 +44,10 @@ one.
   Content-only or mechanical edits receive proportionate validation.
 - Mock genuine system boundaries, not internal logic. Prefer a narrow test that
   could falsify the changed claim; report skipped or failed validation plainly.
+- On the RPi, run only one resource-heavy validation process at a time. Inspect
+  load and available memory first, give typechecks and builds a sensible
+  timeout, and stop a check that ceases making progress before starting another
+  validation. Treat integration-test setup that builds packages as a build.
 - Product runtime paths are binary-safe: do not directly spawn `node`, `npm`,
   `npx`, `pnpm`, `yarn`, or `bunx`.
 - Keep compatibility, persistence, encryption, version-skew, and recovery
