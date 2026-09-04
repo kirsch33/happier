@@ -163,6 +163,26 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+export type PublicReleaseChannel = 'stable' | 'preview' | 'dev';
+
+/**
+ * Returns whether a published version belongs to the selected public release
+ * channel. Preview and dev currently share npm's `next` dist-tag, so every
+ * update consumer must reject candidates from the other prerelease channel.
+ */
+export function doesVersionMatchReleaseChannel(
+  version: string | null | undefined,
+  channel: PublicReleaseChannel,
+): boolean {
+  const value = String(version ?? '').trim();
+  if (!value) return false;
+  const dashIndex = value.indexOf('-');
+  const prerelease = dashIndex >= 0 ? value.slice(dashIndex + 1) : '';
+  if (channel === 'stable') return prerelease === '';
+  if (channel === 'preview') return prerelease === 'preview' || prerelease.startsWith('preview.');
+  return prerelease === 'dev' || prerelease.startsWith('dev.');
+}
+
 export function shouldNotifyUpdate(params: Readonly<{
   isTTY: boolean;
   cmd: string;

@@ -58,6 +58,147 @@ one.
   a possible consumer, generalized reuse, or imagined scale requirement into a
   product requirement.
 
+## Great White Lab update runbook
+
+This section is the single operator runbook for building and updating the
+Great White Lab Happier installation. Do not create a second host note, helper
+script, copied source tree, or remembered alternate procedure.
+
+### Installed topology and invariants
+
+- `/root/happier` on `rpi` is the only source checkout and build authority.
+- The RPi runs `happier-daemon.default.service` as root. `debian-dev` runs the
+  same user service as `akirsch` and also owns the `happier-server-dev.service`
+  relay. Preserve those service accounts during an update.
+- Happier is intentionally absent from `win-dev` and `akirsch-desktop` WSL.
+  Do not reinstall it there as part of fleet convergence.
+- The active server profile is `greatwhitelab`. Authentication, machine
+  identities, relay data, session records, and the database must survive an
+  update unchanged.
+- Each development CLI install retains only `current` and `previous` under
+  `.happier/cli-dev/versions`. Source, build output, extracted payloads, and
+  server generations each have one owner and a bounded retained set.
+
+Treat source commit, release artifact, installed CLI pointer, daemon process,
+active session runner, relay process, and UI bundle as separate identities. A
+new daemon does not make an existing session runner new, and a healthy relay
+process does not prove it opened the incumbent database.
+
+### Before changing anything
+
+1. Read this file, `/root/AGENTS.md`, the touched package instructions, and the
+   current release/runtime code. Confirm `/root/happier` is clean or identify
+   every unrelated edit before touching it.
+2. Fetch upstream and compare upstream changes, issues, and pull requests with
+   every local patch. Reapply only behavior still required; prefer the upstream
+   owner when it now solves the problem. Keep one coherent `dev` branch and
+   one checkout.
+3. Inventory both hosts: architecture, free bytes, load, available memory,
+   installed `current` and `previous`, shim resolution, unit contents and user,
+   daemon/relay PIDs and executable paths, relay database identity and backup,
+   and every active or paused session with its runner executable path.
+4. Tell the operator before stopping or respawning any other session. Paused
+   in the UI is not proof that its process is quiescent. Interactive remote
+   work uses the single batched `gwl-access` authority from `/root/AGENTS.md`;
+   never replace it with direct SSH or an overnight prompt.
+5. State the rollback source and the exact equality boundary: same accounts,
+   machines, sessions, auth, relay URL, database, and operator routes; only the
+   intended source/artifact/process versions change.
+
+### Version and artifact rules
+
+- Allocate one immutable version for all components built from a source commit.
+  A private dev build must remain comparable by every shipped reader; use
+  `X.Y.Z-dev.<monotonic-number>.<hex-commit>`. Do not insert a label such as
+  `.gwl.` into the prerelease identifiers. Validate the candidate with the UI
+  version comparator before building.
+- Preview and dev share npm's `next` tag. Update checks must filter the returned
+  version by the selected release channel. A dev CLI must not offer a preview
+  build as an update. Fix the channel decision at its shared owner; do not hide
+  the symptom by disabling update checks or dismissing the UI warning.
+- Build through the repository release pipeline, for example
+  `node scripts/pipeline/run.mjs release-build-cli-binaries --channel dev
+  --version <version> --targets linux-arm64,linux-x64` and, when the relay
+  changed, `release-build-server-binaries --channel dev --version <version>
+  --targets linux-x64`. Do not assemble payload trees by hand.
+- Before a broad build on the RPi, inspect load, available memory, swap, and
+  disk. Run one heavy job at a time with a sensible timeout. Start with the
+  narrowest relevant test; a CLI typecheck can consume several GiB and must be
+  stopped if it ceases making progress. Never overlap a stalled typecheck,
+  build, Git operation, or release gate with another heavy check.
+- Verify artifact architecture, archive root, embedded version, and checksum
+  before promotion. Cross-compiled x64 payloads are supported. `EACCES` under
+  `runuser` previously came from inheriting `/root` as the working directory,
+  not from cross-compilation; do not rebuild merely because an inaccessible
+  cwd prevented execution.
+
+### Promotion order
+
+1. Build and test in `/root/happier`; bank and push the coherent source commit
+   before treating its artifacts as an installed release.
+2. Protect and identify the live relay database, then update the Debian relay
+   with the product-owned `happier relay host install --mode user
+   --channel dev --server-binary <path>` flow. Preserve the existing unit
+   environment and bind address. Verify migrations, database inode/owner/mode,
+   auth, machine list, sessions, HTTP health, WebSocket behavior, and real UI
+   login before retiring the previous relay payload or rollback volume.
+3. Extract each signed/checksummed CLI archive into a temporary directory and
+   run that payload's `self __install-payload --component happier-cli
+   --payload-root <root> --version <version> --channel publicdev`. Let the
+   installer atomically advance `current`, retain `previous`, repair shims, and
+   prune older generations. Do not copy the binary, edit the pointer, or pin a
+   generated unit manually.
+4. On Debian, execute install and service commands as `akirsch` with
+   `HOME=/home/akirsch`, `USER=akirsch`, `LOGNAME=akirsch`, the canonical
+   Happier bin path, `XDG_RUNTIME_DIR=/run/user/1000`, the matching user-bus
+   address, and an accessible working directory such as `/home/akirsch`. Use a
+   transient `systemd-run --user --wait --pipe --collect` scope when entering
+   through the root access gateway. Never invoke the user payload while the
+   process cwd remains `/root`.
+5. Restart each daemon through its existing generated service. Confirm the
+   configured and running versions, actual executable path, service user,
+   `currentInvocationMatches`, unit reload state, relay reachability, and
+   machine registration. Do not infer success from `active (running)`.
+6. Existing sessions keep the executable and MCP bridge with which they were
+   spawned. Gracefully stop and resume-fresh every retained session after its
+   host daemon is proven, with operator notice for other sessions. Confirm each
+   new process path and advertised metadata version; a daemon restart alone is
+   not fleet convergence.
+7. Prove the real surfaces: send and receive in each retained session, open the
+   session UI without a CLI warning, exercise a tiny read-only Happier-managed
+   run, and check `happier status --json`. Both a UI “CLI Update Required”
+   warning and `cli_self_update_available` are failed gates until explained and
+   corrected at their source.
+
+### Debian relay and session safety
+
+The relay update is a stateful production-boundary change. Before replacement,
+record the unit, container/process identity, environment key names, database
+path/inode/size/owner/mode, migration state, bind address, and a usable backup.
+After replacement, compare all of them and exercise Authentik login plus an
+incumbent session. Fresh/default/empty state is failure: restore the predecessor
+instead of declaring the new process healthy.
+
+Do not let relay work implicitly restart Debian agent sessions. CLI promotion
+may advance the daemon while sessions remain on their old runners; coordinate
+their later stop/resume explicitly. Keep the RPi root-owned daemon and Debian
+`akirsch`-owned daemon as-is unless the operator separately authorizes an
+account migration.
+
+### Completion and cleanup
+
+An update is complete only when source, artifacts, installed pointers, daemons,
+relay, active session runners, advertised metadata, UI, and update diagnostics
+agree on a valid channel/version; incumbent auth/data/session capabilities work;
+and a fresh managed run succeeds.
+
+Then remove temporary extraction trees, build staging, superseded artifacts,
+duplicate clones, obsolete Bun/package caches created by the work, old payloads
+beyond `current` plus `previous`, and any temporary rollback whose retirement
+condition passed. Preserve engine-owned live relay data and the one required
+known-good generation. Report retained byte/count limits and final free space.
+Do not defer producer cleanup to generic trash expiry or another host sweep.
+
 ## TypeScript compiler ownership
 
 Use repository/package typecheck and build scripts. `yarn tsc ...` is safe from

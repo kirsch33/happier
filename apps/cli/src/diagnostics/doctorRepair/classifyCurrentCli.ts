@@ -2,6 +2,7 @@ import { join } from 'node:path';
 
 import packageJson from '../../../package.json';
 import {
+  doesVersionMatchReleaseChannel,
   readNpmDistTagVersion,
   readUpdateCache,
   resolveNpmPackageNameOverride,
@@ -90,6 +91,15 @@ async function readLatestCliVersion(
   return cached;
 }
 
+export function shouldOfferCliUpdate(params: Readonly<{
+  channel: PublicReleaseRingLabel;
+  currentVersion: string;
+  candidateVersion: string;
+}>): boolean {
+  return doesVersionMatchReleaseChannel(params.candidateVersion, params.channel)
+    && semverLessThan(params.currentVersion, params.candidateVersion);
+}
+
 export async function classifyCurrentCli(params: Readonly<{
   currentCliReleaseChannel: PublicReleaseRingLabel;
   currentCliVersion: string;
@@ -100,7 +110,11 @@ export async function classifyCurrentCli(params: Readonly<{
     forceRefresh: params.forceRefresh,
   });
   if (!latest || !params.currentCliVersion) return [];
-  if (!semverLessThan(params.currentCliVersion, latest)) return [];
+  if (!shouldOfferCliUpdate({
+    channel: params.currentCliReleaseChannel,
+    currentVersion: params.currentCliVersion,
+    candidateVersion: latest,
+  })) return [];
 
   const finding: CliSelfUpdateAvailable = {
     kind: 'cli_self_update_available',
