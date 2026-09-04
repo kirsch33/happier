@@ -119,6 +119,15 @@ Description=Happier user workload
 EOF
   chmod 0644 "${unit_dir}/happier.slice"
 
+  cat > "${unit_dir}/happier-critical.slice" <<'EOF'
+[Unit]
+Description=Happier control plane
+
+[Slice]
+MemoryLow=4G
+EOF
+  chmod 0644 "${unit_dir}/happier-critical.slice"
+
   cat > "${unit_dir}/happier-jobs.slice" <<'EOF'
 [Unit]
 Description=Happier session jobs

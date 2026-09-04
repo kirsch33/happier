@@ -108,8 +108,11 @@ test('linux provision (happier profile) runs corepack enable as root', async () 
 
   const userSystemdUnitDir = join(root, '.config', 'systemd', 'user');
   const happierSliceUnit = await readFile(join(userSystemdUnitDir, 'happier.slice'), 'utf8');
+  const happierCriticalSliceUnit = await readFile(join(userSystemdUnitDir, 'happier-critical.slice'), 'utf8');
   const happierJobsSliceUnit = await readFile(join(userSystemdUnitDir, 'happier-jobs.slice'), 'utf8');
   assert.match(happierSliceUnit, /^\[Unit\]$/m);
+  assert.match(happierCriticalSliceUnit, /^\[Slice\]$/m);
+  assert.match(happierCriticalSliceUnit, /^MemoryLow=4G$/m);
   assert.match(happierJobsSliceUnit, /^\[Slice\]$/m);
   assert.match(happierJobsSliceUnit, /^CPUWeight=50$/m);
   assert.match(happierJobsSliceUnit, /^IOWeight=50$/m);
@@ -132,6 +135,7 @@ test('linux provision (happier profile) runs corepack enable as root', async () 
   });
   assert.equal(secondResult.status, 0, `expected second exit 0\nstdout:\n${secondResult.stdout}\nstderr:\n${secondResult.stderr}`);
   assert.equal(await readFile(join(userSystemdUnitDir, 'happier.slice'), 'utf8'), happierSliceUnit);
+  assert.equal(await readFile(join(userSystemdUnitDir, 'happier-critical.slice'), 'utf8'), happierCriticalSliceUnit);
   assert.equal(await readFile(join(userSystemdUnitDir, 'happier-jobs.slice'), 'utf8'), happierJobsSliceUnit);
 });
 
