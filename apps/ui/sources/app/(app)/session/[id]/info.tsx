@@ -12,7 +12,7 @@ import { Modal } from '@/modal';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/ui/layout/layout';
 import { t } from '@/text';
-import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/system/versionUtils';
+import { isCliVersionOutdated, MINIMUM_CLI_VERSION } from '@/utils/system/versionUtils';
 import { getAttachCommandForSession, getTmuxFallbackReason, getTmuxTargetForSession } from '@/utils/sessions/terminalSessionDetails';
 import { CodeView } from '@/components/ui/media/CodeView';
 import { Session } from '@/sync/domains/state/storageTypes';
@@ -518,7 +518,8 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
     const showAutomations = automationsSupport?.enabled !== false;
     const [expandedRawJsonSection, setExpandedRawJsonSection] = React.useState<RawJsonSectionId | null>(null);
     // Check if CLI version is outdated
-    const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
+    const cliVersion = session.metadata?.version;
+    const isCliOutdated = isCliVersionOutdated(cliVersion, MINIMUM_CLI_VERSION);
     const canManageSharing = !session.accessLevel || session.accessLevel === 'admin';
     const agentId = resolveAgentIdFromSessionMetadata(session.metadata) ?? resolveAgentIdFromFlavor(session.metadata?.flavor) ?? DEFAULT_AGENT_ID;
     const core = getAgentCore(agentId);
@@ -1066,7 +1067,10 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                     <ItemGroup>
                         <Item
                             title={t('sessionInfo.cliVersionOutdated')}
-                            subtitle={t('sessionInfo.updateCliInstructions')}
+                            subtitle={t('sessionInfo.cliVersionOutdatedMessage', {
+                                currentVersion: cliVersion ?? '',
+                                requiredVersion: MINIMUM_CLI_VERSION,
+                            })}
                             icon={<Icon name="warning" size={29} color={theme.colors.accent.orange} />}
                             showChevron={false}
                             copy="happier self update"

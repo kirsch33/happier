@@ -153,7 +153,7 @@ import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/u
 import { getSessionAvatarId, getSessionName, listPendingPermissionRequests, shouldReadTranscriptForPendingRequests, shouldShowAbortButtonForSessionState, useSessionStatus, type PendingPermissionRequest } from '@/utils/sessions/sessionUtils';
 import { deriveTranscriptInteractionFromSession } from '@/utils/sessions/deriveTranscriptInteraction';
 import { runAfterInteractionsWithFallback } from '@/utils/timing/runAfterInteractionsWithFallback';
-import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/system/versionUtils';
+import { isCliVersionOutdated, MINIMUM_CLI_VERSION } from '@/utils/system/versionUtils';
 import { fireAndForget } from '@/utils/system/fireAndForget';
 import { nativeReadClipboardImageAttachment } from '@/utils/files/nativeClipboardImageAttachment';
 import { ensureAgentInstallablesBackground } from '@/capabilities/ensureAgentInstallablesBackground';
@@ -2556,7 +2556,7 @@ function SessionViewLoaded({
     const goalControlMachine = useMachine(typeof goalControlMachineId === 'string' ? goalControlMachineId : '');
     const sessionMachineRecord = useMachine(typeof machineId === 'string' ? machineId : '');
     const daemonGoalControlsSupported = goalControlMachine?.metadata?.daemonSessionGoalControlsSupported === true;
-    const isCliOutdated = cliVersion && !isVersionSupported(cliVersion, MINIMUM_CLI_VERSION);
+    const isCliOutdated = isCliVersionOutdated(cliVersion, MINIMUM_CLI_VERSION);
     const isAcknowledged = machineId && acknowledgedCliVersions[machineId] === cliVersion;
     const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
     // Get model mode from session object - default is agent-specific (Gemini needs an explicit default)
@@ -6408,7 +6408,10 @@ function SessionViewLoaded({
                         color: theme.colors.state.warning.foreground,
                         fontWeight: '600'
                     }}>
-                        {t('sessionInfo.cliVersionOutdated')}
+                        {t('sessionInfo.cliVersionOutdatedMessage', {
+                            currentVersion: cliVersion ?? '',
+                            requiredVersion: MINIMUM_CLI_VERSION,
+                        })}
                     </Text>
                     <Icon name="x" size={14} color={theme.colors.state.warning.foreground} style={{ marginLeft: 8 }} />
                 </Pressable>

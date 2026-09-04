@@ -48,6 +48,10 @@ one.
   load and available memory first, give typechecks and builds a sensible
   timeout, and stop a check that ceases making progress before starting another
   validation. Treat integration-test setup that builds packages as a build.
+- The RPi session is also the operator's communication path. Launch any command
+  that might exceed one minute with an early yield, return to a message boundary
+  every 30–60 seconds, and keep the operator interruptible. A progressing build
+  is not permission to strand queued steering behind one foreground tool call.
 - Product runtime paths are binary-safe: do not directly spawn `node`, `npm`,
   `npx`, `pnpm`, `yarn`, or `bunx`.
 - Keep compatibility, persistence, encryption, version-skew, and recovery
@@ -126,6 +130,13 @@ process does not prove it opened the incumbent database.
   narrowest relevant test; a CLI typecheck can consume several GiB and must be
   stopped if it ceases making progress. Never overlap a stalled typecheck,
   build, Git operation, or release gate with another heavy check.
+- Keep daemon/control-plane processes in `happier-critical.slice` and session
+  runners plus their descendants in `happier-jobs.slice`; verify the actual
+  `/proc/<pid>/cgroup` placement before relying on it. On the RPi the jobs slice
+  has lower CPU/IO weight and memory pressure management, while the critical
+  slice has protected memory. Run heavy build commands as session-job
+  descendants; do not move them into the protected control-plane slice or run
+  an unscoped competing build outside the managed hierarchy.
 - The current CLI bundle takes about 18 minutes on the RPi while remaining
   CPU-active; pkgroll's 10-minute default is therefore too short on this host.
   For the one canonical versioned CLI build, set
@@ -180,6 +191,23 @@ process does not prove it opened the incumbent database.
    run, and check `happier status --json`. Both a UI “CLI Update Required”
    warning and `cli_self_update_available` are failed gates until explained and
    corrected at their source.
+
+### Responsiveness and warning correctness
+
+- Viewing a Session must not launch continuation-inspection RPCs. Hover, focus,
+  or `onPressIn` is the earliest legitimate demand signal for the Agent picker.
+- Advisory inspection RPCs need both admission control and a hard deadline. A
+  reconnect or status refresh must not admit another copy of the same exact
+  question while its predecessor is still running. A transport failure is
+  indeterminate; it is not proof that the CLI needs an update.
+- If daemon logs show `session.continuation.inspect` calls materially outnumber
+  returns, stop heavy work, confirm its process group exited, inspect the saved
+  log and static daemon state, and restart only the daemon if recovery requires
+  it. Do not use repeated live-status polling against a backed-up daemon.
+- “CLI Update Required” is valid only for a parseable runner version proven
+  older than the required version. Unknown or malformed metadata must not be
+  relabeled as old. The warning must state the exact runner version and minimum;
+  an installed daemon version never substitutes for the Session runner version.
 
 ### Debian relay and session safety
 

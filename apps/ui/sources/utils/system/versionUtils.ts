@@ -140,6 +140,14 @@ export function getVersionSupportState(
     }
 }
 
+/** A warning may claim "update required" only when the version is provably old. */
+export function isCliVersionOutdated(
+    version: string | undefined,
+    minimumVersion: string = MINIMUM_CLI_VERSION,
+): boolean {
+    return getVersionSupportState(version, minimumVersion) === 'unsupported';
+}
+
 export function supportsSessionForkRequestId(daemonCliVersion?: string | null): boolean {
     const normalizedVersion = typeof daemonCliVersion === 'string' ? daemonCliVersion.trim() : '';
     return normalizedVersion.length > 0

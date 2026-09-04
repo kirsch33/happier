@@ -17,6 +17,7 @@ vi.mock('@/session/transport/encryption/sessionEncryptionContext', () => ({
 }));
 
 const {
+  SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS,
   evaluateSessionContinuationTargetSupport,
   inspectSessionContinuation,
 } = await import('./sessionContinuationInspection');
@@ -177,5 +178,26 @@ describe('inspectSessionContinuation', () => {
     });
 
     expect(result).toEqual({ type: 'unavailable', reason: 'unsupported_session' });
+  });
+
+  it('admits one exact inspection and bounds a dependency that never settles', async () => {
+    vi.useFakeTimers();
+    mocks.fetchSessionByIdCompat.mockImplementation(() => new Promise(() => {}));
+    const request = {
+      v: 1 as const,
+      sourceSessionId: 'session-stalled',
+      selection: { v: 1 as const, agentId: 'codex' },
+    };
+
+    const first = inspectSessionContinuation({ credentials, request });
+    const duplicate = inspectSessionContinuation({ credentials, request });
+
+    await expect(duplicate).rejects.toThrow('already in progress');
+    expect(mocks.fetchSessionByIdCompat).toHaveBeenCalledTimes(1);
+
+    const firstRejection = expect(first).rejects.toThrow('timed out');
+    await vi.advanceTimersByTimeAsync(SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS);
+    await firstRejection;
+    vi.useRealTimers();
   });
 });

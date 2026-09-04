@@ -151,6 +151,9 @@ function optionsOf(controls: ReturnType<typeof useInSessionAgentPickerControls>)
 /** Open the composer's Agent picker and let its inspections settle. */
 async function openPicker(hook: Awaited<ReturnType<typeof renderControls>>) {
     await act(async () => {
+        hook.getCurrent().onAgentPickerIntent();
+    });
+    await act(async () => {
         hook.getCurrent().onAgentPickerVisibilityChange(true);
     });
     await act(async () => {
@@ -190,17 +193,21 @@ describe('useInSessionAgentPickerControls', () => {
         expect(machineRpcWithServerScope).not.toHaveBeenCalled();
     });
 
-    it('has the answer before the popover is ever opened, so it opens decided', async () => {
-        // Asking when the popover opens is too late: the machine round trip and the
-        // popover's own mount take about the same time, so the popover would open
-        // at one width and grow by the width of the rail when the answers land.
-        // With no pointer able to announce intent, that leaves asking on sight.
+    it('does not inspect merely because a touch device is viewing the Session', async () => {
+        // Touch still emits onPressIn before onPress opens the picker. Paying for
+        // every target merely because the Session is visible turns reconnects into
+        // background RPC bursts for a control the reader may never use.
         const hook = await renderControls();
         await act(async () => { await Promise.resolve(); });
 
-        expect(machineRpcWithServerScope).toHaveBeenCalledTimes(1);
+        expect(machineRpcWithServerScope).not.toHaveBeenCalled();
 
-        // Opening it now changes nothing: the decision was already made.
+        await act(async () => {
+            hook.getCurrent().onAgentPickerIntent();
+        });
+        await act(async () => { await Promise.resolve(); });
+
+        expect(machineRpcWithServerScope).toHaveBeenCalledTimes(1);
         await act(async () => {
             hook.getCurrent().onAgentPickerVisibilityChange(true);
         });
@@ -817,6 +824,9 @@ describe('useInSessionAgentPickerControls', () => {
         }));
         const hook = await renderControls({ entries: [entry('claude'), entry('codex')] });
 
+        await act(async () => {
+            hook.getCurrent().onAgentPickerIntent();
+        });
         await act(async () => {
             hook.getCurrent().onAgentPickerVisibilityChange(true);
         });

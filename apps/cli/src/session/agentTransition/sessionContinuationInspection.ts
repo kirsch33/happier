@@ -65,6 +65,38 @@ export type SessionContinuationTargetResolution =
   | Readonly<{ type: 'resolved'; targetAgentId: AgentId }>
   | Readonly<{ type: 'unavailable' }>;
 
+export const SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS = 10_000;
+
+// Inspection is advisory and idempotent. A reconnect must not be able to pile
+// another copy of the exact same question behind a dependency that has stopped
+// making progress: reject the duplicate so its caller reports an indeterminate
+// answer, and bound the admitted copy independently of lower transport timeouts.
+const activeSessionContinuationInspections = new Set<string>();
+
+function buildSessionContinuationInspectionKey(
+  request: SessionContinuationInspectionRequestV1,
+): string {
+  return JSON.stringify(request);
+}
+
+async function withSessionContinuationInspectionTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(
+            `Session continuation inspection timed out after ${SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS}ms`,
+          ));
+        }, SESSION_CONTINUATION_INSPECTION_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+  }
+}
+
 /**
  * Can this selection become a runtime target on this machine AT ALL, ignoring
  * what the Session currently runs?
@@ -123,6 +155,24 @@ export function evaluateSessionContinuationTargetSupport(params: Readonly<{
 }
 
 export async function inspectSessionContinuation(params: Readonly<{
+  credentials: Credentials;
+  request: SessionContinuationInspectionRequestV1;
+}>): Promise<SessionContinuationInspectionV1> {
+  const inspectionKey = buildSessionContinuationInspectionKey(params.request);
+  if (activeSessionContinuationInspections.has(inspectionKey)) {
+    throw new Error('Session continuation inspection is already in progress');
+  }
+  activeSessionContinuationInspections.add(inspectionKey);
+  try {
+    return await withSessionContinuationInspectionTimeout(
+      inspectSessionContinuationUnbounded(params),
+    );
+  } finally {
+    activeSessionContinuationInspections.delete(inspectionKey);
+  }
+}
+
+async function inspectSessionContinuationUnbounded(params: Readonly<{
   credentials: Credentials;
   request: SessionContinuationInspectionRequestV1;
 }>): Promise<SessionContinuationInspectionV1> {

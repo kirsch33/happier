@@ -18,7 +18,6 @@ import { announceAccessibilityMessage } from '@/components/ui/accessibility/anno
 import { Icon } from '@/components/ui/icons/Icon';
 import { randomUUID } from '@/platform/randomUUID';
 import { t } from '@/text';
-import { isHoverCapablePrimaryPointer } from '@/utils/platform/webMobileHeuristics';
 
 import { existingSessionDraftSemanticValues } from '@/sync/domains/input/drafts/existingSessionDraftSemanticValues';
 import {
@@ -382,10 +381,6 @@ export function useInSessionAgentPickerControls(
     const draftSnapshot = React.useSyncExternalStore(subscribeToDraft, readDraftSnapshot, readDraftSnapshot);
 
     const currentAgentAppliedStatus = resolveAppliedRuntimeStatus(params.currentAgentSessionActive);
-    // Read once per mount rather than at module evaluation: this file is reached
-    // from the session shell, and importing it must not touch `window`.
-    const pointerCanSignalIntent = React.useMemo(() => isHoverCapablePrimaryPointer(), []);
-
     const [armed, setArmed] = React.useState<ArmedAgentContinuation | null>(null);
     const persistedArmedContinuation = draftSessionId === null
         ? undefined
@@ -481,11 +476,10 @@ export function useInSessionAgentPickerControls(
     // trip and the popover's own mount take about the same time, so which one wins
     // is a coin flip, and the reader sees the loser.
     //
-    // So the question is asked on APPROACH instead. A pointer has to travel over
-    // the Agent chip to click it and a keyboard has to focus it, which is a real
-    // head start; where the primary pointer can give none — a finger — the
-    // question falls back to being asked as soon as the rail is a live possibility
-    // for this Session, because a late rail is a worse outcome than an early ask.
+    // So the question is asked on APPROACH instead. Hover, focus, and onPressIn
+    // all signal intent before activation, including on touch devices. Merely
+    // viewing a Session must not launch a fan-out of remote inspection work for a
+    // control the reader may never use.
     //
     // It is never asked for every Session regardless. `inspectableTargetAgentIds`
     // is already empty for a closed gate, a read-only or external Session and one
@@ -497,7 +491,7 @@ export function useInSessionAgentPickerControls(
         machinePresence: source.machinePresence,
         targetSelections: inspectableTargetSelections,
         demanded: inspectableTargetSelections.length > 0
-            && (pickerApproached || hasPersistedArmedContinuation || !pointerCanSignalIntent),
+            && (pickerApproached || hasPersistedArmedContinuation),
     });
     const readInspection = inspections.read;
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     compareVersions,
     getVersionSupportState,
+    isCliVersionOutdated,
     isVersionSupported,
     parseVersion,
     MINIMUM_CLI_VERSION,
@@ -10,6 +11,17 @@ import {
 } from './versionUtils';
 
 describe('versionUtils', () => {
+    describe('isCliVersionOutdated', () => {
+        it('does not turn an unparseable development identity into an update requirement', () => {
+            expect(isCliVersionOutdated('0.2.11-dev.1.gwl.2f319d7bec')).toBe(false);
+        });
+
+        it('reports only a version proven older than the minimum', () => {
+            expect(isCliVersionOutdated('0.0.9')).toBe(true);
+            expect(isCliVersionOutdated('0.1.0')).toBe(false);
+        });
+    });
+
     describe('getVersionSupportState', () => {
         it('distinguishes opaque development identities from versions proven too old', () => {
             expect(getVersionSupportState('0.2.10-dev.abcdef123', MINIMUM_CLI_VERSION)).toBe('unknown');
