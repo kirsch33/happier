@@ -34,6 +34,7 @@ import {
 const RELAY_RUNTIME_PERSISTENT_ROOT_ENTRIES = new Set([
     'config',
     'data',
+    'full-server',
     'logs',
     'self-host-state.json',
 ]);

@@ -153,10 +153,12 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
       await mkdir(join(defaults.installRoot, 'bin'), { recursive: true });
       await mkdir(defaults.configDir, { recursive: true });
       await mkdir(defaults.dataDir, { recursive: true });
+      await mkdir(join(defaults.installRoot, 'full-server', 'infra', 'pgdata'), { recursive: true });
       await mkdir(defaults.logDir, { recursive: true });
       await writeFile(join(defaults.installRoot, 'bin', 'happier-server'), '#!/bin/sh\necho old\n', 'utf8');
       await writeFile(join(defaults.dataDir, 'handy-master-secret.txt'), 'secret-before-update\n', 'utf8');
       await writeFile(join(defaults.dataDir, 'session-marker.txt'), 'session-before-update\n', 'utf8');
+      await writeFile(join(defaults.installRoot, 'full-server', 'infra', 'pgdata', 'authority-marker'), 'postgres-before-update\n', 'utf8');
       await writeFile(join(defaults.logDir, 'server.out.log'), 'existing-log\n', 'utf8');
 
       await installOrUpdateRelayRuntimeLocal({
@@ -172,6 +174,7 @@ describe('installOrUpdateRelayRuntimeLocal', () => {
 
       await expect(readFileText(join(defaults.dataDir, 'handy-master-secret.txt'))).resolves.toBe('secret-before-update\n');
       await expect(readFileText(join(defaults.dataDir, 'session-marker.txt'))).resolves.toBe('session-before-update\n');
+      await expect(readFileText(join(defaults.installRoot, 'full-server', 'infra', 'pgdata', 'authority-marker'))).resolves.toBe('postgres-before-update\n');
       await expect(readFileText(join(defaults.logDir, 'server.out.log'))).resolves.toBe('existing-log\n');
     } finally {
       await rm(homeDir, { recursive: true, force: true });
