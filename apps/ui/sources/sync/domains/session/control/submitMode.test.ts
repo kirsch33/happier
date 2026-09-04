@@ -560,6 +560,25 @@ describe('chooseSubmitMode', () => {
         })).toBe('agent_queue');
     });
 
+    it('keeps fingerprinted self-host CLI builds on durable pending delivery', () => {
+        expect(decideSessionMessageDelivery({
+            configuredMode: 'server_pending',
+            session: {
+                active: true,
+                presence: 'online',
+                agentStateVersion: 1,
+                pendingVersion: 0,
+                pendingCount: 0,
+                metadata: { version: '0.2.10-dev.67.50a0189f7c8c' },
+            } as any,
+            nowMs: now,
+        })).toMatchObject({
+            mode: 'server_pending',
+            reason: 'configured_mode',
+            pendingSupportState: 'supported',
+        });
+    });
+
     it('keeps agent_queue for explicit server_pending on inactive sessions when the CLI version is too old', () => {
         expect(chooseSubmitMode({
             configuredMode: 'agent_queue',

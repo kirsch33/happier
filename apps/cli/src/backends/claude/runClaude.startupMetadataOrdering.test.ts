@@ -317,6 +317,7 @@ describe('runClaude startup metadata ordering', () => {
 
     afterEach(() => {
         exitSpy.mockClear();
+        delete process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE;
     });
 
     it('waits for attach startup metadata writes before seeding runtime overrides', async () => {
@@ -411,6 +412,70 @@ describe('runClaude startup metadata ordering', () => {
                 process.env.HAPPIER_SESSION_ATTACH_METADATA_IDENTITY_POLICY = previousAttachMetadataIdentityPolicy;
             }
         }
+    });
+
+    it('consumes fresh context at top-level for daemon remote attach and unsets only Claude ownership', async () => {
+        currentMetadataVersion = -1;
+        process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE = '1';
+        const { runClaude } = await import('./runClaude');
+
+        const runPromise = runClaude(testCredentials, {
+            startedBy: 'daemon',
+            startingMode: 'remote',
+            existingSessionId: 'session-attach',
+        }).then(
+            () => 'resolved',
+            (error) => error,
+        );
+
+        await waitFor(() => applyStartupMetadataUpdateToSessionMock.mock.calls.length === 1);
+        expect(process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE).toBeUndefined();
+        expect(applyStartupMetadataUpdateToSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+            mode: 'attach',
+            metadataKeysToUnsetOnAttach: ['claudeSessionId'],
+        }));
+
+        metadataUpdateDeferred.resolve();
+        await expect(runPromise).resolves.toBe(stopAfterSeed);
+    });
+
+    it('leaves a later ordinary daemon attach unchanged after consuming fresh context', async () => {
+        currentMetadataVersion = -1;
+        process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE = '1';
+        const { runClaude } = await import('./runClaude');
+
+        const freshRun = runClaude(testCredentials, {
+            startedBy: 'daemon',
+            startingMode: 'remote',
+            existingSessionId: 'session-attach',
+        }).then(
+            () => 'resolved',
+            (error) => error,
+        );
+        await waitFor(() => applyStartupMetadataUpdateToSessionMock.mock.calls.length === 1);
+        expect(applyStartupMetadataUpdateToSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+            metadataKeysToUnsetOnAttach: ['claudeSessionId'],
+        }));
+        metadataUpdateDeferred.resolve();
+        await expect(freshRun).resolves.toBe(stopAfterSeed);
+
+        metadataUpdateDeferred = createDeferred<void>();
+        applyStartupMetadataUpdateToSessionMock.mockClear();
+        const ordinaryRun = runClaude(testCredentials, {
+            startedBy: 'daemon',
+            startingMode: 'remote',
+            existingSessionId: 'session-attach',
+        }).then(
+            () => 'resolved',
+            (error) => error,
+        );
+        await waitFor(() => applyStartupMetadataUpdateToSessionMock.mock.calls.length === 1);
+        expect(applyStartupMetadataUpdateToSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+            mode: 'attach',
+        }));
+        expect((applyStartupMetadataUpdateToSessionMock as any).mock.calls[0]?.[0]).not.toHaveProperty('metadataKeysToUnsetOnAttach');
+        metadataUpdateDeferred.resolve();
+        await expect(ordinaryRun).resolves.toBe(stopAfterSeed);
     });
 
     it('reports the canonical session id first for daemon-started attach sessions', async () => {
@@ -745,7 +810,14 @@ describe('runClaude startup metadata ordering', () => {
             initialMode = params.initialClaudeUnifiedTerminalMode;
             const onSessionReady = params.onSessionReady;
             if (!onSessionReady) throw new Error('Expected Claude session readiness callback');
-            await onSessionReady(createPermissionHandlerSessionStub('session-start').session);
+            const session = createPermissionHandlerSessionStub('session-start').session;
+            // The controlled coordinator shutdown drains critical metadata writes before
+            // surfacing its stop reason, as a real Claude Session does.
+            Object.assign(session, {
+                drainCriticalMetadataWrites: vi.fn(async () => {}),
+                cleanup: vi.fn(),
+            });
+            await onSessionReady(session);
             return 0;
         });
         const { runClaude } = await import('./runClaude');

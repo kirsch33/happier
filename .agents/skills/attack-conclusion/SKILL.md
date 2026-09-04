@@ -5,7 +5,7 @@ description: Adversarial self-review of your own conclusion, fix, or root-cause 
 
 # Attack Your Conclusion
 
-Before handing over a conclusion, switch roles completely: you are no longer the author defending it, you are the reviewer paid to break it, with the same energy spent building it. Full doctrine: `docs/agent-craft.md` §6 and §8.
+Before handing over a conclusion, switch roles completely: you are no longer the author defending it, you are the reviewer paid to break it, with the same energy spent building it.
 
 The test of whether you actually switched roles: did you go looking for evidence that would change your mind, or only re-inspect the evidence that formed the conclusion?
 
@@ -40,7 +40,7 @@ For compatibility-sensitive changes, run a **provenance attack** using `.agents/
 
 ## Fake-competence scan
 
-Check the deliverable against the patterns that read as skill and aren't (`docs/agent-craft.md` §8). The highest-frequency ones:
+Check the deliverable against patterns that read as skill and are not. The highest-frequency ones:
 
 - **Thoroughness theater** — exhaustive coverage of what was easy to check, presented as coverage of the risk. Where are the "if I'm wrong, it's here" spots in the report?
 - **Green tests as proof** — green means "didn't break what we previously thought to check", not "correct". A test you have never seen fail proves nothing; break the behavior and watch it go red.

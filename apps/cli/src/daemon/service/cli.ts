@@ -164,6 +164,7 @@ function parseDaemonServiceCliInvocation(argv: readonly string[]): Readonly<{
     help: boolean;
     yes: boolean;
     takeover: boolean;
+    prepareOnly: boolean;
     replaceExisting: 'ring' | 'all' | null;
     ring: PublicReleaseRingId | null;
     instanceId: string | null;
@@ -179,6 +180,7 @@ function parseDaemonServiceCliInvocation(argv: readonly string[]): Readonly<{
   let systemUserFromArgs: string | null = null;
   let yes = false;
   let takeover = false;
+  let prepareOnly = false;
   let replaceExisting: 'ring' | 'all' | null = null;
   let ring: PublicReleaseRingId | null = null;
   let instanceId: string | null = null;
@@ -218,6 +220,14 @@ function parseDaemonServiceCliInvocation(argv: readonly string[]): Readonly<{
     if (a === '--takeover') {
       takeover = true;
       continue;
+    }
+    if (a === '--prepare-only') {
+      prepareOnly = true;
+      filtered.push(a);
+      continue;
+    }
+    if (a === '--no-start') {
+      throw new Error('--no-start is not supported; use --prepare-only instead');
     }
     if (a === '--ring') {
       const next = String(argv[i + 1] ?? '').trim().toLowerCase();
@@ -300,7 +310,7 @@ function parseDaemonServiceCliInvocation(argv: readonly string[]): Readonly<{
 
   return {
     argvFiltered: filtered,
-    flags: { ...flags, yes, takeover, replaceExisting, ring, instanceId },
+    flags: { ...flags, yes, takeover, prepareOnly, replaceExisting, ring, instanceId },
     action,
     mode,
     modeExplicit,
@@ -318,6 +328,10 @@ function resolveAction(argv: readonly string[]): DaemonServiceCliAction {
 
 function printJson(data: unknown): void {
   process.stdout.write(`${JSON.stringify(data)}\n`);
+}
+
+function markDaemonServiceCliCommandFailure(): void {
+  process.exitCode = 1;
 }
 
 function shouldStopCurrentWindowsServiceOwnerBeforeLifecycleAction(params: Readonly<{
@@ -389,6 +403,55 @@ function runCommandCaptureBestEffort(command: Readonly<{ cmd: string; args: read
     return { ok, out: out.trim() ? out : null };
   } catch {
     return { ok: false, out: null };
+  }
+}
+
+type LinuxDaemonServiceState = 'inactive' | 'active' | 'ambiguous';
+
+function queryLinuxDaemonServiceState(params: Readonly<{
+  mode: DaemonServiceMode;
+  unitName: string;
+}>): LinuxDaemonServiceState {
+  const args = params.mode === 'system'
+    ? ['is-active', params.unitName]
+    : ['--user', 'is-active', params.unitName];
+  try {
+    const res = spawnSync('systemctl', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildServiceCommandEnv({ cmd: 'systemctl', args, env: process.env }),
+    });
+    const stdout = String(res.stdout ?? '')
+      .trim()
+      .toLowerCase();
+    const stderr = String(res.stderr ?? '').trim().toLowerCase();
+    const state = stdout.split(/\s+/)[0] ?? '';
+    if (state === 'inactive' || state === 'failed' || state === 'unknown' || /could not be found|not-found/u.test(stderr)) {
+      return 'inactive';
+    }
+    if (state === 'active' || state === 'activating' || state === 'reloading' || state === 'deactivating') {
+      return 'active';
+    }
+    return 'ambiguous';
+  } catch {
+    return 'ambiguous';
+  }
+}
+
+function isLinuxDaemonServiceEnabled(params: Readonly<{
+  mode: DaemonServiceMode;
+  unitName: string;
+}>): boolean {
+  const args = params.mode === 'system'
+    ? ['is-enabled', params.unitName]
+    : ['--user', 'is-enabled', params.unitName];
+  try {
+    const res = spawnSync('systemctl', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildServiceCommandEnv({ cmd: 'systemctl', args, env: process.env }),
+    });
+    return (res.status ?? 1) === 0 && String(res.stdout ?? '').trim().toLowerCase() === 'enabled';
+  } catch {
+    return false;
   }
 }
 
@@ -1224,6 +1287,19 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
   argv: readonly string[];
   commandPath?: string;
 }>): Promise<void> {
+  const initiallyParsed = parseDaemonServiceCliInvocation(params.argv);
+  if (initiallyParsed.flags.prepareOnly && initiallyParsed.action !== 'install') {
+    throw new Error('--prepare-only is only valid with service install');
+  }
+  if (initiallyParsed.flags.prepareOnly && initiallyParsed.mode !== 'user') {
+    throw new Error('--prepare-only is only supported in user mode');
+  }
+  if (initiallyParsed.flags.prepareOnly && initiallyParsed.flags.takeover) {
+    throw new Error('--prepare-only cannot be combined with --takeover; use service start --takeover after preparation');
+  }
+  if (initiallyParsed.flags.prepareOnly && params.argv.includes('--local-relay')) {
+    throw new Error('--prepare-only cannot be combined with --local-relay; select the relay before preparation');
+  }
   const argvAfterLocalRelay = await handleLocalRelayFlag(params.argv);
   const parsed = parseDaemonServiceCliInvocation(argvAfterLocalRelay);
   const flags = parsed.flags;
@@ -1247,12 +1323,16 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
   const action = parsed.action;
   const commandPath = params.commandPath ?? `${resolveInvokerName() ?? 'happier'} service`;
 
+  if (flags.prepareOnly && runtime.platform !== 'linux') {
+    throw new Error('--prepare-only is only supported on Linux');
+  }
+
   if (flags.help) {
       if (flags.json) {
         printJson({
           ok: true,
           commands: ['list', 'paths', 'install', 'uninstall', 'repair', 'start', 'stop', 'restart', 'status', 'logs', 'tail'],
-          flags: ['--json', '--dry-run', '--yes', '--takeover', '--replace-existing=ring|all', '--ring', '--instance', '--all'],
+          flags: ['--json', '--dry-run', '--yes', '--takeover', '--prepare-only (Linux only)', '--replace-existing=ring|all', '--ring', '--instance', '--all'],
         });
         return;
     }
@@ -1264,12 +1344,14 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
         '  happier service list [--json]',
         '  happier service paths [--json]',
         '  happier service status [--json]',
-        '  happier service install [--local-relay] [--dry-run] [--yes] [--takeover] [--replace-existing=ring|all] [--json]',
+        '  happier service install [--local-relay] [--prepare-only] [--dry-run] [--yes] [--takeover] [--replace-existing=ring|all] [--json]',
         '  happier service uninstall [--ring <stable|preview|dev>] [--instance <id>] [--all] [--yes] [--dry-run] [--json]',
         '  happier service repair [--yes] [--json] (legacy alias for `happier doctor repair`)',
         '  happier service start|stop|restart [--dry-run] [--takeover] [--json]',
         '  happier service logs [--json]',
         '  happier service tail',
+        '',
+        '  --prepare-only is Linux-only. It enables the service but leaves it stopped.',
         '',
         'Compatibility aliases:',
         '  happier daemon service ...',
@@ -1347,6 +1429,163 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
       }
     }
 
+    if (flags.prepareOnly) {
+      const ownership = await evaluateCurrentDaemonOwner();
+      const serviceState = queryLinuxDaemonServiceState({ mode, unitName: paths.unitName! });
+      const liveReady = ownership.kind === 'none' && serviceState === 'inactive';
+      if (!flags.dryRun && !liveReady) {
+        const message = 'The target service and daemon must be stopped before prepare-only installation.';
+        if (flags.json) {
+          printJson({ ok: false, error: 'service_not_stopped', message, platform: 'linux' });
+        } else {
+          process.stderr.write(`${message}\n`);
+        }
+        markDaemonServiceCliCommandFailure();
+        return;
+      }
+      const installRuntimeTarget = await resolveDaemonServiceInstallRuntimeTarget({
+        currentExecPath: process.execPath,
+        explicitNodePath: process.env.HAPPIER_DAEMON_SERVICE_NODE_PATH ?? '',
+        explicitEntryPath: process.env.HAPPIER_DAEMON_SERVICE_ENTRY_PATH ?? '',
+        allowBootstrap: !flags.dryRun,
+        targetMode: runtime.targetMode,
+        channel: runtime.channel,
+        processEnv: process.env,
+      });
+      const installRuntime = {
+        ...runtime,
+        nodePath: installRuntimeTarget.nodePath,
+        entryPath: installRuntimeTarget.entryPath,
+      };
+      const strategy: DaemonServiceInstallStrategy | undefined =
+        flags.replaceExisting === 'ring' ? 'replace-ring'
+        : flags.replaceExisting === 'all' ? 'replace-all'
+        : flags.yes ? 'add'
+        : undefined;
+      const plan = planDaemonServiceInstall({
+        platform: installRuntime.platform,
+        mode,
+        systemUser,
+        channel: installRuntime.channel,
+        targetMode: installRuntime.targetMode,
+        activation: 'deferred',
+        instanceId: installRuntime.instanceId,
+        activeServerId: installRuntime.activeServerId,
+        uid: installRuntime.uid ?? undefined,
+        userHomeDir: installRuntime.userHomeDir,
+        happierHomeDir: installRuntime.happierHomeDir,
+        serverUrl: installRuntime.serverUrl,
+        webappUrl: installRuntime.webappUrl,
+        publicServerUrl: installRuntime.publicServerUrl,
+        nodePath: installRuntime.nodePath,
+        entryPath: installRuntime.entryPath,
+      });
+      const previewOptions = {
+        platform: installRuntime.platform,
+        uid: installRuntime.uid ?? undefined,
+        userHomeDir: installRuntime.userHomeDir,
+        happierHomeDir: installRuntime.happierHomeDir,
+        mode,
+        systemUser,
+        channel: installRuntime.channel,
+        targetMode: installRuntime.targetMode,
+        activation: 'deferred' as const,
+        instanceId: installRuntime.instanceId,
+        activeServerId: installRuntime.activeServerId,
+        strategy,
+        serverUrl: installRuntime.serverUrl,
+        webappUrl: installRuntime.webappUrl,
+        publicServerUrl: installRuntime.publicServerUrl,
+        nodePath: installRuntime.nodePath,
+        entryPath: installRuntime.entryPath,
+      };
+      const preview = await previewDaemonServiceInstall(previewOptions);
+      const installConflict = describeDaemonServiceInstallConflict({
+        exactTargetExists: preview.exactTargetExists,
+        strategy: preview.strategy,
+        conflictPlan: preview.conflictPlan,
+      });
+
+      if (flags.dryRun) {
+        if (flags.json) {
+          printJson({
+            ok: true,
+            platform: 'linux',
+            plan: preview.plan,
+            installConflict: installConflict ? {
+              blocking: installConflict.blocking,
+              message: installConflict.message,
+              exactTargetExists: preview.exactTargetExists,
+              competingServices: preview.conflictPlan.competingServices,
+              servicesToRemove: preview.conflictPlan.servicesToRemove,
+            } : undefined,
+            prepareOnly: true,
+            dryRun: true,
+            wouldStart: false,
+            stoppedAndInactive: liveReady,
+          });
+          return;
+        }
+        process.stdout.write(`[dry-run] would write: ${preview.plan.files.map((file) => file.path).join(', ')}\n`);
+        for (const command of preview.plan.commands) process.stdout.write(`[dry-run] would run: ${command.cmd} ${command.args.join(' ')}\n`);
+        process.stdout.write(`[dry-run] service is ${liveReady ? 'stopped and inactive' : 'not ready for live preparation'}\n`);
+        return;
+      }
+
+      try {
+        await installDaemonService({
+          ...previewOptions,
+          runCommands: true,
+          commandFailureMode: 'strict',
+        });
+      } catch (error) {
+        const conflict = error as Error & { code?: string; conflicts?: Array<{ label?: string }> };
+        if (flags.json && conflict.code === 'daemon_service_conflict') {
+          printJson({
+            ok: false,
+            error: conflict.code,
+            message: conflict.message,
+            conflicts: conflict.conflicts ?? [],
+            platform: 'linux',
+          });
+          markDaemonServiceCliCommandFailure();
+          return;
+        }
+        throw error;
+      }
+
+      const postPreview = await previewDaemonServiceInstall(previewOptions);
+      const installedFile = plan.files[0];
+      const definitionMatches = Boolean(installedFile)
+        && doesInstalledDaemonServiceDefinitionMatchExpected({
+          installedPath: installedFile.path,
+          expectedContents: installedFile.content,
+        });
+      const enabled = isLinuxDaemonServiceEnabled({ mode, unitName: paths.unitName! });
+      const inactive = queryLinuxDaemonServiceState({ mode, unitName: paths.unitName! }) === 'inactive';
+      const ownerAbsent = (await evaluateCurrentDaemonOwner()).kind === 'none';
+      const replacementComplete = postPreview.conflictPlan.servicesToRemove.length === 0
+        && postPreview.conflictPlan.foreignHomeConflicts.length === 0;
+      const verified = definitionMatches && enabled && inactive && ownerAbsent && replacementComplete;
+      if (!verified) {
+        const message = 'Prepared service verification failed; the service was not armed.';
+        if (flags.json) {
+          printJson({ ok: false, error: 'prepare_verification_failed', message, platform: 'linux' });
+        } else {
+          process.stderr.write(`${message}\n`);
+        }
+        markDaemonServiceCliCommandFailure();
+        return;
+      }
+
+      if (flags.json) {
+        printJson({ ok: true, platform: 'linux', prepared: true, started: false });
+        return;
+      }
+      process.stdout.write('Background service prepared and remains stopped.\n');
+      return;
+    }
+
     const installRuntimeTarget = await resolveDaemonServiceInstallRuntimeTarget({
       currentExecPath: process.execPath,
       explicitNodePath: process.env.HAPPIER_DAEMON_SERVICE_NODE_PATH ?? '',
@@ -1361,6 +1600,7 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
       entryPath: installRuntimeTarget.entryPath,
     };
     const ownership = await evaluateCurrentDaemonOwner();
+
     const lifecycleOwnership = evaluateDaemonServiceLifecycleOwnership({
       ownership,
       expectedServiceLabel: paths.label,
@@ -1752,6 +1992,16 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
     let serviceDefinitionReloadCommands: DaemonServicePlannedCommand[] = [];
     if (action === 'start' || action === 'restart') {
       try {
+        const expectedRuntimeTarget = await resolveDaemonServiceInstallRuntimeTarget({
+          currentExecPath: process.execPath,
+          allowBootstrap: false,
+          targetMode: runtime.targetMode,
+          channel: runtime.channel,
+          processEnv: {
+            ...process.env,
+            HAPPIER_HOME_DIR: runtime.happierHomeDir,
+          },
+        });
         const expectedPlan = planDaemonServiceInstall({
           platform: runtime.platform,
           mode,
@@ -1766,8 +2016,8 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
           serverUrl: runtime.serverUrl,
           webappUrl: runtime.webappUrl,
           publicServerUrl: runtime.publicServerUrl,
-          nodePath: runtime.nodePath,
-          entryPath: runtime.entryPath,
+          nodePath: expectedRuntimeTarget.nodePath,
+          entryPath: expectedRuntimeTarget.entryPath,
         });
         const expectedFile = expectedPlan.files[0];
         if (expectedFile) {

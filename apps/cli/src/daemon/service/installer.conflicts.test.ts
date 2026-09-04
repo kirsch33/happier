@@ -169,6 +169,54 @@ describe('installDaemonService conflict handling', () => {
     expect(applyDaemonServiceInstallPlanMock).not.toHaveBeenCalled();
   });
 
+  it('reconciles an exact converged Linux target for deferred activation', async () => {
+    discoverInstalledDaemonServiceEntriesMock.mockResolvedValueOnce([
+      {
+        serverId: 'default',
+        name: 'Default background service',
+        installed: true,
+        path: '/home/tester/.config/systemd/user/happier-daemon.default.service',
+        platform: 'linux',
+        happierHomeDir: '/home/tester/.happier',
+        releaseChannel: 'stable',
+        label: 'happier-daemon.default',
+        targetMode: 'default-following',
+      },
+    ]);
+
+    const { installDaemonService } = await import('./installer');
+
+    await installDaemonService({
+      platform: 'linux',
+      uid: 123,
+      userHomeDir: '/home/tester',
+      happierHomeDir: '/home/tester/.happier',
+      channel: 'stable',
+      targetMode: 'default-following',
+      instanceId: 'default',
+      activation: 'deferred',
+      runCommands: true,
+      commandFailureMode: 'strict',
+    } as Parameters<typeof installDaemonService>[0] & { activation: 'deferred' });
+
+    expect(applyDaemonServiceInstallPlanMock).toHaveBeenCalledWith(expect.anything(), {
+      runCommands: true,
+      commandFailureMode: 'strict',
+    });
+
+    await expect(installDaemonService({
+      platform: 'linux',
+      uid: 123,
+      userHomeDir: '/home/tester',
+      happierHomeDir: '/home/tester/.happier',
+      channel: 'stable',
+      targetMode: 'default-following',
+      instanceId: 'default',
+      activation: 'deferred',
+      runCommands: false,
+    } as Parameters<typeof installDaemonService>[0] & { activation: 'deferred' })).rejects.toThrow(/runCommands/);
+  });
+
   it('rejects duplicate exact-target services instead of silently treating them as converged', async () => {
     discoverInstalledDaemonServiceEntriesMock.mockResolvedValueOnce([
       {

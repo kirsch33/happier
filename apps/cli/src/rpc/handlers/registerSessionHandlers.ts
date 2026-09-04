@@ -211,11 +211,15 @@ export interface SpawnSessionOptions {
      * When set to "direct", the daemon will signal the spawned runner to suppress transcript commits.
      */
     transcriptStorage?: 'persisted' | 'direct';
+    /** Daemon-private, one-child-only fresh-provider launch signal. Never persisted or forwarded to RPC clients. */
+    freshProviderContextOnce?: true;
 }
 export type SpawnSessionResult =
     | {
         type: 'success';
         sessionId?: string;
+        /** Daemon-private acknowledgement of the exact newly accepted child. */
+        pid?: number;
         spawnNonce?: string;
         sessionIdStatus?: 'available' | 'pending';
         /** True only when this daemon accepted the request's pending first input. */

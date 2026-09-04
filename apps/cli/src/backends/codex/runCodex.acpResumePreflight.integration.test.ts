@@ -11,10 +11,12 @@ import {
   HAPPIER_DAEMON_INITIAL_GOAL_ENV_KEY,
   serializeDaemonInitialGoalForEnv,
 } from '@/agent/runtime/sessionInitialGoal';
+import { HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE } from '@/agent/runtime/freshProviderContext';
 import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
 import { CONNECTED_SERVICE_RUNTIME_AUTH_FAILURE_REPORT_TIMEOUT_MS } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import { createCodexPermissionHandler } from './utils/createCodexPermissionHandler';
 import { applyPermissionModeToCodexPermissionHandler } from './utils/applyPermissionModeToHandler';
+import { createCodexAppServerSteerTargetEndedError } from './appServer/appServerCompatibility';
 
 const modelSyncFlushPendingAfterStartSpy = vi.fn(async () => {});
 const sessionModeSyncFlushPendingAfterStartSpy = vi.fn(async () => {});
@@ -514,6 +516,7 @@ describe('runCodex CodexACP resume behavior', () => {
     lastOnUserMessageHandler = null;
     lastOnSwitchToLocal = null;
     delete process.env[HAPPIER_DAEMON_INITIAL_GOAL_ENV_KEY];
+    delete process.env[HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE];
     delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
     const experiments = await import('@/backends/codex/experiments');
     (experiments.isExperimentalCodexAcpEnabled as unknown as ReturnType<typeof vi.fn>).mockReturnValue(true);
@@ -3153,10 +3156,7 @@ describe('runCodex CodexACP resume behavior', () => {
       flushTurn: vi.fn(async () => {}),
       rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-app-server' })),
     };
-    appServerRuntime.steerPrompt.mockRejectedValue(Object.assign(new Error('no active turn to steer'), {
-      method: 'turn/steer',
-      code: -32000,
-    }));
+    appServerRuntime.steerPrompt.mockRejectedValue(createCodexAppServerSteerTargetEndedError());
     createCodexAppServerRuntimeSpy.mockImplementationOnce(() => appServerRuntime);
 
     let observedSuppressUserEcho: boolean | undefined;
@@ -3276,10 +3276,7 @@ describe('runCodex CodexACP resume behavior', () => {
     mockAttachedSessionMetadata({ codexSessionId: 'thread-stale-steer', codexBackendMode: 'appServer' });
 
     let turnInFlight = true;
-    const staleSteerError = Object.assign(new Error('no active turn to steer'), {
-      method: 'turn/steer',
-      code: -32000,
-    });
+    const staleSteerError = createCodexAppServerSteerTargetEndedError();
     const sendPrompt = vi.fn(async () => {
       turnInFlight = false;
     });
@@ -4359,6 +4356,8 @@ describe('runCodex CodexACP resume behavior', () => {
 
     process.env[HAPPIER_DAEMON_INITIAL_GOAL_ENV_KEY] = serializeDaemonInitialGoalForEnv({
       objective: 'continue the goal',
+      status: 'paused',
+      statusReason: 'usageLimited',
     });
     mockAttachedSessionMetadata({
       connectedServices: {
@@ -4423,7 +4422,11 @@ describe('runCodex CodexACP resume behavior', () => {
     expect(startOrLoad).toHaveBeenCalledWith(expect.objectContaining({
       resumeId: 'thread-goal-resume',
       importHistory: false,
-      initialGoal: { objective: 'continue the goal' },
+      initialGoal: {
+        objective: 'continue the goal',
+        status: 'paused',
+        statusReason: 'usageLimited',
+      },
     }));
     expect(appServerRuntime.sendPrompt).not.toHaveBeenCalled();
     expect(appServerRuntime.flushTurn).not.toHaveBeenCalled();
@@ -4432,6 +4435,253 @@ describe('runCodex CodexACP resume behavior', () => {
     if (!outcome.ok) {
       expect(outcome.error).toEqual(expect.objectContaining({ message: 'wait-called' }));
     }
+  });
+
+  it('steers the real send-classified bootstrap message after fresh Goal activation adopts its native turn', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    process.env[HAPPIER_DAEMON_INITIAL_GOAL_ENV_KEY] = serializeDaemonInitialGoalForEnv({
+      objective: 'continue the goal',
+      status: 'active',
+    });
+    process.env[HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE] = '1';
+    let turnInFlight = false;
+    const steerPrompt = vi.fn(async () => {});
+    const sendPrompt = vi.fn(async () => {
+      throw new Error('sendPrompt-called');
+    });
+    const appServerRuntime = {
+      getSessionId: () => 'thread-fresh-goal',
+      supportsInFlightSteer: () => true,
+      isTurnInFlight: () => turnInFlight,
+      canSteerPrompt: () => turnInFlight,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        turnInFlight = true;
+      }),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt,
+      sendPrompt,
+      compactContext: vi.fn(async () => {}),
+      flushTurn: vi.fn(async () => {
+        turnInFlight = false;
+      }),
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-fresh-goal' })),
+    };
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => appServerRuntime);
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      waitCallCount += 1;
+      if (waitCallCount === 1) {
+        return {
+          message: 'operator recovery instruction',
+          mode: {
+            permissionMode: 'default',
+            permissionModeUpdatedAt: 1,
+            localId: 'goal-recovery-local-id',
+          },
+          isolate: false,
+          hash: 'goal-recovery-hash',
+          maxUserMessageSeq: null,
+          userMessageLocalIds: ['goal-recovery-local-id'],
+          pendingProviderAction: 'send' as const,
+        };
+      }
+      throw new Error('stop-after-goal-steer');
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    expect(appServerRuntime.startOrLoad).toHaveBeenCalledWith(expect.objectContaining({
+      initialGoal: { objective: 'continue the goal', status: 'active' },
+    }));
+    expect(steerPrompt).toHaveBeenCalledWith('operator recovery instruction', expect.objectContaining({
+      localId: 'goal-recovery-local-id',
+    }));
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ ok: false, error: { message: 'stop-after-goal-steer' } });
+  });
+
+  it('falls back to an ordinary prompt when the fresh send-classified Goal bootstrap turn ends during steering', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    process.env[HAPPIER_DAEMON_INITIAL_GOAL_ENV_KEY] = serializeDaemonInitialGoalForEnv({
+      objective: 'continue the goal',
+      status: 'active',
+    });
+    process.env[HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE] = '1';
+    let turnInFlight = false;
+    const steerPrompt = vi.fn(async () => {
+      turnInFlight = false;
+      throw createCodexAppServerSteerTargetEndedError();
+    });
+    const sendPrompt = vi.fn(async () => {});
+    const appServerRuntime = {
+      getSessionId: () => 'thread-fresh-goal-send-race',
+      supportsInFlightSteer: () => true,
+      isTurnInFlight: () => turnInFlight,
+      canSteerPrompt: () => turnInFlight,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {
+        turnInFlight = true;
+      }),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt,
+      sendPrompt,
+      compactContext: vi.fn(async () => {}),
+      flushTurn: vi.fn(async () => {
+        turnInFlight = false;
+      }),
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-fresh-goal-send-race' })),
+    };
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => appServerRuntime);
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      waitCallCount += 1;
+      if (waitCallCount === 1) {
+        return {
+          message: 'operator recovery instruction',
+          mode: {
+            permissionMode: 'default',
+            permissionModeUpdatedAt: 1,
+            localId: 'goal-recovery-send-race-local-id',
+          },
+          isolate: false,
+          hash: 'goal-recovery-send-race-hash',
+          maxUserMessageSeq: null,
+          userMessageLocalIds: ['goal-recovery-send-race-local-id'],
+          pendingProviderAction: 'send' as const,
+        };
+      }
+      throw new Error('stop-after-goal-send-race');
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    expect(steerPrompt).toHaveBeenCalledWith('operator recovery instruction', expect.objectContaining({
+      localId: 'goal-recovery-send-race-local-id',
+    }));
+    expect(sendPrompt).toHaveBeenCalledWith('operator recovery instruction', expect.objectContaining({
+      localId: 'goal-recovery-send-race-local-id',
+    }));
+    expect(lastSessionClient?.blockPendingMessageDelivery).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ ok: false, error: { message: 'stop-after-goal-send-race' } });
+  });
+
+  it('does not convert an explicit steer into a new prompt when the Goal turn ends during steering', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+    process.env[HAPPIER_DAEMON_INITIAL_GOAL_ENV_KEY] = serializeDaemonInitialGoalForEnv({
+      objective: 'continue the goal',
+      status: 'active',
+    });
+    let turnInFlight = false;
+    const steerPrompt = vi.fn(async () => {
+      turnInFlight = false;
+      throw createCodexAppServerSteerTargetEndedError();
+    });
+    const sendPrompt = vi.fn(async () => {});
+    const appServerRuntime = {
+      getSessionId: () => 'thread-fresh-goal-race',
+      supportsInFlightSteer: () => true,
+      isTurnInFlight: () => turnInFlight,
+      canSteerPrompt: () => turnInFlight,
+      beginTurn: vi.fn(),
+      cancel: vi.fn(async () => {}),
+      reset: vi.fn(async () => {}),
+      startOrLoad: vi.fn(async () => {
+        turnInFlight = true;
+      }),
+      setSessionMode: vi.fn(async () => {}),
+      setSessionModel: vi.fn(async () => {}),
+      setSessionConfigOption: vi.fn(async () => {}),
+      steerPrompt,
+      sendPrompt,
+      compactContext: vi.fn(async () => {}),
+      flushTurn: vi.fn(async () => {
+        turnInFlight = false;
+      }),
+      rollbackConversation: vi.fn(async () => ({ ok: true as const, target: { type: 'latest_turn' }, threadId: 'thread-fresh-goal-race' })),
+    };
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => appServerRuntime);
+    let waitCallCount = 0;
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      waitCallCount += 1;
+      if (waitCallCount === 1) {
+        return {
+          message: 'explicit operator steer',
+          mode: {
+            permissionMode: 'default',
+            permissionModeUpdatedAt: 1,
+            localId: 'goal-explicit-steer-local-id',
+          },
+          isolate: false,
+          hash: 'goal-explicit-steer-hash',
+          maxUserMessageSeq: 81,
+          userMessageLocalIds: ['goal-explicit-steer-local-id'],
+          pendingProviderAction: 'steer' as const,
+        };
+      }
+      throw new Error('stop-after-explicit-steer-race');
+    };
+
+    const { runCodex } = await import('./runCodex');
+    const outcome = await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'daemon',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any)
+      .then(() => ({ ok: true as const }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+
+    expect(steerPrompt).toHaveBeenCalledWith('explicit operator steer', expect.objectContaining({
+      localId: 'goal-explicit-steer-local-id',
+      userMessageSeq: 81,
+    }));
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(lastSessionClient?.blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['goal-explicit-steer-local-id'],
+      reason: 'steering_unavailable',
+    });
+    expect(outcome).toMatchObject({ ok: false, error: { message: 'stop-after-explicit-steer-race' } });
   });
 
   it('flushes app-server preflight state when startOrLoad fails before a native turn exists', async () => {

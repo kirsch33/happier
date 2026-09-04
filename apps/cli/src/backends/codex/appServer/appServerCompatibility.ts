@@ -5,6 +5,34 @@ export type CodexAppServerRpcError = Error & Readonly<{
 }>;
 
 const CODEX_APP_SERVER_RPC_ERROR = Symbol('CodexAppServerRpcError');
+const CODEX_APP_SERVER_STEER_TARGET_ENDED = Symbol('CodexAppServerSteerTargetEnded');
+
+export type CodexAppServerSteerTargetEndedError = Error & Readonly<{
+    reason: 'target_turn_ended';
+}>;
+
+export function createCodexAppServerSteerTargetEndedError(
+    cause?: unknown,
+): CodexAppServerSteerTargetEndedError {
+    const message = cause instanceof Error
+        ? cause.message
+        : 'Codex app-server steer target turn ended';
+    const error = new Error(message, cause === undefined ? undefined : { cause }) as CodexAppServerSteerTargetEndedError;
+    Object.defineProperty(error, 'reason', { value: 'target_turn_ended', enumerable: true });
+    Object.defineProperty(error, CODEX_APP_SERVER_STEER_TARGET_ENDED, { value: true });
+    return error;
+}
+
+export function isCodexAppServerSteerTargetEndedError(
+    error: unknown,
+): error is CodexAppServerSteerTargetEndedError {
+    return Boolean(
+        error
+        && typeof error === 'object'
+        && (error as { [CODEX_APP_SERVER_STEER_TARGET_ENDED]?: unknown })[CODEX_APP_SERVER_STEER_TARGET_ENDED] === true
+        && (error as { reason?: unknown }).reason === 'target_turn_ended',
+    );
+}
 
 export function createCodexAppServerRpcError(params: Readonly<{
     method: string;
@@ -24,11 +52,11 @@ export function createCodexAppServerRpcError(params: Readonly<{
     return error;
 }
 
-export function isCodexAppServerNoActiveTurnToSteerError(error: unknown): boolean {
+export function isCodexAppServerSteerTargetUnavailableError(error: unknown): boolean {
     if (!(error instanceof Error)) return false;
     const method = (error as Partial<CodexAppServerRpcError>).method;
     if (typeof method === 'string' && method !== 'turn/steer') return false;
-    return /\bno\s+active\s+turn\s+to\s+steer\b/i.test(error.message);
+    return /(?:\bno\s+active\s+turn\s+to\s+steer\b|\brequires\s+an\s+active\s+turn\b|\bactive\s+turn\s+is\s+not\s+steerable\b)/i.test(error.message);
 }
 
 function readCode(error: unknown): number | null {

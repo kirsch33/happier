@@ -19,7 +19,7 @@ import {
   type InstalledDaemonServiceEntry,
 } from './discoverInstalledDaemonServiceEntries';
 import { planDaemonServiceInstall, planDaemonServiceUninstall } from './plan';
-import type { DaemonServiceMode, DaemonServiceTargetMode } from './plan';
+import type { DaemonServiceInstallActivation, DaemonServiceMode, DaemonServiceTargetMode } from './plan';
 import { resolveDaemonServiceInstallRuntimeTarget } from './resolveDaemonServiceInstallRuntimeTarget';
 import { resolveDaemonServiceDiscoveryTargets } from './resolveDaemonServiceDiscoveryTargets';
 import type { PublicReleaseRingId } from '@happier-dev/release-runtime/releaseRings';
@@ -122,6 +122,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
   systemUser?: string;
   channel?: PublicReleaseRingId;
   targetMode?: DaemonServiceTargetMode;
+  activation?: DaemonServiceInstallActivation;
   darwinInstallMode?: 'rebootstrap' | 'kickstart';
   instanceId?: string;
   activeServerId?: string;
@@ -198,6 +199,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
     systemUser: options.systemUser,
     channel,
     targetMode,
+    activation: options.activation,
     darwinInstallMode: options.darwinInstallMode,
     instanceId,
     activeServerId,
@@ -275,6 +277,7 @@ export async function installDaemonService(options: Readonly<{
   systemUser?: string;
   channel?: PublicReleaseRingId;
   targetMode?: DaemonServiceTargetMode;
+  activation?: DaemonServiceInstallActivation;
   darwinInstallMode?: 'rebootstrap' | 'kickstart';
   instanceId?: string;
   activeServerId?: string;
@@ -287,6 +290,9 @@ export async function installDaemonService(options: Readonly<{
   runCommands?: boolean;
   commandFailureMode?: DaemonServiceCommandFailureMode;
 }> = {}): Promise<void> {
+  if (options.activation === 'deferred' && options.runCommands === false) {
+    throw new Error('Deferred daemon service installation requires runCommands to remain enabled');
+  }
   const platformInput = options.platform ?? process.platform;
   const platform = resolveSupportedPlatform(platformInput);
   if (!platform) {
@@ -325,7 +331,7 @@ export async function installDaemonService(options: Readonly<{
     });
   }
 
-  if (preview.exactTargetIsConverged && preview.exactTargetMatchesExpectedDefinition) {
+  if (options.activation !== 'deferred' && preview.exactTargetIsConverged && preview.exactTargetMatchesExpectedDefinition) {
     return;
   }
   await applyDaemonServiceInstallPlan(preview.plan, {

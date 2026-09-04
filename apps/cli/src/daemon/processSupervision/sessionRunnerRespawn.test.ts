@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   CONNECTED_SERVICE_UX_DIAGNOSTIC_ACTIONS,
@@ -11,8 +14,96 @@ import type { TrackedSession } from '@/daemon/types';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 
 import { createSessionRunnerRespawnManager, type SessionRunnerRespawnOptionsResolver } from './sessionRunnerRespawn';
+import { createFreshProviderRecoveryReservationStore } from '../sessions/freshProviderRecoveryReservation';
+import { resumeFreshProviderContext } from '../sessions/resumeFreshProviderContext';
 
 describe('createSessionRunnerRespawnManager', () => {
+  it('holds a real durable lifecycle admission through respawn resolution and acceptance before a competing arm can settle', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-respawn-admission-race-'));
+    const token = [
+      Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url'),
+      Buffer.from(JSON.stringify({ sub: 'account-a' })).toString('base64url'),
+      'signature',
+    ].join('.');
+    const reservations = createFreshProviderRecoveryReservationStore({ happyHomeDir: homeDir, serverId: 'server-a', token });
+    const withRespawnLifecycle = async <T>(sessionId: string, action: () => Promise<T>): Promise<T> =>
+      await reservations.withLifecycle(sessionId, action);
+    let releaseSpawn: (() => void) | null = null;
+    let markSpawnEntered: (() => void) | null = null;
+    const spawnEntered = new Promise<void>((resolve) => { markSpawnEntered = resolve; });
+    let armSettled = false;
+    const order: string[] = [];
+    try {
+      const manager = createSessionRunnerRespawnManager({
+        enabled: true, maxRestarts: 1, baseDelayMs: 50, maxDelayMs: 50, jitterMs: 0,
+        isSessionAlreadyRunning: async () => false,
+        isSessionRespawnSuppressed: async (sessionId: string) => await reservations.isReserved(sessionId),
+        withRespawnLifecycle,
+        resolveRespawnOptions: async ({ defaultOptions }: Parameters<SessionRunnerRespawnOptionsResolver>[0]) => defaultOptions,
+        spawnSession: async (options: SpawnSessionOptions) => {
+          expect(options.resume).toBe('stale-provider');
+          markSpawnEntered?.();
+          return await new Promise((resolve) => { releaseSpawn = () => { order.push('spawn_accepted'); resolve({ type: 'success' as const, pid: 123 }); }; });
+        },
+        random: () => 0, logDebug: () => {}, logWarn: () => {},
+      } as any);
+      manager.handleUnexpectedExit({
+        startedBy: 'daemon', pid: 111, happySessionId: 'sess-race',
+        spawnOptions: { directory: '/tmp', backendTarget: { kind: 'builtInAgent', agentId: 'claude' }, resume: 'stale-provider' } as any,
+      }, { reason: 'process-missing', code: null, signal: null });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      await spawnEntered;
+
+      const arm = reservations.arm('sess-race').finally(() => { armSettled = true; order.push('arm_settled'); });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(armSettled).toBe(false);
+      releaseSpawn!();
+      await arm;
+      expect(order).toEqual(['spawn_accepted', 'arm_settled']);
+      await expect(resumeFreshProviderContext({
+        credentials: { token } as any,
+        machineId: 'machine-a', sessionId: 'sess-race', reservation: reservations,
+        probeSessionRunnerServiceability: async () => ({ state: 'runner_present' }),
+        spawnSession: async () => { throw new Error('fresh must not spawn after accepted respawn'); },
+        awaitCompletion: async () => null,
+      })).resolves.toMatchObject({ ok: false, errorCode: 'runner_not_absent' });
+      expect(order).toEqual(['spawn_accepted', 'arm_settled']);
+      expect(await reservations.isReserved('sess-race')).toBe(true);
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('suppresses only a reservation-first exact respawn before resolution while unrelated sessions respawn normally', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-respawn-reserved-first-'));
+    const token = [Buffer.from('{"alg":"none"}').toString('base64url'), Buffer.from('{"sub":"account-a"}').toString('base64url'), 'signature'].join('.');
+    const reservations = createFreshProviderRecoveryReservationStore({ happyHomeDir: homeDir, serverId: 'server-a', token });
+    const resolveRespawnOptions = vi.fn(async ({ defaultOptions }) => defaultOptions);
+    const spawnSession = vi.fn(async () => ({ type: 'success' as const, pid: 123 }));
+    await reservations.arm('sess-reserved-first');
+    try {
+      const manager = createSessionRunnerRespawnManager({
+        enabled: true, maxRestarts: 1, baseDelayMs: 1, maxDelayMs: 1, jitterMs: 0,
+        isSessionAlreadyRunning: async () => false,
+        isSessionRespawnSuppressed: async (sessionId) => await reservations.isReserved(sessionId),
+        withRespawnLifecycle: async (sessionId, action) => await reservations.withLifecycle(sessionId, action),
+        resolveRespawnOptions, spawnSession, random: () => 0, logDebug: () => {}, logWarn: () => {},
+      });
+      for (const sessionId of ['sess-reserved-first', 'sess-unrelated']) {
+        manager.handleUnexpectedExit({
+          startedBy: 'daemon', pid: sessionId === 'sess-reserved-first' ? 111 : 112, happySessionId: sessionId,
+          spawnOptions: { directory: '/tmp', backendTarget: { kind: 'builtInAgent', agentId: 'claude' }, resume: 'stale-provider' } as any,
+        }, { reason: 'process-missing', code: null, signal: null });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(resolveRespawnOptions).toHaveBeenCalledTimes(1);
+      expect(spawnSession).toHaveBeenCalledTimes(1);
+      expect(await reservations.isReserved('sess-reserved-first')).toBe(true);
+    } finally {
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('spawns a replacement runner after an unexpected termination', async () => {
     vi.useFakeTimers();
     const spawnSession = vi.fn(async (_opts: unknown) => ({ type: 'success' as const, pid: 123 }));
@@ -48,6 +139,27 @@ describe('createSessionRunnerRespawnManager', () => {
         approvedNewDirectoryCreation: true,
       }),
     );
+  });
+
+  it('suppresses enabled crash respawn while exact fresh recovery remains reserved', async () => {
+    vi.useFakeTimers();
+    const spawnSession = vi.fn(async () => ({ type: 'success' as const, pid: 123 }));
+    const resolveRespawnOptions = vi.fn();
+    const manager = createSessionRunnerRespawnManager({
+      enabled: true, maxRestarts: 2, baseDelayMs: 50, maxDelayMs: 50, jitterMs: 0,
+      isSessionAlreadyRunning: async () => false,
+      isSessionRespawnSuppressed: async (sessionId) => sessionId === 'sess-reserved',
+      spawnSession,
+      resolveRespawnOptions,
+      random: () => 0, logDebug: () => {}, logWarn: () => {},
+    });
+    manager.handleUnexpectedExit({
+      startedBy: 'daemon', pid: 111, happySessionId: 'sess-reserved',
+      spawnOptions: { directory: '/tmp', backendTarget: { kind: 'builtInAgent', agentId: 'claude' }, resume: 'stale-provider' } as any,
+    }, { reason: 'process-missing', code: null, signal: null });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(resolveRespawnOptions).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
   });
 
   it('uses tracked vendorResumeId when spawnOptions has no resume', async () => {

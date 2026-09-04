@@ -22,6 +22,8 @@ import {
     type SessionConnectedServiceAuthReadRuntimeIdentityRequestV1,
     type SessionConnectedServiceAuthReadRuntimeIdentityResponseV1,
     SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
+    SessionWorkStateStatusReasonV1Schema,
+    type SessionWorkStateStatusReasonV1,
     resolveSessionUsageLimitRecoveryResumePromptModeV1,
     type SessionRuntimeIssueV1,
     type SessionRuntimeUsageLimitDetailsV1,
@@ -54,6 +56,7 @@ import {
     resolveRecoverableTurnFailureSecondFailure,
     type RecoverableTurnFailurePromptMode,
 } from '@/agent/runtime/session/recoverableTurnFailurePolicy';
+import { reportSessionToDaemonIfRunning } from '@/agent/runtime/startupSideEffects';
 import { publishCodexSessionIdMetadata } from '../utils/codexSessionIdMetadata';
 import { resolveApprovalChoiceLabel } from '../runtime/codexRequestUserInputBridge';
 import {
@@ -99,12 +102,13 @@ import {
     publishLatestTurnRollbackRangeMetadata,
 } from './rollbackMetadata';
 import {
+    createCodexAppServerSteerTargetEndedError,
     isCodexAppServerInvalidRequestForMethodError,
     isCodexAppServerInvalidRequestMapExpectedStringError,
     isCodexAppServerInvalidParamsForFieldError,
     isCodexAppServerInvalidParamsError,
     isCodexAppServerMethodNotFoundError,
-    isCodexAppServerNoActiveTurnToSteerError,
+    isCodexAppServerSteerTargetUnavailableError,
 } from './appServerCompatibility';
 import { readCodexRateLimitsSnapshot } from './readCodexRateLimitsSnapshot';
 import {
@@ -1080,6 +1084,23 @@ function isMeaningfulCodexContextWindowRecoveryActivity(update: CodexAppServerSt
     }
 }
 
+function isMeaningfulCodexGoalContinuationActivity(update: CodexAppServerStreamUpdate): boolean {
+    switch (update.type) {
+        case 'context-compaction':
+        case 'reasoning-delta':
+        case 'reasoning-final':
+            return false;
+        case 'assistant-text-delta':
+        case 'assistant-text-final':
+        case 'assistant-raw-final':
+            return update.text.trim().length > 0;
+        case 'turn-diff-updated':
+            return update.unifiedDiff.trim().length > 0;
+        default:
+            return true;
+    }
+}
+
 function createCodexAppServerTurnFailure(
     value: unknown,
     sourceAccountIdentity?: Pick<
@@ -1304,6 +1325,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
     let pendingTurn: PendingTurn | null = null;
     let latestPendingTurnId: string | null = null;
     let pendingTurnHasProviderAttributedActivity = false;
+    let activeTurnWasAdoptedFromProvider = false;
+    let activeTurnHasMeaningfulGoalContinuationActivity = false;
     const deferredUnacknowledgedTerminalNotifications = new Map<
         string,
         DeferredUnacknowledgedTerminalNotification
@@ -1331,6 +1354,30 @@ export function createCodexAppServerRuntime(params: Readonly<{
     };
     let clientLifecycleGeneration = 0;
     let nativeTurnHandoffBarrier: Promise<void> | null = null;
+    let initialGoalActivationBarrier: Readonly<{
+        threadId: string;
+        promise: Promise<boolean>;
+        resolve: (activated: boolean) => void;
+    }> | null = null;
+    const armInitialGoalActivationBarrier = (goalThreadId: string): Promise<boolean> => {
+        initialGoalActivationBarrier?.resolve(false);
+        let resolveBarrier!: (activated: boolean) => void;
+        const promise = new Promise<boolean>((resolve) => {
+            resolveBarrier = resolve;
+        });
+        initialGoalActivationBarrier = {
+            threadId: goalThreadId,
+            promise,
+            resolve: resolveBarrier,
+        };
+        return promise;
+    };
+    const settleInitialGoalActivationBarrier = (goalThreadId: string | null, activated: boolean): void => {
+        const barrier = initialGoalActivationBarrier;
+        if (!barrier || (goalThreadId && barrier.threadId !== goalThreadId)) return;
+        initialGoalActivationBarrier = null;
+        barrier.resolve(activated);
+    };
     const waitForNativeTurnHandoff = async (): Promise<void> => {
         while (nativeTurnHandoffBarrier) {
             await nativeTurnHandoffBarrier;
@@ -1393,6 +1440,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
         initialCheckpointDelayMs: CODEX_TRANSCRIPT_INITIAL_CHECKPOINT_DELAY_MS,
     });
     const assistantTextByItemId = new Map<string, string>();
+    const deferredAssistantLeadingWhitespaceByItemId = new Map<string, string>();
     const reasoningTextByItemId = new Map<string, string>();
     const latestAssistantItemIdByStreamScope = new Map<string, string>();
 
@@ -1994,6 +2042,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
             activeServerDir: params.activeServerDir ?? null,
             processEnv: runtimeEnv,
             lastPublished: lastPublishedThreadId,
+        }).then(async () => {
+            const metadata = params.session.getMetadataSnapshot?.();
+            const sessionId = trimSessionId(params.session.sessionId);
+            if (!metadata || !sessionId) return;
+            await reportSessionToDaemonIfRunning({ sessionId, metadata });
         }).catch(() => undefined);
     };
 
@@ -2066,16 +2119,34 @@ export function createCodexAppServerRuntime(params: Readonly<{
         return record && Object.prototype.hasOwnProperty.call(record, 'goal') ? record.goal : value;
     };
 
+    let recoveryGoalStatusReason: Readonly<{
+        objective: string;
+        nativeStatus: 'active' | 'paused';
+        reason: SessionWorkStateStatusReasonV1;
+    }> | null = null;
+
     const publishGoalWorkState = async (goal: unknown): Promise<void> => {
         const record = readRecord(readGoalFromResponse(goal));
         if (!record) {
+            recoveryGoalStatusReason = null;
             await Promise.resolve(params.session.updateMetadata((metadata) =>
                 removeCodexGoalFromSessionWorkStateMetadata(metadata),
             )).catch(() => undefined);
             return;
         }
+        const recoveryReason = recoveryGoalStatusReason;
+        const statusReason = recoveryReason
+            && trimStringValue(record.objective) === recoveryReason.objective
+            && trimStringValue(record.status) === recoveryReason.nativeStatus
+            ? recoveryReason.reason
+            : undefined;
+        if (!statusReason) {
+            recoveryGoalStatusReason = null;
+        }
         await Promise.resolve(params.session.updateMetadata((metadata) =>
-            mergeCodexGoalIntoSessionWorkStateMetadata(metadata, record),
+            mergeCodexGoalIntoSessionWorkStateMetadata(metadata, record, {
+                ...(statusReason ? { statusReason } : {}),
+            }),
         )).catch(() => undefined);
     };
 
@@ -2159,6 +2230,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
     };
 
     const commitRawAssistantFinal = (pending: PendingRawAssistantFinal): void => {
+        if (pending.text.trim().length === 0) return;
         const itemId = pending.itemId
             ?? latestAssistantItemIdByStreamScope.get(pending.streamScopeId)
             ?? 'raw-response-item';
@@ -2254,6 +2326,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
         activeTurnHasMeaningfulContextWindowRecoveryActivity = true;
     };
 
+    const markActiveTurnMeaningfulGoalContinuationActivity = (): void => {
+        if (!pendingTurn) return;
+        activeTurnHasMeaningfulGoalContinuationActivity = true;
+    };
+
     const commitInlineReviewFindings = async (
         update: Extract<CodexAppServerStreamUpdate, { type: 'review-mode-completed' }>,
     ): Promise<void> => {
@@ -2293,10 +2370,23 @@ export function createCodexAppServerRuntime(params: Readonly<{
         if (isMeaningfulCodexContextWindowRecoveryActivity(update)) {
             markActiveTurnMeaningfulContextWindowRecoveryActivity();
         }
+        if (isMeaningfulCodexGoalContinuationActivity(update)) {
+            markActiveTurnMeaningfulGoalContinuationActivity();
+        }
 
         if (update.type === 'assistant-text-delta') {
+            const itemKey = buildItemStateKey(context.streamScopeId, update.itemId);
+            if (!assistantTextByItemId.has(itemKey) && update.text.trim().length === 0) {
+                deferredAssistantLeadingWhitespaceByItemId.set(
+                    itemKey,
+                    `${deferredAssistantLeadingWhitespaceByItemId.get(itemKey) ?? ''}${update.text}`,
+                );
+                return;
+            }
+            const leadingWhitespace = deferredAssistantLeadingWhitespaceByItemId.get(itemKey) ?? '';
+            deferredAssistantLeadingWhitespaceByItemId.delete(itemKey);
             latestAssistantItemIdByStreamScope.set(context.streamScopeId, update.itemId);
-            appendStreamDelta(buildItemStateKey(context.streamScopeId, update.itemId), update.text, assistantTextByItemId, (deltaText) => {
+            appendStreamDelta(itemKey, `${leadingWhitespace}${update.text}`, assistantTextByItemId, (deltaText) => {
                 itemTranscriptBridge.appendAssistantDelta({
                     deltaText,
                     streamKey: buildAssistantItemStreamKey(context.streamScopeId, update.itemId),
@@ -2308,6 +2398,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
 
         if (update.type === 'assistant-text-final') {
             const itemKey = buildItemStateKey(context.streamScopeId, update.itemId);
+            deferredAssistantLeadingWhitespaceByItemId.delete(itemKey);
+            if (update.text.trim().length === 0) {
+                assistantTextByItemId.delete(itemKey);
+                return;
+            }
             const nativeReviewText = nativeReviewCompletionTextByStreamScope.get(context.streamScopeId);
             if (nativeReviewText && nativeReviewText.trim() === update.text.trim()) {
                 normalizedAssistantFinalItemKeys.add(itemKey);
@@ -2574,6 +2669,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
 
     const flushStreamState = async (reason: 'turn-end' | 'abort'): Promise<void> => {
         assistantTextByItemId.clear();
+        deferredAssistantLeadingWhitespaceByItemId.clear();
         reasoningTextByItemId.clear();
         latestAssistantItemIdByStreamScope.clear();
         normalizedAssistantFinalItemKeys.clear();
@@ -2792,6 +2888,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
         }
 
         markActiveTurnMeaningfulContextWindowRecoveryActivity();
+        markActiveTurnMeaningfulGoalContinuationActivity();
         const result = params.permissionHandler
             ? await params.permissionHandler.handleToolCall(invocation.toolCallId, invocation.toolName, invocation.input)
             : { decision: 'denied' as const };
@@ -2824,6 +2921,9 @@ export function createCodexAppServerRuntime(params: Readonly<{
             }
             if (isMeaningfulCodexContextWindowRecoveryActivity(update)) {
                 markActiveTurnMeaningfulContextWindowRecoveryActivity();
+            }
+            if (isMeaningfulCodexGoalContinuationActivity(update)) {
+                markActiveTurnMeaningfulGoalContinuationActivity();
             }
 
             if (update.type === 'approval-request') {
@@ -2921,6 +3021,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
         }
         pendingTurn = null;
         pendingTurnHasProviderAttributedActivity = false;
+        activeTurnWasAdoptedFromProvider = false;
+        activeTurnHasMeaningfulGoalContinuationActivity = false;
         pendingTurnStartSeqInclusive = null;
         turnInFlight = false;
         activeProviderTurnItemIds.clear();
@@ -3306,6 +3408,37 @@ export function createCodexAppServerRuntime(params: Readonly<{
             schedulePendingTurnFinalization('abort');
             return;
         }
+        if (activeTurn && activeTurnWasAdoptedFromProvider && !activeTurnHasMeaningfulGoalContinuationActivity) {
+            try {
+                const client = await ensureClient();
+                const currentGoalResponse = await client.request('thread/goal/get', {
+                    threadId: activeTurn.threadId,
+                });
+                const currentGoal = readRecord(readGoalFromResponse(currentGoalResponse));
+                if (trimStringValue(currentGoal?.status) === 'active') {
+                    const currentObjective = trimStringValue(currentGoal?.objective);
+                    const pausedGoalResponse = await client.request('thread/goal/set', {
+                        threadId: activeTurn.threadId,
+                        ...(currentObjective ? { objective: currentObjective } : {}),
+                        status: 'paused',
+                    });
+                    await publishGoalWorkState(pausedGoalResponse);
+                    const commitSession = params.transcriptSession ?? params.session;
+                    if (typeof commitSession.sendAgentMessageCommitted === 'function') {
+                        await commitSession.sendAgentMessageCommitted(
+                            'codex',
+                            {
+                                type: 'message',
+                                message: 'Goal paused automatically because its native continuation completed without meaningful output.',
+                            },
+                            { localId: `codex-goal-contentless-continuation:${activeTurn.turnId ?? randomUUID()}` },
+                        );
+                    }
+                }
+            } catch (error) {
+                logger.debug('[codex-app-server] Failed to pause a contentless native Goal continuation', error);
+            }
+        }
         schedulePendingTurnFinalization('turn-end');
     };
 
@@ -3425,6 +3558,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
 
         pendingTurnStartSeqInclusive = readLastObservedMessageSeq(params.session);
         activeTurnHasMeaningfulContextWindowRecoveryActivity = false;
+        activeTurnWasAdoptedFromProvider = true;
+        activeTurnHasMeaningfulGoalContinuationActivity = false;
         const changeTrackingReady = beginTurnChangeTracking();
         const adoptedTurn = createPendingTurn(activeThreadId, {
             // Provider-originated work has no request-local fact proving which credential epoch
@@ -3451,6 +3586,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
             startUserMessageLocalId: null,
             startSeqInclusive: pendingTurnStartSeqInclusive,
         });
+        settleInitialGoalActivationBarrier(activeThreadId, true);
         return pendingTurn;
     };
 
@@ -3966,6 +4102,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
         pendingTurnError?: Error;
     }>): Promise<void> => {
         clientLifecycleGeneration += 1;
+        settleInitialGoalActivationBarrier(null, false);
         if (options?.emitUndeliverablePrompts !== false) {
             emitAllPendingProviderPromptsAsUndeliverable();
         }
@@ -4154,6 +4291,14 @@ export function createCodexAppServerRuntime(params: Readonly<{
     };
 
     const startOrLoad = async (options: CodexAppServerStartOrLoadOptions = {}): Promise<void> => {
+        recoveryGoalStatusReason = null;
+        const initialGoal = options.initialGoal;
+        const initialGoalNativeStatus = initialGoal?.objective
+            ? normalizeNativeGoalSetStatus(initialGoal.status)
+            : undefined;
+        if (initialGoalNativeStatus === null) {
+            throw new Error('Codex app-server initial Goal has an unsupported writable status');
+        }
         // A runtime may attach more than once without replacing its app-server client (for
         // example resume fallback or an explicit second load). Every attach must re-arm the
         // history fence before the provider can emit notifications for the selected thread.
@@ -4249,17 +4394,36 @@ export function createCodexAppServerRuntime(params: Readonly<{
             startOrLoadResult.response,
             { publishThreadIdImmediately: Boolean(resumeId || existingSessionId) },
         );
-        const initialGoal = options.initialGoal;
         if (initialGoal?.objective) {
-            const response = await client.request('thread/goal/set', {
-                threadId: startOrLoadResult.nextThreadId,
-                objective: trimStringValue(initialGoal.objective),
-                ...(initialGoal.status ? { status: initialGoal.status } : {}),
-                ...(Object.prototype.hasOwnProperty.call(initialGoal, 'tokenBudget')
-                    ? { tokenBudget: initialGoal.tokenBudget ?? null }
-                    : {}),
-            });
-            await publishGoalWorkState(response);
+            const parsedStatusReason = SessionWorkStateStatusReasonV1Schema.safeParse(initialGoal.statusReason);
+            recoveryGoalStatusReason = parsedStatusReason.success
+                && (initialGoalNativeStatus === 'active' || initialGoalNativeStatus === 'paused')
+                ? {
+                    objective: initialGoal.objective.trim(),
+                    nativeStatus: initialGoalNativeStatus,
+                    reason: parsedStatusReason.data,
+                }
+                : null;
+            const activation = initialGoalNativeStatus === 'active'
+                ? armInitialGoalActivationBarrier(startOrLoadResult.nextThreadId)
+                : null;
+            try {
+                const response = await client.request('thread/goal/set', {
+                    threadId: startOrLoadResult.nextThreadId,
+                    objective: trimStringValue(initialGoal.objective),
+                    ...(initialGoalNativeStatus ? { status: initialGoalNativeStatus } : {}),
+                    ...(Object.prototype.hasOwnProperty.call(initialGoal, 'tokenBudget')
+                        ? { tokenBudget: initialGoal.tokenBudget ?? null }
+                        : {}),
+                });
+                await publishGoalWorkState(response);
+                if (activation && !await activation) {
+                    throw new Error('Codex app-server initial Goal activation ended before a native turn was adopted');
+                }
+            } catch (error) {
+                settleInitialGoalActivationBarrier(startOrLoadResult.nextThreadId, false);
+                throw error;
+            }
         }
         if (params.pendingQueue?.drainAfterStartOrLoad === true) {
             await params.pendingQueue.drainPending({
@@ -4283,6 +4447,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
         }
         pendingTurnStartSeqInclusive = readLastObservedMessageSeq(params.session);
         activeTurnHasMeaningfulContextWindowRecoveryActivity = false;
+        activeTurnWasAdoptedFromProvider = false;
+        activeTurnHasMeaningfulGoalContinuationActivity = false;
         const changeTrackingReady = beginTurnChangeTracking();
         const activeTurn = createPendingTurn(activeThreadId, {
             connectedServiceRuntimeIdentityAtStart: latestConnectedServiceRuntimeIdentity,
@@ -4378,6 +4544,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
         }
         pendingTurnStartSeqInclusive = readLastObservedMessageSeq(params.session);
         activeTurnHasMeaningfulContextWindowRecoveryActivity = false;
+        activeTurnWasAdoptedFromProvider = false;
+        activeTurnHasMeaningfulGoalContinuationActivity = false;
         const changeTrackingReady = beginTurnChangeTracking();
         const activeTurn = createPendingTurn(activeThreadId, {
             providerPrompt: options?.providerPrompt ?? null,
@@ -4671,13 +4839,28 @@ export function createCodexAppServerRuntime(params: Readonly<{
             assertCodexAppServerPendingIdentity(options);
             const activeTurn = pendingTurn;
             if (!activeTurn) {
-                throw new Error('Codex app-server steerPrompt requires an active turn');
+                throw createCodexAppServerSteerTargetEndedError();
             }
+            const createSteerGuardError = (): Error => {
+                const currentTurn = pendingTurn;
+                if (
+                    !currentTurn
+                    || (
+                        currentTurn.promise === activeTurn.promise
+                        && scheduledPendingTurnFlushReason !== null
+                    )
+                ) {
+                    return createCodexAppServerSteerTargetEndedError();
+                }
+                return createCodexAppServerSteerTargetEndedError(
+                    new Error('Codex app-server active turn is not steerable'),
+                );
+            };
             assertConnectedServiceAuthGroupAvailable();
             const client = await ensureClient();
             const expectedTurnId = await waitForSteerableActiveTurnId(activeTurn);
             if (pendingTurn?.promise !== activeTurn.promise || !canSteerPrompt()) {
-                throw new Error('Codex app-server active turn is not steerable');
+                throw createSteerGuardError();
             }
             if (!expectedTurnId) {
                 throw new Error('Codex app-server steerPrompt requires an active turn id');
@@ -4685,7 +4868,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
 
             const structuredInput = await buildCodexTurnInputForPrompt(prompt, params.directory, options);
             if (pendingTurn?.promise !== activeTurn.promise || !canSteerPrompt()) {
-                throw new Error('Codex app-server active turn is not steerable');
+                throw createSteerGuardError();
             }
             const textOnlyInput: CodexAppServerTurnInputItem[] = [{ type: 'text', text: prompt }];
             const pendingProviderPrompt = trackPendingProviderPrompt(prompt, options);
@@ -4708,7 +4891,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 turnIdKey: 'expectedTurnId' | 'turnId',
             ): Promise<void> => {
                 if (pendingTurn?.promise !== activeTurn.promise || !canSteerPrompt()) {
-                    throw new Error('Codex app-server active turn is not steerable');
+                    throw createSteerGuardError();
                 }
                 await client.request('turn/steer', {
                     ...payload,
@@ -4723,12 +4906,16 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 try {
                     await requestSteer(input, turnIdKey);
                 } catch (error) {
-                    if (
-                        isCodexAppServerNoActiveTurnToSteerError(error)
-                        && pendingTurn?.promise === activeTurn.promise
-                    ) {
-                        logger.debug('[codex-app-server] Native turn already inactive during steer; clearing local pending turn state');
-                        await finishPendingTurn({ flushReason: 'abort' });
+                    if (isCodexAppServerSteerTargetUnavailableError(error)) {
+                        const currentTurn = pendingTurn;
+                        if (currentTurn?.promise === activeTurn.promise) {
+                            logger.debug('[codex-app-server] Native turn already inactive during steer; clearing local pending turn state');
+                            await finishPendingTurn({ flushReason: 'abort' });
+                            throw createCodexAppServerSteerTargetEndedError(error);
+                        }
+                        if (!currentTurn) {
+                            throw createCodexAppServerSteerTargetEndedError(error);
+                        }
                     }
                     throw error;
                 }

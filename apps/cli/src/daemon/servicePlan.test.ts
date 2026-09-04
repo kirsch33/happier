@@ -176,6 +176,78 @@ describe('daemon service install plan', () => {
     expect(systemctlArgsText).toContain('--user daemon-reload');
   });
 
+  it('plans a deferred Linux install without activating its target unit', () => {
+    const plan = planDaemonServiceInstall({
+      platform: 'linux',
+      mode: 'user',
+      channel: 'stable',
+      instanceId: 'cloud',
+      activeServerId: 'cloud',
+      userHomeDir: '/home/test',
+      happierHomeDir: '/home/test/.happier',
+      serverUrl: 'https://api.happier.dev',
+      webappUrl: 'https://app.happier.dev',
+      publicServerUrl: 'https://api.happier.dev',
+      nodePath: '/usr/bin/node',
+      entryPath: '/usr/lib/node_modules/@happier-dev/cli/dist/index.mjs',
+      activation: 'deferred',
+    } as Parameters<typeof planDaemonServiceInstall>[0] & { activation: 'deferred' });
+
+    expect(plan.files[0]?.path).toBe('/home/test/.config/systemd/user/happier-daemon.cloud.service');
+    expect(plan.commands.map((command) => `${command.cmd} ${command.args.join(' ')}`)).toEqual([
+      'systemctl --user daemon-reload',
+      'systemctl --user enable happier-daemon.cloud.service',
+    ]);
+
+    const systemPlan = planDaemonServiceInstall({
+      platform: 'linux',
+      mode: 'system',
+      systemUser: 'happier',
+      channel: 'stable',
+      instanceId: 'cloud',
+      activeServerId: 'cloud',
+      userHomeDir: '/home/happier',
+      happierHomeDir: '/home/happier/.happier',
+      serverUrl: 'https://api.happier.dev',
+      webappUrl: 'https://app.happier.dev',
+      publicServerUrl: 'https://api.happier.dev',
+      nodePath: '/usr/bin/node',
+      entryPath: '/usr/lib/node_modules/@happier-dev/cli/dist/index.mjs',
+      activation: 'deferred',
+    });
+    expect(systemPlan.commands.map((command) => `${command.cmd} ${command.args.join(' ')}`)).toEqual([
+      'systemctl daemon-reload',
+      'systemctl enable happier-daemon.cloud.service',
+    ]);
+
+    expect(() => planDaemonServiceInstall({
+      platform: 'darwin',
+      instanceId: 'cloud',
+      activeServerId: 'cloud',
+      userHomeDir: '/Users/test',
+      happierHomeDir: '/Users/test/.happier',
+      serverUrl: 'https://api.happier.dev',
+      webappUrl: 'https://app.happier.dev',
+      publicServerUrl: 'https://api.happier.dev',
+      nodePath: '/usr/bin/node',
+      entryPath: '/app/index.mjs',
+      activation: 'deferred',
+    } as Parameters<typeof planDaemonServiceInstall>[0] & { activation: 'deferred' })).toThrow(/Linux/);
+    expect(() => planDaemonServiceInstall({
+      platform: 'win32',
+      instanceId: 'cloud',
+      activeServerId: 'cloud',
+      userHomeDir: 'C:\\Users\\test',
+      happierHomeDir: 'C:\\Users\\test\\.happier',
+      serverUrl: 'https://api.happier.dev',
+      webappUrl: 'https://app.happier.dev',
+      publicServerUrl: 'https://api.happier.dev',
+      nodePath: 'C:\\node.exe',
+      entryPath: 'C:\\app\\index.mjs',
+      activation: 'deferred',
+    })).toThrow(/Linux/);
+  });
+
   it('plans a default-following systemd user unit without pinning server env', () => {
     const plan = planDaemonServiceInstall({
       platform: 'linux',

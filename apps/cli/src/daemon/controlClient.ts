@@ -170,7 +170,7 @@ function resolveDaemonControlTimeoutMs(path: string, options: DaemonControlReque
     return resolvePositiveIntValue(options.timeoutMs, DEFAULT_DAEMON_HTTP_TIMEOUT_MS, { min: 100, max: 300_000 });
   }
 
-  if (path === '/spawn-session') {
+  if (path === '/spawn-session' || path === '/session/resume-fresh') {
     const rawSpawnTimeout = process.env[DAEMON_SPAWN_HTTP_TIMEOUT_ENV_KEY];
     if (rawSpawnTimeout !== undefined && String(rawSpawnTimeout).trim().length > 0) {
       return resolvePositiveIntValue(rawSpawnTimeout, DEFAULT_DAEMON_SPAWN_HTTP_TIMEOUT_MS, {
@@ -419,8 +419,10 @@ async function daemonPost(path: string, body?: any, options: DaemonPostOptions =
         responseObject && typeof responseObject.errorCode === 'string' ? responseObject.errorCode : undefined;
 
       const remoteErrorMessage =
-        responseObject && typeof responseObject.error === 'string'
-          ? responseObject.error
+        responseObject && typeof responseObject.errorMessage === 'string'
+          ? responseObject.errorMessage
+          : responseObject && typeof responseObject.error === 'string'
+            ? responseObject.error
           : responseObject && typeof responseObject.message === 'string'
             ? responseObject.message
             : undefined;
@@ -431,6 +433,7 @@ async function daemonPost(path: string, body?: any, options: DaemonPostOptions =
       return {
         error: errorMessage,
         errorCode: remoteErrorCode,
+        errorMessage: remoteErrorMessage,
         response: parsedBody,
       };
     }
@@ -836,6 +839,40 @@ export async function spawnDaemonSession(
 
   const result = await daemonPost('/spawn-session', request);
   return result;
+}
+
+export type ResumeFreshDaemonSessionResult =
+  | Readonly<{ ok: true; sessionId: string; providerSessionId: string }>
+  | Readonly<{ ok: false; errorCode: string; errorMessage: string }>;
+
+export async function resumeFreshDaemonSession(sessionId: string, message?: string): Promise<ResumeFreshDaemonSessionResult> {
+  const result = await daemonPost('/session/resume-fresh', {
+    sessionId,
+    ...(message ? { message } : {}),
+  });
+  if (
+    result && typeof result === 'object'
+    && (result as { ok?: unknown }).ok === true
+    && typeof (result as { sessionId?: unknown }).sessionId === 'string'
+    && typeof (result as { providerSessionId?: unknown }).providerSessionId === 'string'
+  ) {
+    return {
+      ok: true,
+      sessionId: (result as { sessionId: string }).sessionId,
+      providerSessionId: (result as { providerSessionId: string }).providerSessionId,
+    };
+  }
+  return {
+    ok: false,
+    errorCode: typeof (result as { errorCode?: unknown })?.errorCode === 'string'
+      ? (result as { errorCode: string }).errorCode
+      : 'completion_unproven',
+    errorMessage: typeof (result as { errorMessage?: unknown })?.errorMessage === 'string'
+      ? (result as { errorMessage: string }).errorMessage
+      : typeof (result as { error?: unknown })?.error === 'string'
+      ? (result as { error: string }).error
+      : 'Fresh provider context completion could not be proven.',
+  };
 }
 
 export type DaemonSpawnSessionResolveStatus = SpawnSessionNonceResolution;

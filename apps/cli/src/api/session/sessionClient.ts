@@ -1300,6 +1300,17 @@ export class ApiSessionClient extends EventEmitter {
                     if (!isResolvedContractCurrent()) return;
                 }
 
+                if (
+                    serverContract.pendingInput === 'v1'
+                    || serverContract.pendingInput === 'released_server_v0_2_1'
+                ) {
+                    // A provider may begin waiting before compatibility probing and Runtime
+                    // Activity settlement finish. Contract readiness is therefore an eligibility
+                    // transition in its own right; without this wake, an already-known queued row
+                    // can sleep forever after the startup materialization attempt fails closed.
+                    this.publishPendingEligibilityWake();
+                }
+
                 this.reofferAcceptedCanonicalPendingDeliveriesAfterConnection();
 
                 await this.syncChangesOnConnect({ reason: isReconnect ? 'reconnect' : 'connect' }).catch((error) => {
@@ -3286,9 +3297,17 @@ export class ApiSessionClient extends EventEmitter {
         this.emit('pending-eligibility-updated');
     }
 
+    readPendingEligibilityWakeSequence(): number {
+        return this.pendingWakeSeq;
+    }
+
     waitForPendingEligibilityUpdate(abortSignal?: AbortSignal): Promise<boolean> {
+        return this.waitForPendingEligibilityUpdateSince(this.pendingWakeSeq, abortSignal);
+    }
+
+    waitForPendingEligibilityUpdateSince(startPendingWakeSeq: number, abortSignal?: AbortSignal): Promise<boolean> {
         if (abortSignal?.aborted) return Promise.resolve(false);
-        const startPendingWakeSeq = this.pendingWakeSeq;
+        if (this.pendingWakeSeq !== startPendingWakeSeq) return Promise.resolve(true);
         return new Promise((resolve) => {
             let cleanedUp = false;
             const finish = (value: boolean) => {

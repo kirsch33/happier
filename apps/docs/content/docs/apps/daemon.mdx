@@ -152,6 +152,24 @@ happier daemon uninstall
 
 On Windows, `happier daemon service paths` prints the Scheduled Task name and wrapper path.
 
+### Prepare a Linux service before starting it
+
+On Linux, `--prepare-only` writes and enables the `systemd --user` unit without starting it. Use it when a later, separately controlled step must start the daemon:
+
+```bash
+hdev service install --prepare-only --yes --replace-existing=ring --json
+```
+
+The command succeeds only when the target unit and daemon are already stopped. Its JSON result reports `prepared: true` and `started: false`; confirm both before continuing. Do not reboot or start the service between preparation and the later start step.
+
+When the controlled step is ready, start the prepared service explicitly:
+
+```bash
+hdev service start --takeover --json
+```
+
+`--prepare-only` is Linux-only. macOS LaunchAgents and Windows Scheduled Tasks do not support this two-step workflow.
+
 ## Headless authentication (no TTY)
 
 On headless servers (or anywhere you don’t have an interactive TTY), use:

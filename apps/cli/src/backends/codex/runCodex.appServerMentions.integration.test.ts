@@ -439,6 +439,10 @@ describe('runCodex app-server composer reference resolution', () => {
       throw outcome.error;
     }
 
+    const startupConsumer = createSessionProviderInputConsumerSpy.mock.results[0]?.value;
+    expect(startupConsumer?.drainPending.mock.calls.some(([options]: [any]) => options?.reason === undefined)).toBe(false);
+    expect(createSessionProviderInputConsumerSpy.mock.calls[0]?.[0]?.initialReconcileWhenEmpty).toBe('force');
+
     const requestLog = (await readFile(requestLogPath, 'utf8'))
       .trim()
       .split('\n')

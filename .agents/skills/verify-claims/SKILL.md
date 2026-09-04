@@ -5,7 +5,7 @@ description: Audit a report, plan, or handoff by re-deriving every load-bearing 
 
 # Verify Claims
 
-Take a report — a subagent's, a lane's, a plan's, or your own from earlier — and re-derive its load-bearing claims instead of trusting how they sound. Full doctrine: `docs/agent-craft.md` §4.
+Take a report — a subagent's, a lane's, a plan's, or your own from earlier — and re-derive its load-bearing claims instead of trusting how they sound.
 
 ## Procedure
 

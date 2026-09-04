@@ -44,11 +44,11 @@ Use `.agents/skills/decompose-gates` when the plan needs lane decomposition. Map
 
 Name a precondition only when plan ordering cannot guarantee it: external authority/credentials, runtime/device availability, released artifacts, immutable external contracts, or other environment state. Verify it read-only before dependent work when practical. Do not create precondition ceremony for ordinary code dependencies.
 
-Use maximum useful parallelism. Keep ready independent work moving when it shortens the critical path and dispatch newly unblocked work without waiting for unrelated lanes. Do not target a fleet size or create filler lanes. File overlap alone is not a collision.
+Default to one integrated owner. Delegate only when the user or approved plan explicitly requests delegation, or when a concrete independent lane is necessary to meet a named acceptance or risk boundary. Do not dispatch newly unblocked lanes automatically. File overlap alone is not a collision.
 
 ## 4. Dispatch meaningful plan-aware lanes
 
-Delegate complete responsibilities, not tiny searches or isolated edits. Every meaningful implementation, review, or QA lane reads the complete approved plan once unless it is already active in that lane's context. Reference the on-disk plan rather than pasting it.
+When delegation is explicitly authorized, delegate complete responsibilities rather than tiny searches or isolated edits. Every meaningful implementation, review, or QA lane reads the complete approved plan once unless it is already active in that lane's context. Reference the on-disk plan rather than pasting it.
 
 For Codex, set `fork_turns` explicitly and default to `fork_turns="none"`; inherit only the minimal recent context that is indispensable. Each brief includes:
 

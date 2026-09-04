@@ -285,6 +285,42 @@ describe('resolveSessionRuntimeSnapshot', () => {
     expect(result.spawnOptions.resume).toBeUndefined();
   });
 
+  it('keeps fresh-provider context one-shot: it suppresses both resume sources while preserving the launch-only instruction', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+        resume: 'explicit-old-provider-id',
+        freshProviderContextOnce: true,
+      }),
+      persistedMetadata: {
+        flavor: 'codex',
+        codexSessionId: 'metadata-old-provider-id',
+      },
+      persistedVendorResumeId: 'tracked-old-provider-id',
+    });
+
+    expect(result.snapshot.vendorResumeId).toBeNull();
+    expect(result.spawnOptions.resume).toBeUndefined();
+    expect(result.spawnOptions.freshProviderContextOnce).toBe(true);
+  });
+
+  it('uses the newly published provider id for a later ordinary respawn without fresh mode', () => {
+    const result = resolveSessionRuntimeSnapshot({
+      incomingOptions: baseIncomingOptions({
+        backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+      }),
+      persistedMetadata: {
+        flavor: 'codex',
+        codexSessionId: 'provider-new',
+      },
+      persistedVendorResumeId: 'provider-new',
+    });
+
+    expect(result.snapshot.vendorResumeId).toMatchObject({ value: 'provider-new' });
+    expect(result.spawnOptions.resume).toBe('provider-new');
+    expect(result.spawnOptions).not.toHaveProperty('freshProviderContextOnce');
+  });
+
   it('preserves incoming controls without timestamps when no persisted or tracked snapshot exists', () => {
     const result = resolveSessionRuntimeSnapshot({
       incomingOptions: baseIncomingOptions({

@@ -1,9 +1,19 @@
 import { spawnSync } from 'node:child_process';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 
 import {
   resolveWindowsCommandInvocation,
   resolveWindowsCommandOnPath,
 } from './windows/resolveWindowsCommandInvocation.js';
+
+function isExecutableFile(path: string): boolean {
+  try {
+    return statSync(path).isFile() && (accessSync(path, fsConstants.X_OK), true);
+  } catch {
+    return false;
+  }
+}
 
 export function commandExistsOnPath(
   cmd: string,
@@ -34,10 +44,9 @@ export function commandExistsOnPath(
     return resolveWindowsCommandOnPath(name, probeEnv) !== null;
   }
 
-  const res = spawnSync('sh', ['-lc', 'command -v "$1" >/dev/null 2>&1', 'sh', name], {
-    stdio: 'ignore',
-    env: probeEnv,
-    windowsHide: true,
-  });
-  return (res.status ?? 1) === 0;
+  if (name.includes('/')) return isExecutableFile(name);
+
+  return String(pathEnv ?? '')
+    .split(delimiter)
+    .some((dir) => isExecutableFile(join(dir || '.', name)));
 }

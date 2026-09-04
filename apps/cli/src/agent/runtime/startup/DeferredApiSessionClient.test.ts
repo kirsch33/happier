@@ -356,6 +356,8 @@ describe('DeferredApiSessionClient', () => {
       getMetadataSnapshot: vi.fn(() => createMetadataStub()),
       waitForMetadataUpdate: vi.fn(async () => true),
       waitForPendingEligibilityUpdate: vi.fn(async () => true),
+      readPendingEligibilityWakeSequence: vi.fn(() => 7),
+      waitForPendingEligibilityUpdateSince: vi.fn(async () => true),
       popPendingMessage: vi.fn(async () => true),
       peekPendingMessageQueueV2Count: vi.fn(async () => 3),
       discardPendingMessageQueueV2All: vi.fn(async () => 1),
@@ -372,6 +374,8 @@ describe('DeferredApiSessionClient', () => {
 
     await expect(deferred.waitForMetadataUpdate()).resolves.toBe(true);
     await expect(deferred.waitForPendingEligibilityUpdate()).resolves.toBe(true);
+    expect(deferred.readPendingEligibilityWakeSequence()).toBe(7);
+    await expect(deferred.waitForPendingEligibilityUpdateSince(6)).resolves.toBe(true);
     await expect(deferred.popPendingMessage()).resolves.toBe(true);
     await expect(deferred.peekPendingMessageQueueV2Count({ reconcileWhenEmpty: 'skip' })).resolves.toBe(3);
     await expect(deferred.fetchCommittedClaudeJsonlMessageBaseline({ take: 1 })).resolves.toEqual(
@@ -394,6 +398,8 @@ describe('DeferredApiSessionClient', () => {
 
     expect(real.waitForMetadataUpdate).toHaveBeenCalledTimes(1);
     expect(real.waitForPendingEligibilityUpdate).toHaveBeenCalledTimes(1);
+    expect(real.readPendingEligibilityWakeSequence).toHaveBeenCalledTimes(1);
+    expect(real.waitForPendingEligibilityUpdateSince).toHaveBeenCalledWith(6, undefined);
     expect(real.peekPendingMessageQueueV2Count).toHaveBeenCalledWith({ reconcileWhenEmpty: 'skip' });
     expect(real.fetchCommittedClaudeJsonlMessageBaseline).toHaveBeenCalledWith({ take: 1 });
     expect(real.fetchRecentTranscriptTextItemsForAcpImport).toHaveBeenCalledWith({ take: 1 });

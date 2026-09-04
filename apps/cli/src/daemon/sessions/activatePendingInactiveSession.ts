@@ -10,6 +10,7 @@ type PendingInactiveSessionActivationResult =
   | Readonly<{
       status: 'activated';
       runnerAcceptance?: Extract<SpawnSessionResult, { type: 'success' }>['runnerAcceptance'];
+      pid?: number;
     }>
   | Readonly<{
       status: 'not-needed';
@@ -26,6 +27,8 @@ export async function activatePendingInactiveSession(params: Readonly<{
   sessionId: string;
   requestId: string;
   pendingVersion: number;
+  /** Resume-fresh uses this to reject a second-fetch Pending snapshot that changed before spawn. */
+  expectedPendingSnapshot?: Readonly<{ pendingVersion: number; requestId: string }>;
   spawnSession: (options: NonNullable<ReturnType<typeof buildInactiveSessionResumeSpawnOptions>>) => Promise<SpawnSessionResult>;
 }>): Promise<PendingInactiveSessionActivationResult> {
   const rawSession = await fetchSessionByIdCompat({
@@ -103,6 +106,18 @@ export async function activatePendingInactiveSession(params: Readonly<{
     reason: 'manual-recovery',
   });
   const currentAuthorization = currentSession?.pendingActivationAuthorization;
+  const expectedPendingSnapshot = params.expectedPendingSnapshot;
+  if (expectedPendingSnapshot && (
+    !currentSession
+    || currentSession.id !== params.sessionId
+    || currentSession.active === true
+    || (currentSession.archivedAt !== null && currentSession.archivedAt !== undefined)
+    || currentSession.pendingVersion !== expectedPendingSnapshot.pendingVersion
+    || currentSession.pendingCount !== 1
+    || currentAuthorization?.requestId !== expectedPendingSnapshot.requestId
+  )) {
+    return { status: 'not-needed', reason: 'snapshot-stale' };
+  }
   if (
     !currentSession
     || currentSession.id !== params.sessionId
@@ -163,5 +178,6 @@ export async function activatePendingInactiveSession(params: Readonly<{
   return {
     status: 'activated',
     ...(result.runnerAcceptance ? { runnerAcceptance: result.runnerAcceptance } : {}),
+    ...(typeof result.pid === 'number' && Number.isInteger(result.pid) && result.pid > 0 ? { pid: result.pid } : {}),
   };
 }

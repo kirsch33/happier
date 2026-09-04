@@ -74,6 +74,18 @@ describe('mergeSessionMetadataForStartup', () => {
         expect(merged.hostPid).toBe(2);
     });
 
+    it('reports the current runtime version when attaching to an existing session', () => {
+        const merged = mergeSessionMetadataForStartup({
+            current: { version: '0.2.10-dev.67' } as any,
+            next: { version: '0.2.10-dev.82', hostPid: 2 } as any,
+            nowMs: 1,
+            mode: 'attach',
+        });
+
+        expect(merged.version).toBe('0.2.10-dev.82');
+        expect(merged.hostPid).toBe(2);
+    });
+
     it('uses runtime machine identity fields when attaching with runtime identity replacement', () => {
         const nowMs = 1;
         const merged = mergeSessionMetadataForStartup({

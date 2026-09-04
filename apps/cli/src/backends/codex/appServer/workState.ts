@@ -1,6 +1,7 @@
 import {
     normalizeCodexAppServerGoalToSessionWorkStateItem,
     type SessionWorkStateItemV1,
+    type SessionWorkStateStatusReasonV1,
     type SessionWorkStateV1,
     type SessionWorkStateWriteSnapshotV1,
 } from '@happier-dev/protocol';
@@ -57,18 +58,22 @@ export function mergeCodexGoalIntoSessionWorkStateMetadata<TMetadata extends obj
     options: Readonly<{
         backendId?: string;
         agentId?: string;
+        statusReason?: SessionWorkStateStatusReasonV1;
     }> = {},
 ): TMetadata & { sessionWorkStateV1: SessionWorkStateWriteSnapshotV1 } {
     const backendId = options.backendId ?? CODEX_BACKEND_ID;
-    const item = normalizeCodexAppServerGoalToSessionWorkStateItem({
+    const normalizedItem = normalizeCodexAppServerGoalToSessionWorkStateItem({
         backendId,
         ...(options.agentId ? { agentId: options.agentId } : {}),
         goal,
     });
 
-    if (!item) {
+    if (!normalizedItem) {
         return removeCodexGoalFromSessionWorkStateMetadata(metadata, { backendId });
     }
+    const item = options.statusReason
+        ? { ...normalizedItem, statusReason: options.statusReason }
+        : normalizedItem;
 
     const current = readCurrentWorkState(metadata, backendId);
     const existingCodexGoalItemIds = readItems(current.items)

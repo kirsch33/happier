@@ -869,6 +869,27 @@ export async function enqueuePendingQueueV2MessageViaHttp(params: {
     };
 }
 
+export async function updatePendingQueueV2RequestedActionViaHttp(params: {
+    token: string;
+    sessionId: string;
+    localId: string;
+    requestedAction: PendingRequestedActionV1;
+}): Promise<void> {
+    const localId = requirePendingLocalId(params.localId);
+    const serverUrl = resolveServerHttpBaseUrl();
+    const response = await axios.patch(
+        `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/${encodeURIComponent(localId)}/action`,
+        { requestedAction: params.requestedAction },
+        {
+            headers: buildSessionRunnerHttpHeaders(params.token, 'application/json'),
+            timeout: 10_000,
+        },
+    );
+    if (!response?.data || typeof response.data !== 'object' || response.data.ok !== true) {
+        throw new Error('Invalid Pending requested-action acknowledgement');
+    }
+}
+
 export async function resolveAcceptedPendingQueueV2Delivery(params: {
     socket: Socket<ServerToClientEvents, ClientToServerEvents>;
     sessionId: string;

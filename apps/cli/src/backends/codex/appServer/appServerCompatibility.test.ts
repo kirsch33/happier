@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    createCodexAppServerSteerTargetEndedError,
     isCodexAppServerExperimentalApiUnavailableError,
     isCodexAppServerInvalidRequestForMethodError,
     isCodexAppServerInvalidRequestMapExpectedStringError,
     isCodexAppServerInvalidParamsError,
     isCodexAppServerMethodNotFoundError,
+    isCodexAppServerSteerTargetEndedError,
+    isCodexAppServerSteerTargetUnavailableError,
 } from './appServerCompatibility';
 
 function makeError(message: string, code?: number): Error {
@@ -17,6 +20,29 @@ function makeError(message: string, code?: number): Error {
 }
 
 describe('appServerCompatibility', () => {
+    it('marks only structured target-ended steering failures as terminal owner loss', () => {
+        const error = createCodexAppServerSteerTargetEndedError(new Error('no active turn to steer'));
+        expect(isCodexAppServerSteerTargetEndedError(error)).toBe(true);
+        expect(error).toMatchObject({ reason: 'target_turn_ended', message: 'no active turn to steer' });
+        expect(isCodexAppServerSteerTargetEndedError(new Error('no active turn to steer'))).toBe(false);
+        expect(isCodexAppServerSteerTargetEndedError(new Error('active turn is not steerable'))).toBe(false);
+    });
+
+    it.each([
+        'no active turn to steer',
+        'turn/steer requires an active turn',
+        'active turn is not steerable',
+    ])('recognizes terminal turn/steer race wording: %s', (message) => {
+        expect(isCodexAppServerSteerTargetUnavailableError(makeError(message))).toBe(true);
+    });
+
+    it('does not classify unrelated RPC or steering failures as terminal target loss', () => {
+        const wrongMethod = makeError('active turn is not steerable') as Error & { method?: string };
+        wrongMethod.method = 'turn/start';
+        expect(isCodexAppServerSteerTargetUnavailableError(wrongMethod)).toBe(false);
+        expect(isCodexAppServerSteerTargetUnavailableError(makeError('turn/steer permission denied'))).toBe(false);
+    });
+
     it('detects method-not-found errors by code or message', () => {
         expect(isCodexAppServerMethodNotFoundError(makeError('nope', -32601))).toBe(true);
         expect(isCodexAppServerMethodNotFoundError(makeError('Method not found'))).toBe(true);

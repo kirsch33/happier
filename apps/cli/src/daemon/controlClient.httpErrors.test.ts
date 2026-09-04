@@ -7,6 +7,7 @@ import {
   DaemonConnectedServiceRefreshError,
   notifyDaemonConnectedServiceRuntimeAuthFailure,
   notifyDaemonConnectedServiceTurnLifecycle,
+  resumeFreshDaemonSession,
   requestDaemonSessionConnectedServiceAuthSwitch,
   resolveDaemonSpawnSessionByNonce,
   spawnDaemonSession,
@@ -378,6 +379,126 @@ describe('daemon control client (HTTP error responses)', () => {
         success: false,
         error: 'Failed to spawn session: boom',
         errorCode: 'SPAWN_FAILED',
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('preserves the daemon errorMessage from a rejected resume-fresh completion', async () => {
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/session/resume-fresh') {
+        req.resume();
+        res.statusCode = 409;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({
+          ok: false,
+          errorCode: 'completion_unproven',
+          errorMessage: 'The newly accepted runner did not retain exact PID custody.',
+        }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    try {
+      const { port } = await listen(server);
+      tmpHomeDir = await createTempDir('happier-daemon-client-resume-fresh-error-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: port,
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+        controlToken: 'test-token',
+      });
+
+      await expect(resumeFreshDaemonSession('cm8q7dqx00001k0n1s5v6z2ab')).resolves.toEqual({
+        ok: false,
+        errorCode: 'completion_unproven',
+        errorMessage: 'The newly accepted runner did not retain exact PID custody.',
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it.each([
+    'reservation_claim_mismatch',
+    'reservation_missing',
+    'reservation_corrupt',
+    'pending_shape_mismatch',
+    'seed_admission_unconfirmed',
+    'post_seed_snapshot_drift',
+  ])('preserves the exact %s resume-fresh failure code from control', async (errorCode) => {
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/session/resume-fresh') {
+        req.resume();
+        res.statusCode = 400;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: false, errorCode, errorMessage: `failed: ${errorCode}` }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+    try {
+      const { port } = await listen(server);
+      tmpHomeDir = await createTempDir('happier-daemon-client-resume-fresh-code-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({ pid: process.pid, httpPort: port, startedAt: Date.now(), startedWithCliVersion: 'test', controlToken: 'test-token' });
+      await expect(resumeFreshDaemonSession('cm8q7dqx00001k0n1s5v6z2ab')).resolves.toEqual({
+        ok: false, errorCode, errorMessage: `failed: ${errorCode}`,
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('posts the optional resume-fresh recovery message through the authenticated local control request', async () => {
+    let observedBody: Record<string, unknown> | null = null;
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/session/resume-fresh') {
+        let rawBody = '';
+        req.setEncoding('utf8');
+        req.on('data', (chunk) => {
+          rawBody += chunk;
+        });
+        req.on('end', () => {
+          observedBody = JSON.parse(rawBody) as Record<string, unknown>;
+          res.statusCode = 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ ok: true, sessionId: 'cm8q7dqx00001k0n1s5v6z2ab', providerSessionId: 'thread_new' }));
+        });
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    try {
+      const { port } = await listen(server);
+      tmpHomeDir = await createTempDir('happier-daemon-client-resume-fresh-message-');
+      envScope.patch({ HAPPIER_HOME_DIR: tmpHomeDir });
+      reloadConfiguration();
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: port,
+        startedAt: Date.now(),
+        startedWithCliVersion: 'test',
+        controlToken: 'test-token',
+      });
+
+      await expect(resumeFreshDaemonSession(
+        'cm8q7dqx00001k0n1s5v6z2ab',
+        'Start fresh from this recovery instruction.',
+      )).resolves.toMatchObject({ ok: true });
+      expect(observedBody).toEqual({
+        sessionId: 'cm8q7dqx00001k0n1s5v6z2ab',
+        message: 'Start fresh from this recovery instruction.',
       });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));

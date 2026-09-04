@@ -143,6 +143,12 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
   maxDelayMs: number;
   jitterMs: number;
   isSessionAlreadyRunning: (sessionId: string) => boolean | Promise<boolean>;
+  isSessionRespawnSuppressed?: (sessionId: string) => boolean | Promise<boolean>;
+  /**
+   * Daemon-owned admission for an exact session. When supplied, this brackets the full
+   * reservation check, runtime-snapshot resolution, and accepted spawn attempt.
+   */
+  withRespawnLifecycle?: <T>(sessionId: string, action: () => Promise<T>) => Promise<T>;
   spawnSession: (opts: SpawnSessionOptions) => Promise<unknown>;
   resolveRespawnOptions?: SessionRunnerRespawnOptionsResolver;
   onRespawnSuccess?: (input: Readonly<{
@@ -274,91 +280,98 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
 
     const timer = setTimeout(() => {
       void (async () => {
-        const alreadyRunning = await params.isSessionAlreadyRunning(sessionId);
-        if (alreadyRunning) {
+        const runAdmission = async (): Promise<
+          | Readonly<{ type: 'suppressed' }>
+          | Readonly<{ type: 'already_running' }>
+          | Readonly<{ type: 'stop_requested' }>
+          | Readonly<{ type: 'spawn_result'; result: unknown }>
+        > => {
+          if (await params.isSessionRespawnSuppressed?.(sessionId)) {
+            return { type: 'suppressed' };
+          }
+          const alreadyRunning = await params.isSessionAlreadyRunning(sessionId);
+          if (alreadyRunning) return { type: 'already_running' };
+          if (stopRequestedBySessionId.get(sessionId)) return { type: 'stop_requested' };
+
+          const defaultOptions = buildRespawnOptions({ spawnOptions, sessionId, vendorResumeId });
+          const respawnOptions = params.resolveRespawnOptions
+            ? await params.resolveRespawnOptions({ sessionId, previousPid, spawnOptions, vendorResumeId, defaultOptions })
+            : defaultOptions;
+          params.logDebug(
+            `[DAEMON RUN] Respawning runner for session ${sessionId} after ${delayMs}ms (attempt ${attempt})`,
+            { exit: event, attempt, respawnKind: resolveRespawnKind(event) },
+          );
+          return { type: 'spawn_result', result: await params.spawnSession(respawnOptions) };
+        };
+        const admission = params.withRespawnLifecycle
+          ? await params.withRespawnLifecycle(sessionId, runAdmission)
+          : await runAdmission();
+        if (admission.type === 'suppressed') {
+          endRespawnCycle(sessionId);
+          params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'stop_requested', detail: 'fresh_recovery_reserved' });
+          return;
+        }
+        if (admission.type === 'already_running') {
           endRespawnCycle(sessionId);
           params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'already_running' });
           return;
         }
-        const stopRequest = stopRequestedBySessionId.get(sessionId);
-        if (stopRequest) {
+        if (admission.type === 'stop_requested') {
           endRespawnCycle(sessionId);
           params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'stop_requested' });
           return;
         }
+        const result = admission.result;
+        if (result && typeof result === 'object' && (result as any).type === 'success') {
+          params.onRespawnSuccess?.({ sessionId, previousPid, result });
+          // Cycle end, NOT a full reset: the intended-restart window must survive a successful
+          // respawn or a "successful" intended-restart loop is unbounded across cycles (RR-2).
+          endRespawnCycle(sessionId);
+          return;
+        }
 
-        const defaultOptions = buildRespawnOptions({ spawnOptions, sessionId, vendorResumeId });
-        const respawnOptions = params.resolveRespawnOptions
-          ? await params.resolveRespawnOptions({ sessionId, previousPid, spawnOptions, vendorResumeId, defaultOptions })
-          : defaultOptions;
-        params.logDebug(
-          `[DAEMON RUN] Respawning runner for session ${sessionId} after ${delayMs}ms (attempt ${attempt})`,
-          { exit: event, attempt, respawnKind: resolveRespawnKind(event) },
-        );
+        if (result && typeof result === 'object' && (result as any).type === 'requestToApproveDirectoryCreation') {
+          params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (directory approval required)`);
+          endRespawnCycle(sessionId);
+          params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'directory_approval_required' });
+          return;
+        }
 
-        void params
-          .spawnSession(respawnOptions)
-          .then((result) => {
-            if (result && typeof result === 'object' && (result as any).type === 'success') {
-              params.onRespawnSuccess?.({ sessionId, previousPid, result });
-              // Cycle end, NOT a full reset: the intended-restart window must survive a successful
-              // respawn or a "successful" intended-restart loop is unbounded across cycles (RR-2).
-              endRespawnCycle(sessionId);
-              return;
-            }
+        if (isNotAuthenticatedSpawnResult(result)) {
+          params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (auth:not_authenticated)`);
+          endRespawnCycle(sessionId);
+          params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'not_authenticated' });
+          return;
+        }
 
-            if (result && typeof result === 'object' && (result as any).type === 'requestToApproveDirectoryCreation') {
-              params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (directory approval required)`);
-              endRespawnCycle(sessionId);
-              params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'directory_approval_required' });
-              return;
-            }
+        if (isResumeUnreachableSpawnResult(result)) {
+          params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (resume unreachable)`);
+          endRespawnCycle(sessionId);
+          params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'resume_unreachable' });
+          return;
+        }
 
-            if (isNotAuthenticatedSpawnResult(result)) {
-              params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (auth:not_authenticated)`);
-              endRespawnCycle(sessionId);
-              params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'not_authenticated' });
-              return;
-            }
+        // The child-exit handler resolves this result before durable exit staging invokes
+        // handleUnexpectedExit. That staged notification is the single retry owner for the
+        // replacement process, so retrying here as well launches competing replacements.
+        if (isChildExitedBeforeWebhookSpawnResult(result)) {
+          params.logDebug(
+            `[DAEMON RUN] Respawn child exited before webhook for session ${sessionId}; awaiting staged exit notification`,
+            result,
+          );
+          return;
+        }
 
-            if (isResumeUnreachableSpawnResult(result)) {
-              params.logWarn(`[DAEMON RUN] Respawn suppressed for session ${sessionId} (resume unreachable)`);
-              endRespawnCycle(sessionId);
-              params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'resume_unreachable' });
-              return;
-            }
-
-            // The child-exit handler resolves this result before durable exit staging invokes
-            // handleUnexpectedExit. That staged notification is the single retry owner for the
-            // replacement process, so retrying here as well launches competing replacements.
-            if (isChildExitedBeforeWebhookSpawnResult(result)) {
-              params.logDebug(
-                `[DAEMON RUN] Respawn child exited before webhook for session ${sessionId}; awaiting staged exit notification`,
-                result,
-              );
-              return;
-            }
-
-            params.logDebug(`[DAEMON RUN] Respawn attempt returned non-success for session ${sessionId}`, result);
-            const retryEvent: TerminationEvent = {
-              type: 'spawn_error',
-              errorName: 'Error',
-              errorMessage:
-                result && typeof result === 'object' && typeof (result as any).errorCode === 'string'
-                  ? `respawn_failed:${String((result as any).errorCode)}`
-                  : 'respawn_failed',
-            };
-            scheduleRetryFromTermination(sessionId, spawnOptions, vendorResumeId, retryEvent, previousPid);
-          })
-          .catch((error) => {
-            params.logDebug(`[DAEMON RUN] Failed to respawn runner for session ${sessionId}`, error);
-            const retryEvent: TerminationEvent = {
-              type: 'spawn_error',
-              errorName: error instanceof Error ? error.name : 'Error',
-              errorMessage: error instanceof Error ? error.message : String(error),
-            };
-            scheduleRetryFromTermination(sessionId, spawnOptions, vendorResumeId, retryEvent, previousPid);
-          });
+        params.logDebug(`[DAEMON RUN] Respawn attempt returned non-success for session ${sessionId}`, result);
+        const retryEvent: TerminationEvent = {
+          type: 'spawn_error',
+          errorName: 'Error',
+          errorMessage:
+            result && typeof result === 'object' && typeof (result as any).errorCode === 'string'
+              ? `respawn_failed:${String((result as any).errorCode)}`
+              : 'respawn_failed',
+        };
+        scheduleRetryFromTermination(sessionId, spawnOptions, vendorResumeId, retryEvent, previousPid);
       })().catch((error) => {
         params.logDebug(`[DAEMON RUN] Failed to evaluate respawn preflight for session ${sessionId}`, error);
         const retryEvent: TerminationEvent = {

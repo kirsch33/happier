@@ -1,6 +1,6 @@
 ---
 name: happier-profile-and-optimize
-description: The method for profiling and optimizing anything whose success is a measured cost — frame the phase and metric, choose an instrument that can actually see the cost, label the waste, falsify the hypothesis with a cheap control before building a fix, and prove the result without over-claiming. Covers app/device and server/database work. Use when work is about slowness, jank, startup/open time, blocked JS, hangs, memory, render churn, a slow query, or a claimed speedup. It does not carry the write-time gotchas for UI code — those live in `apps/ui/AGENTS.md`.
+description: The method for profiling and optimizing anything whose success is a measured cost — frame the phase and metric, choose an instrument that can actually see the cost, label the waste, falsify the hypothesis with a cheap control before building a fix, and prove the result without over-claiming. Covers app/device and server/database work. Use when work is about slowness, jank, startup/open time, blocked JS, hangs, memory, render churn, a slow query, or a claimed speedup.
 metadata: {"openclaw":{"homepage":"https://github.com/happier-dev/happier"}}
 ---
 
@@ -8,17 +8,7 @@ metadata: {"openclaw":{"homepage":"https://github.com/happier-dev/happier"}}
 
 Use this skill for any work whose success is a measured cost, not a behavior: slow open/foreground/navigation, jank, hangs, startup, memory, render churn, a query that got slow, or verifying somebody's speedup claim. It is the *investigation* method — reach for it once a cost exists.
 
-It is deliberately **not** the list of things to watch for while writing code. Those must apply unprompted, at authoring time, long before anyone suspects a problem, so they live in package instructions that are read on every task: `apps/ui/AGENTS.md` → **Performance and continuity** owns the UI write-time invariants (referential stability, narrow subscriptions, component-type stability, high-frequency state placement, dependency-array identity, loop stop conditions, one perf change lands on all platforms). If you are about to restate one of those here, stop and strengthen it there instead.
-
-The rules this skill operates under also live elsewhere and are not restated: root `AGENTS.md` → **Product priorities** (name the phase and metric, instrument must be able to see the cost, no ratio without both sides on the same workload and machine state, no blanket memoization) and **Risk-weighted execution**. Read those; do not re-derive them.
-
-Route out, do not absorb:
-
-- `.agents/skills/happier-diagnose` — the incident is a *failure* (error, hang-to-crash, broken session), not a cost. Diagnose first, then return here only if the outcome is a cost.
-- `.agents/skills/happier-testing` — lanes, RED/GREEN, mutation proof, live gates. A perf fix with a behavior change is still test-first there.
-- `.agents/skills/happier-implement` — the actual change, canonical-owner discovery, split-brain sweep.
-- `.agents/skills/verify-claims` — before relying on any delegated or reported number.
-- `.agents/skills/attack-conclusion` — before handing off a perf verdict.
+This skill is for measured cost, not failures such as errors, crashes, or broken sessions. Establish functional correctness first when both are present.
 
 ## 1. Frame the cost before touching an instrument
 
@@ -28,7 +18,7 @@ Measure the moment that hurts. Some costs are steady-state, not open-time; some 
 
 ## 2. Pick the instrument that can see the cost
 
-Get a **total** first — total blocked/elapsed time for the phase — then reconcile every instrument's attributed total against it, per the instrument-coverage rule in root `AGENTS.md`. What that rule costs when skipped, measured here: a React profiler reported ~1.4 s while the JS thread was blocked ~12 s; 88% of the cost was outside React, and a full round of work went into render churn that was not the bottleneck.
+Get a **total** first — total blocked/elapsed time for the phase — then reconcile every instrument's attributed total against it. A profiler can undercount work outside its scope; a React profiler showing ~1.4 s while the JS thread is blocked ~12 s does not establish render churn as the bottleneck.
 
 Route to the instrument by what it can observe:
 
@@ -58,7 +48,7 @@ Then, before any edit:
 > **Hypothesis:** `<cost>` is caused by `<work>` because `<evidence>`.
 > **Verification:** measure with `<tool>`, inspect `<files>`.
 
-If `<evidence>` is a subtraction ("the rest must be X"), root `AGENTS.md` already rules that a hypothesis, not a measurement — go observe X before fixing it.
+If `<evidence>` is a subtraction ("the rest must be X"), it is a hypothesis, not a measurement — observe X before fixing it.
 
 ## 4. Build the falsifying control before the fix
 
@@ -68,10 +58,10 @@ Good controls: same flow twice (cold vs warm), the flow with one input emptied, 
 
 ## 5. Change, prove, and be willing to revert
 
-- Fix at the canonical owner via `.agents/skills/happier-implement`; a perf fix that adds a second path for the same concept is a defect, not an optimization.
-- Replay the *same* flow, phase, and workload with the same instrument, under root `AGENTS.md`'s paired-measurement gate. Concretely here, work-avoided proofs are call counts, commit counts, bytes parsed, and blocked ms.
+- Fix at the canonical owner; a perf fix that adds a second path for the same concept is a defect, not an optimization.
+- Replay the *same* flow, phase, and workload with the same instrument. Compare paired measurements; work-avoided proofs are call counts, commit counts, bytes parsed, and blocked ms.
 - **A fix that costs UX is not a win.** This program built, measured, and reverted an idle-rAF scheduling fix because it broke bottom-follow. Record such reverts with the precondition that would make the idea viable again; a reverted measured attempt is a result, not a failure.
-- Sweep after the fix per root `AGENTS.md`: the same waste label usually has siblings.
+- Sweep after the fix: the same waste label usually has siblings.
 
 ## 6. When you cannot measure
 
@@ -83,7 +73,7 @@ No device, saturated machine, flapping tooling, unreproducible phase: say so pla
 2. Resolve the device id from `curl -s localhost:18829/json/list` and use **`reactNative.logicalDeviceId`** — never the raw simulator UDID. Wrong id = a profile of a different device.
 3. Arm the probe *before* the action (profiler start, sampler, log registry), then perform exactly the flow you framed in step 1.
 4. Stop and analyze. `react-profiler-analyze` requires `project_root`.
-5. Pin bundle identity when a stale bundle could invalidate the result — see `.agents/skills/happier-testing` device QA rules.
+5. Pin bundle identity when a stale bundle could invalidate the result.
 
 **Do not wrap Metro's `global.__r` to count module evaluations.** It drops the CDP connection: the `for-in` over the registry loses its non-enumerable state. Use the first-vs-second-open control from step 4 instead.
 

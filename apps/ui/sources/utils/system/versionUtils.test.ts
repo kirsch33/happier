@@ -39,6 +39,12 @@ describe('versionUtils', () => {
             expect(compareVersions('0.2.0-preview.1775367533.1', '0.2.0')).toBe(-1);
         });
 
+        it('orders the deployed self-host source fingerprint after its numeric generation', () => {
+            expect(compareVersions('0.2.10-dev.67.50a0189f7c8c', '0.1.0')).toBe(1);
+            expect(compareVersions('0.2.10-dev.67.50a0189f7c8c', '0.2.10-dev.76')).toBe(-1);
+            expect(compareVersions('0.2.10-dev.67.50a0189f7c8c', '0.2.10-dev.67')).toBe(1);
+        });
+
         it('should handle versions with different segment counts', () => {
             expect(compareVersions('1.0', '1.0.0')).toBe(0);
             expect(compareVersions('1', '1.0.0')).toBe(0);

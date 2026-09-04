@@ -22,18 +22,20 @@ export const MINIMUM_CLI_SESSION_FORK_REQUEST_ID_VERSION = '0.2.10-dev.41';
 function normalizeComparableVersion(version: string): {
     baseParts: number[];
     prereleaseChannel: 'dev' | 'preview' | null;
-    prereleaseNumbers: number[];
+    prereleaseIdentifiers: Array<number | string>;
 } {
     const trimmed = String(version ?? '').trim();
     if (!trimmed) throw new Error('Invalid version');
-    const [baseVersion, rawSuffix = ''] = trimmed.split('-', 2);
+    const separatorIndex = trimmed.indexOf('-');
+    const baseVersion = separatorIndex === -1 ? trimmed : trimmed.slice(0, separatorIndex);
+    const rawSuffix = separatorIndex === -1 ? '' : trimmed.slice(separatorIndex + 1);
     const baseParts = baseVersion.split('.').map(Number);
     if (baseParts.length === 0 || baseParts.some((part) => !Number.isInteger(part) || part < 0)) {
         throw new Error('Invalid version');
     }
 
     if (!rawSuffix) {
-        return { baseParts, prereleaseChannel: null, prereleaseNumbers: [] };
+        return { baseParts, prereleaseChannel: null, prereleaseIdentifiers: [] };
     }
 
     const suffixParts = rawSuffix.split('.');
@@ -41,15 +43,26 @@ function normalizeComparableVersion(version: string): {
     if (channel !== 'dev' && channel !== 'preview') {
         throw new Error('Unsupported prerelease channel');
     }
-    const prereleaseNumbers = suffixParts.slice(1).map(Number);
-    if (prereleaseNumbers.length === 0 || prereleaseNumbers.some((part) => !Number.isInteger(part) || part < 0)) {
+    const rawPrereleaseIdentifiers = suffixParts.slice(1);
+    if (rawPrereleaseIdentifiers.length === 0) {
+        throw new Error('Invalid prerelease version');
+    }
+    const prereleaseIdentifiers = rawPrereleaseIdentifiers.map((part, index): number | string => {
+        if (/^\d+$/.test(part)) return Number(part);
+        const isTrailingSourceFingerprint = index === rawPrereleaseIdentifiers.length - 1
+            && index > 0
+            && /^[0-9a-f]{7,64}$/i.test(part);
+        if (!isTrailingSourceFingerprint) throw new Error('Invalid prerelease version');
+        return part.toLowerCase();
+    });
+    if (prereleaseIdentifiers.some((part) => typeof part === 'number' && (!Number.isInteger(part) || part < 0))) {
         throw new Error('Invalid prerelease version');
     }
 
     return {
         baseParts,
         prereleaseChannel: channel,
-        prereleaseNumbers,
+        prereleaseIdentifiers,
     };
 }
 
@@ -84,10 +97,14 @@ export function compareVersions(version1: string, version2: string): number {
     if (v1ChannelRank > v2ChannelRank) return 1;
     if (v1ChannelRank < v2ChannelRank) return -1;
 
-    const prereleaseLength = Math.max(v1.prereleaseNumbers.length, v2.prereleaseNumbers.length);
+    const prereleaseLength = Math.max(v1.prereleaseIdentifiers.length, v2.prereleaseIdentifiers.length);
     for (let i = 0; i < prereleaseLength; i++) {
-        const v1Part = v1.prereleaseNumbers[i] ?? 0;
-        const v2Part = v2.prereleaseNumbers[i] ?? 0;
+        const v1Part = v1.prereleaseIdentifiers[i];
+        const v2Part = v2.prereleaseIdentifiers[i];
+        if (v1Part === undefined) return -1;
+        if (v2Part === undefined) return 1;
+        if (typeof v1Part === 'number' && typeof v2Part === 'string') return -1;
+        if (typeof v1Part === 'string' && typeof v2Part === 'number') return 1;
         if (v1Part > v2Part) return 1;
         if (v1Part < v2Part) return -1;
     }

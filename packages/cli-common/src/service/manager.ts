@@ -34,6 +34,7 @@ export type ServiceSpec = Readonly<{
   programArgs: readonly string[];
   workingDirectory?: string;
   env?: Record<string, string>;
+  environmentFiles?: readonly string[];
   runAsUser?: string;
   stdoutPath?: string;
   stderrPath?: string;
@@ -83,6 +84,7 @@ function normalizeSpec(spec: ServiceSpec): Required<ServiceSpec> {
     programArgs,
     workingDirectory: String(spec?.workingDirectory ?? '').trim(),
     env: spec?.env ?? {},
+    environmentFiles: Array.isArray(spec?.environmentFiles) ? spec.environmentFiles.map((path) => String(path ?? '')) : [],
     runAsUser: String(spec?.runAsUser ?? '').trim(),
     stdoutPath: String(spec?.stdoutPath ?? '').trim(),
     stderrPath: String(spec?.stderrPath ?? '').trim(),
@@ -131,6 +133,10 @@ export function resolveServiceDefinitionPath(params: Readonly<{
 export function buildServiceDefinition(params: Readonly<{ backend: ServiceBackend; homeDir: string; spec: ServiceSpec }>): ServiceDefinition {
   const s = normalizeSpec(params.spec);
   const backend = String(params.backend ?? '').trim() as ServiceBackend;
+  const hasSystemdOnlyFields = s.environmentFiles.length > 0;
+  if (hasSystemdOnlyFields && backend !== 'systemd-user' && backend !== 'systemd-system') {
+    throw new Error('environmentFiles are only supported by systemd service backends');
+  }
   const platform: NodeJS.Platform =
     backend === 'launchd-user' || backend === 'launchd-system'
       ? 'darwin'
@@ -153,6 +159,7 @@ export function buildServiceDefinition(params: Readonly<{ backend: ServiceBacken
       execStart: s.programArgs,
       workingDirectory: s.workingDirectory,
       env: mergedEnv,
+      environmentFiles: s.environmentFiles,
       restart: s.restartPolicy,
       runAsUser: s.runAsUser,
       stdoutPath: s.stdoutPath,

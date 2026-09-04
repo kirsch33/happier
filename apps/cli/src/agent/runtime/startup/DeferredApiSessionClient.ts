@@ -60,6 +60,8 @@ export type DeferredApiSessionTarget = Readonly<{
   refreshSessionSnapshotFromServerBestEffort?: (opts?: { reason?: 'connect' | 'waitForMetadataUpdate' }) => Promise<void>;
   waitForMetadataUpdate: (abortSignal?: AbortSignal) => Promise<boolean>;
   waitForPendingEligibilityUpdate?: (abortSignal?: AbortSignal) => Promise<boolean>;
+  readPendingEligibilityWakeSequence?: () => number | null;
+  waitForPendingEligibilityUpdateSince?: (sequence: number, abortSignal?: AbortSignal) => Promise<boolean>;
   shouldAttemptPendingMaterialization?: () => boolean;
   reconcilePendingQueueState?: (opts?: { force?: boolean }) => Promise<boolean>;
   materializeNextPendingMessageSafely?: (opts?: MaterializeNextPendingOptions) => Promise<MaterializeNextPendingResult>;
@@ -493,6 +495,22 @@ export class DeferredApiSessionClient {
     if (abortSignal?.aborted) return false;
     return await this.withAttachedTarget(
       (t) => t.waitForPendingEligibilityUpdate?.(abortSignal) ?? Promise.resolve(false),
+      false,
+    );
+  }
+
+  readPendingEligibilityWakeSequence(): number | null {
+    const target = this.target;
+    if (!target || this.flushInFlight) return null;
+    return target.readPendingEligibilityWakeSequence?.() ?? null;
+  }
+
+  async waitForPendingEligibilityUpdateSince(sequence: number, abortSignal?: AbortSignal): Promise<boolean> {
+    if (abortSignal?.aborted) return false;
+    return await this.withAttachedTarget(
+      (t) => t.waitForPendingEligibilityUpdateSince?.(sequence, abortSignal)
+        ?? t.waitForPendingEligibilityUpdate?.(abortSignal)
+        ?? Promise.resolve(false),
       false,
     );
   }

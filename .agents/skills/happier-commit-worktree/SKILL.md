@@ -45,7 +45,7 @@ Build a resumable inventory grouped by package, domain, change kind, and likely 
 
 ## 3. Run reconnaissance before committing
 
-Use maximum useful parallelism where it shortens the critical path. Give each lane an exact, preferably disjoint path inventory and require:
+Use one integrated owner by default. Delegate only when the user requests it or a named independent boundary demonstrably shortens the critical path. A delegated boundary receives an exact, preferably disjoint path inventory and must return:
 
 - candidate groups with exact paths and any hunk-level splits;
 - the user or system behavior each group establishes;
@@ -60,21 +60,13 @@ Reconnaissance lanes do not stage or mutate Git unless explicitly assigned commi
 
 Follow the active subagent context policy. Default to no inherited transcript and provide a self-contained brief with exact scope, evidence, paths, checks, output, and stop conditions. Do not let lanes create ad hoc review files or use path "custody" as a substitute for checking current bytes and actual hunk collisions.
 
-Read [campaign-throughput.md](references/campaign-throughput.md) before orchestrating a large or continuing campaign. It defines rolling waves, confidence lanes, packet queues, parallel topology, validation reuse, progress gates, compaction anchors, and valid stopping conditions. Read [grouping-and-messages.md](references/grouping-and-messages.md) for the classification rubric, artifact policy, commit sizing, and message standard.
+Read [grouping-and-messages.md](references/grouping-and-messages.md) for the classification rubric, artifact policy, commit sizing, and message standard.
 
-## 4. Operate a rolling commit campaign
+## 4. Operate the campaign
 
-Keep the serial commit authority supplied with prepared work:
+Classify paths, prepare one coherent packet, run its deciding validation, bank it through the single commit owner, and immediately take the next dependency slice. Keep only the compact current packet in working memory. Do not create a rolling queue, confidence lanes, or automatic fan-out merely to keep workers busy.
 
-1. classify current paths into green, yellow, and red confidence lanes;
-2. prepare several coherent packets ahead, commonly 5-15 when scope permits;
-3. validate independent packets concurrently and drain ready packets through serial HEAD updates;
-4. re-snapshot after the wave and refresh only overlapping, newly landed, or invalidated paths;
-5. repeat while any commit-ready or safely investigable source work remains.
-
-Green packets proceed immediately. Yellow investigation and red exclusions must not idle unrelated green work. Maintain a compact in-memory queue containing each packet's intent, owner, exact paths/hunks, dependencies, message, validation, and confidence. If many valid paths remain but the ready queue is empty, reconnaissance has failed and must resume rather than ending the campaign.
-
-Parallelize reconnaissance, history/provenance checks, message preparation, and independent validation. Keep final packet adjudication, private-index creation, CAS HEAD updates, and shared-index synchronization under one serial authority by default. Parallel commit writers are exceptional: private indexes isolate staging but not history, so CAS retries and overlap recovery can cost more than they save.
+Independent reconnaissance or validation may run in parallel only when its boundary, output, and parent-visible value are named before dispatch. Keep final packet adjudication, private-index creation, CAS HEAD updates, and shared-index synchronization under one serial authority. Parallel commit writers are exceptional: private indexes isolate staging but not history, so CAS retries and overlap recovery can cost more than they save.
 
 ## 5. Form coherent change packets
 

@@ -8,7 +8,11 @@ import {
 import { SessionUsageLimitRecoveryOperationResultV1Schema } from '../sessionControl/sessionUsageLimitRecoveryOperationResultV1.js';
 import { SessionUsageLimitRecoveryResumePromptModeV1Schema } from '../sessionMetadata/sessionUsageLimitRecoveryV1.js';
 import { LEGACY_SKILL_CATALOG_ORIGINS_V1 } from './skillCatalogItemIdentityV1.js';
-import { SessionWorkStateStatusV1Schema, SessionWorkStateV1Schema } from './sessionWorkStateV1.js';
+import {
+  SessionWorkStateStatusReasonV1Schema,
+  SessionWorkStateStatusV1Schema,
+  SessionWorkStateV1Schema,
+} from './sessionWorkStateV1.js';
 
 type MetadataRecord = Record<string, unknown>;
 
@@ -51,22 +55,27 @@ const sessionGoalMutationHasField = (value: Readonly<{
   || Object.prototype.hasOwnProperty.call(value, 'tokenBudget')
 );
 
+const SessionGoalMutationFieldsV1Shape = {
+  objective: z.string().trim().min(1).max(4000).optional(),
+  status: SessionWorkStateStatusV1Schema.optional(),
+  tokenBudget: z.number().finite().positive().nullable().optional(),
+};
+
 const SessionGoalMutationFieldsV1Schema = z
-  .object({
-    objective: z.string().trim().min(1).max(4000).optional(),
-    status: SessionWorkStateStatusV1Schema.optional(),
-    tokenBudget: z.number().finite().positive().nullable().optional(),
-  })
+  .object(SessionGoalMutationFieldsV1Shape)
   .passthrough()
   .refine(sessionGoalMutationHasField, { message: 'At least one goal mutation field is required' });
 
 export const SessionGoalSetRequestV1Schema = SessionGoalMutationFieldsV1Schema;
 export type SessionGoalSetRequestV1 = z.infer<typeof SessionGoalSetRequestV1Schema>;
 
-export const SessionInitialGoalRequestV1Schema = SessionGoalSetRequestV1Schema.refine(
-  (value) => typeof value.objective === 'string' && value.objective.trim().length > 0,
-  { message: 'Initial goal requires an objective' },
-);
+export const SessionInitialGoalRequestV1Schema = z
+  .object({
+    ...SessionGoalMutationFieldsV1Shape,
+    objective: z.string().trim().min(1).max(4000),
+    statusReason: SessionWorkStateStatusReasonV1Schema.optional(),
+  })
+  .passthrough();
 export type SessionInitialGoalRequestV1 = z.infer<typeof SessionInitialGoalRequestV1Schema>;
 
 export const SessionGoalClearRequestV1Schema = z.object({}).passthrough();

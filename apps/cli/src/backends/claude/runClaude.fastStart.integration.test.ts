@@ -1636,6 +1636,66 @@ describe('runClaude fast-start', () => {
     }
   });
 
+  it('consumes fresh context before local fast-start attach', async () => {
+    vi.resetModules();
+    loopStarted = createDeferred<void>();
+    loopExit = createDeferred<number>();
+    lastLoopOpts = null;
+    autoSessionReady = true;
+    initResolved = false;
+    backendInitDelayMs = 200;
+    getOrCreateSessionSpy.mockImplementation(async () => ({ id: 'sess_fresh_attach', metadataVersion: 1 }));
+
+    const previousAttachFile = process.env.HAPPIER_SESSION_ATTACH_FILE;
+    const previousHome = process.env.HOME;
+    const previousUserProfile = process.env.USERPROFILE;
+    const previousFreshContext = process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE;
+    const homeDir = join(configuration.happyHomeDir, 'fresh-fast-start-home');
+    const attachBaseDir = join(homeDir, '.happier-attach');
+    await mkdir(attachBaseDir, { recursive: true });
+    const attachPath = join(attachBaseDir, 'fresh-fast-start-attach.json');
+    await writeFile(
+      attachPath,
+      JSON.stringify({
+        v: 1,
+        encryptionKeyBase64: Buffer.from(new Uint8Array(32).fill(7)).toString('base64'),
+        encryptionVariant: 'legacy',
+      }),
+      'utf8',
+    );
+    await chmod(attachPath, 0o600);
+    process.env.HOME = homeDir;
+    process.env.USERPROFILE = homeDir;
+    process.env.HAPPIER_SESSION_ATTACH_FILE = '~/.happier-attach/fresh-fast-start-attach.json';
+    process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE = '1';
+
+    try {
+      const { runClaude } = await import('./runClaude');
+      const freshRun = runClaude(createLegacyCredentials(), {
+        startedBy: 'terminal',
+        startingMode: 'local',
+        existingSessionId: 'sess_fresh_attach',
+        claudeArgs: ['--dangerously-skip-permissions'],
+      });
+
+      await expect(waitFor(loopStarted.promise, loopStartWaitMs)).resolves.toBeUndefined();
+      expect(process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE).toBeUndefined();
+
+      loopExit.resolve(0);
+      await freshRun;
+    } finally {
+      loopExit.resolve(0);
+      if (previousAttachFile === undefined) delete process.env.HAPPIER_SESSION_ATTACH_FILE;
+      else process.env.HAPPIER_SESSION_ATTACH_FILE = previousAttachFile;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
+      if (previousFreshContext === undefined) delete process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE;
+      else process.env.HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE = previousFreshContext;
+    }
+  });
+
   it('starts offline reconnection when create-session fails, then attaches once reconnected', async () => {
     vi.resetModules();
     loopStarted = createDeferred<void>();

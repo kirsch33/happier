@@ -15,6 +15,7 @@ import { cmdSessionUnarchive } from './unarchive';
 import { cmdSessionSetTitle } from './setTitle';
 import { cmdSessionSetPermissionMode } from './setPermissionMode';
 import { cmdSessionSetModel } from './setModel';
+import { cmdSessionResumeFresh, SESSION_RESUME_FRESH_USAGE } from './resumeFresh';
 import { wantsJson, printJsonEnvelope } from '@/cli/output/jsonEnvelope';
 import { cmdSessionRunGet } from './run/get';
 import { cmdSessionRunList, SESSION_RUN_LIST_USAGE } from './run/list';
@@ -45,6 +46,7 @@ function inferSessionKind(argv: readonly string[]): string {
   if (sub === 'set-title') return 'session_set_title';
   if (sub === 'set-permission-mode') return 'session_set_permission_mode';
   if (sub === 'set-model') return 'session_set_model';
+  if (sub === 'resume-fresh') return 'session_resume_fresh';
   if (sub === 'send') return 'session_send';
   if (sub === 'wait') return 'session_wait';
   if (sub === 'stop') return 'session_stop';
@@ -90,6 +92,7 @@ const SESSION_HELP_BY_COMMAND = {
   'set-title': 'happier session set-title <session-id-or-prefix-or-tag> <title> [--json]',
   'set-permission-mode': 'happier session set-permission-mode <session-id-or-prefix-or-tag> <mode> [--json]',
   'set-model': 'happier session set-model <session-id-or-prefix-or-tag> <model-id> [--json]',
+  'resume-fresh': SESSION_RESUME_FRESH_USAGE.replace('Usage: ', ''),
   archive: 'happier session archive <session-id-or-prefix-or-tag> [--json]',
   unarchive: 'happier session unarchive <session-id-or-prefix-or-tag> [--json]',
   'review start': 'happier session review start <session-id-or-prefix-or-tag> --engines <id1,id2> [--instructions <text>] [--json]',
@@ -214,6 +217,9 @@ export async function handleSessionCommand(
         return;
       case 'set-model':
         await cmdSessionSetModel(argv, { readCredentialsFn });
+        return;
+      case 'resume-fresh':
+        await cmdSessionResumeFresh(argv);
         return;
       case 'send':
         await cmdSessionSend(argv, { readCredentialsFn });

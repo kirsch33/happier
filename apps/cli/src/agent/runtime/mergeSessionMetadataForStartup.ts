@@ -301,7 +301,6 @@ export function mergeSessionMetadataForStartup(opts: {
                 'happyToolsDir',
                 'machineId',
                 'os',
-                'version',
                 'profileId',
                 'flavor',
             ];

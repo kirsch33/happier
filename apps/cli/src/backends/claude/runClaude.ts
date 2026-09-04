@@ -40,6 +40,7 @@ import { createSessionScanner } from '@/backends/claude/utils/sessionScanner';
 import type { TerminalRuntimeFlags } from '@/terminal/runtime/terminalRuntimeFlags';
 import { buildTerminalMetadataFromRuntimeFlags } from '@/terminal/runtime/terminalMetadata';
 import { persistTerminalAttachmentInfoIfNeeded, reportSessionToDaemonIfRunning, sendTerminalFallbackMessageIfNeeded } from '@/agent/runtime/startupSideEffects';
+import { consumeFreshProviderContextOnce } from '@/agent/runtime/freshProviderContext';
 import { applyStartupMetadataUpdateToSession, buildModelOverride, buildPermissionModeOverride } from '@/agent/runtime/startupMetadataUpdate';
 import { initializeRuntimeOverridesSynchronizer } from '@/agent/runtime/runtimeOverridesSynchronizer';
 import { createBaseSessionForAttach } from '@/agent/runtime/createBaseSessionForAttach';
@@ -305,6 +306,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         typeof options.existingSessionId === 'string' && options.existingSessionId.trim().length > 0
             ? options.existingSessionId.trim()
             : null;
+    // This process-local launch token must be consumed before choosing either startup branch.
+    const freshProviderContext = consumeFreshProviderContextOnce();
     const attachEnvPath =
         typeof process.env.HAPPIER_SESSION_ATTACH_FILE === 'string' && process.env.HAPPIER_SESSION_ATTACH_FILE.trim().length > 0
             ? process.env.HAPPIER_SESSION_ATTACH_FILE.trim()
@@ -326,7 +329,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     }
 
     if (shouldUseFastStart) {
-        await runClaudeLocalFastStart(credentials, options);
+        await runClaudeLocalFastStart(credentials, options, freshProviderContext);
         return;
     }
 
@@ -417,7 +420,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Note: connectionState.notifyOffline() was already called by api.ts with error details
             if (!response) {
             if (initialClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true) {
-                await runClaudeLocalFastStart(credentials, options);
+                await runClaudeLocalFastStart(credentials, options, freshProviderContext);
                 return;
                 }
 
@@ -562,6 +565,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     modelUpdatedAt: initialModelUpdatedAt,
                 }),
                 attachMetadataIdentityPolicy,
+                ...(freshProviderContext ? { metadataKeysToUnsetOnAttach: ['claudeSessionId'] } : {}),
                 mode: 'attach',
             });
         }
@@ -1453,7 +1457,11 @@ function cleanupClaudeSessionBestEffort(session: unknown): void {
     }
 }
 
-async function runClaudeLocalFastStart(credentials: Credentials, options: StartOptions): Promise<void> {
+async function runClaudeLocalFastStart(
+    credentials: Credentials,
+    options: StartOptions,
+    freshProviderContext = false,
+): Promise<void> {
     const workingDirectory = resolveRequestedSessionDirectory();
     const sessionTag = randomUUID();
 
@@ -2014,6 +2022,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                         state,
                         existingSessionId,
                         attachMetadataIdentityPolicy,
+                        ...(freshProviderContext ? { metadataKeysToUnsetOnAttach: ['claudeSessionId'] } : {}),
                             uiLogPrefix: '[claude]',
                             offlineNotify: (message: string) => {
                                 artifacts.deferredSession.sendSessionEvent({ type: 'message', message });

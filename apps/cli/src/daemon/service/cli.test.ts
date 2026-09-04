@@ -164,6 +164,10 @@ describe('runDaemonServiceCliCommand', () => {
     vi.unmock('./resolveDaemonServiceDiscoveryTargets');
     vi.unmock('./resolveLinuxSystemUserPaths');
     vi.unmock('./discoverInstalledDaemonServiceEntries');
+    vi.doUnmock('./resolveDaemonServiceInstallRuntimeTarget');
+    vi.unmock('./resolveDaemonServiceInstallRuntimeTarget');
+    vi.doUnmock('@/daemon/ownership/evaluateCurrentDaemonOwner');
+    vi.unmock('@/daemon/ownership/evaluateCurrentDaemonOwner');
     vi.resetModules();
   });
 
@@ -822,6 +826,414 @@ describe('runDaemonServiceCliCommand', () => {
 
       await expect(runDaemonServiceCliCommand({ argv: ['install', '--yes'] })).resolves.toBeUndefined();
       expect(restartObserved).toBe(true);
+    });
+  });
+
+  it('prepares a Linux service without starting it', async () => {
+    await withTempDir('happier-service-prepare-only-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const systemctlCalls: string[][] = [];
+      let restarted = false;
+      let expectedServiceLabel = '';
+      let writeDaemonStateImpl: ((state: DaemonLocallyPersistedState) => void) | null = null;
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_TIMEOUT_MS: '120',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_POLL_MS: '10',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_STABLE_MS: '20',
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command, args = []) => {
+        if (command !== 'systemctl') {
+          return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+        }
+        systemctlCalls.push([...args]);
+        if (args.includes('restart')) {
+          restarted = true;
+          writeDaemonStateImpl?.({
+            pid: process.pid,
+            httpPort: 43160,
+            startedAt: Date.now(),
+            startedWithCliVersion: '0.0.0',
+            startedWithPublicReleaseChannel: 'stable',
+            startupSource: 'background-service',
+            serviceLabel: expectedServiceLabel,
+          });
+          return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+        }
+        if (args.includes('is-active')) {
+          return restarted
+            ? { status: 0, stdout: Buffer.from('active\n'), stderr: Buffer.from('') }
+            : { status: 3, stdout: Buffer.from('inactive\n'), stderr: Buffer.from('') };
+        }
+        if (args.includes('is-enabled')) {
+          return { status: 0, stdout: Buffer.from('enabled\n'), stderr: Buffer.from('') };
+        }
+        return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+      });
+      vi.doMock('./commandExistsInPath', () => ({ commandExistsInPath: vi.fn(() => true) }));
+
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { writeDaemonState }] = await Promise.all([
+        loadCliModule(),
+        import('@/persistence'),
+      ]);
+      writeDaemonStateImpl = writeDaemonState;
+      expectedServiceLabel = resolveDaemonServicePaths(resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' })).label;
+
+      for (const attempt of [1, 2]) {
+        const output = captureStdoutJsonOutput<{ ok: boolean; platform: string; prepared: boolean; started: boolean }>();
+        try {
+          await runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--yes', '--replace-existing=ring', '--json'] });
+          expect(output.json()).toEqual({ ok: true, platform: 'linux', prepared: true, started: false });
+        } finally {
+          output.restore();
+        }
+      }
+
+      expect(restarted).toBe(false);
+      expect(systemctlCalls.filter((args) => args.join(' ') === '--user daemon-reload')).toHaveLength(2);
+      expect(systemctlCalls.filter((args) => args.join(' ') === '--user enable happier-daemon.default.service')).toHaveLength(2);
+      expect(systemctlCalls.some((args) => args.includes('restart') || args.includes('start'))).toBe(false);
+    });
+  });
+
+  it('rejects unsupported prepare-only combinations before service installation', async () => {
+    const { runDaemonServiceCliCommand } = await loadCliModule();
+
+    await expect(runDaemonServiceCliCommand({ argv: ['status', '--prepare-only'] })).rejects.toThrow(/only valid with service install/);
+    await expect(runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--takeover'] })).rejects.toThrow(/cannot be combined with --takeover/);
+    await expect(runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--local-relay'] })).rejects.toThrow(/cannot be combined with --local-relay/);
+    await expect(runDaemonServiceCliCommand({ argv: ['install', '--no-start'] })).rejects.toThrow(/use --prepare-only/);
+
+    envScope.patch({
+      HAPPIER_DAEMON_SERVICE_PLATFORM: 'darwin',
+      HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: '/tmp',
+      HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: '/tmp/happier',
+    });
+    await expect(runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--dry-run'] })).rejects.toThrow(/only supported on Linux/);
+
+    envScope.patch({
+      HAPPIER_DAEMON_SERVICE_PLATFORM: 'win32',
+      HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: 'C:\\Users\\test',
+      HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: 'C:\\Users\\test\\.happier',
+    });
+    await expect(runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--dry-run'] })).rejects.toThrow(/only supported on Linux/);
+  });
+
+  it('does not resolve a runtime before rejecting an active prepare-only target unit', async () => {
+    await withTempDir('happier-service-prepare-active-unit-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const resolveRuntimeTargetMock = vi.fn(async () => ({ nodePath: '/managed/node', entryPath: '/managed/index.mjs' }));
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command, args = []) => command === 'systemctl' && args.includes('is-active')
+        ? { status: 0, stdout: Buffer.from('active\n'), stderr: Buffer.from('') }
+        : { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') });
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: resolveRuntimeTargetMock,
+      }));
+
+      const { runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths } = await loadCliModule();
+      const paths = resolveDaemonServicePaths(resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' }));
+      const output = captureStdoutJsonOutput<{ ok: boolean; error: string }>();
+      const previousExitCode = process.exitCode;
+      process.exitCode = undefined;
+      try {
+        await runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--yes', '--json'] });
+        expect(output.json()).toEqual(expect.objectContaining({ ok: false, error: 'service_not_stopped' }));
+        expect(process.exitCode).toBe(1);
+      } finally {
+        output.restore();
+        process.exitCode = previousExitCode;
+      }
+      expect(resolveRuntimeTargetMock).not.toHaveBeenCalled();
+      expect(existsSync(paths.installedPath)).toBe(false);
+    });
+  });
+
+  it('marks a prepare-only conflict receipt as a command failure', async () => {
+    await withTempDir('happier-service-prepare-conflict-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_CHANNEL: 'preview',
+        HAPPIER_DAEMON_SERVICE_NODE_PATH: '/usr/local/bin/happier',
+        HAPPIER_DAEMON_SERVICE_ENTRY_PATH: '',
+        PATH: '/usr/bin',
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command, args = []) => command === 'systemctl' && args.includes('is-active')
+        ? { status: 3, stdout: Buffer.from('inactive\n'), stderr: Buffer.from('') }
+        : { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') });
+
+      const { runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths } = await loadCliModule();
+      const stableRuntime = resolveDaemonServiceCliRuntimeFromEnv({
+        channel: 'stable',
+        targetMode: 'default-following',
+        processEnv: process.env,
+      });
+      const stablePaths = resolveDaemonServicePaths(stableRuntime);
+      mkdirSync(dirname(stablePaths.installedPath), { recursive: true });
+      writeFileSync(
+        stablePaths.installedPath,
+        renderSystemdServiceUnit({
+          description: 'Happier Daemon',
+          execStart: ['/usr/local/bin/happier', 'daemon', 'start-sync'],
+          env: {
+            HAPPIER_DAEMON_STARTUP_SOURCE: 'background-service',
+            HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'default-following',
+            HAPPIER_HOME_DIR: happierHomeDir,
+            HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
+          },
+          wantedBy: 'default.target',
+        }),
+        'utf-8',
+      );
+      const output = captureStdoutJsonOutput<{ ok: boolean; error: string; conflicts: Array<{ label: string }> }>();
+      const previousExitCode = process.exitCode;
+      process.exitCode = undefined;
+      try {
+        await runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--json'] });
+        expect(output.json()).toEqual(expect.objectContaining({
+          ok: false,
+          error: 'daemon_service_conflict',
+          conflicts: [expect.objectContaining({ label: 'happier-daemon.default' })],
+        }));
+        expect(process.exitCode).toBe(1);
+      } finally {
+        output.restore();
+        process.exitCode = previousExitCode;
+      }
+    });
+  });
+
+  it('marks a failed prepare-only post-verification receipt as a command failure', async () => {
+    await withTempDir('happier-service-prepare-verification-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      let activeChecks = 0;
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_NODE_PATH: '/managed/happier',
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command, args = []) => {
+        if (command === 'systemctl' && args.includes('is-active')) {
+          activeChecks += 1;
+          return activeChecks === 1
+            ? { status: 3, stdout: Buffer.from('inactive\n'), stderr: Buffer.from('') }
+            : { status: 0, stdout: Buffer.from('active\n'), stderr: Buffer.from('') };
+        }
+        if (command === 'systemctl' && args.includes('is-enabled')) {
+          return { status: 0, stdout: Buffer.from('enabled\n'), stderr: Buffer.from('') };
+        }
+        return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+      });
+      vi.doMock('./commandExistsInPath', () => ({ commandExistsInPath: vi.fn(() => true) }));
+
+      const { runDaemonServiceCliCommand } = await loadCliModule();
+      const output = captureStdoutJsonOutput<{ ok: boolean; error: string }>();
+      const previousExitCode = process.exitCode;
+      process.exitCode = undefined;
+      try {
+        await runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--yes', '--json'] });
+        expect(output.json()).toEqual(expect.objectContaining({ ok: false, error: 'prepare_verification_failed' }));
+        expect(process.exitCode).toBe(1);
+      } finally {
+        output.restore();
+        process.exitCode = previousExitCode;
+      }
+    });
+  });
+
+  it('rejects system-mode prepare-only before install, runtime, or ownership work', async () => {
+    const resolveRuntimeTargetMock = vi.fn(async () => ({ nodePath: '/managed/node', entryPath: '/managed/index.mjs' }));
+    const evaluateCurrentDaemonOwnerMock = vi.fn(async () => ({ kind: 'none' as const }));
+    const systemctlCalls: string[][] = [];
+    envScope.patch({
+      HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+      HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: '/tmp',
+      HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: '/tmp/happier',
+    });
+    vi.resetModules();
+    doMockChildProcessSpawnSync((command, args = []) => {
+      if (command === 'systemctl') systemctlCalls.push([...args]);
+      return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+    });
+    vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+      resolveDaemonServiceInstallRuntimeTarget: resolveRuntimeTargetMock,
+    }));
+    vi.doMock('@/daemon/ownership/evaluateCurrentDaemonOwner', () => ({
+      evaluateCurrentDaemonOwner: evaluateCurrentDaemonOwnerMock,
+    }));
+
+    const { runDaemonServiceCliCommand } = await loadCliModule();
+    await expect(runDaemonServiceCliCommand({
+      argv: ['install', '--prepare-only', '--mode', 'system', '--system-user', 'happier', '--json'],
+    })).rejects.toThrow(/only supported in user mode/);
+    expect(resolveRuntimeTargetMock).not.toHaveBeenCalled();
+    expect(evaluateCurrentDaemonOwnerMock).not.toHaveBeenCalled();
+    expect(systemctlCalls).toEqual([]);
+  });
+
+  it('does not resolve a runtime before rejecting a prepare-only daemon owner', async () => {
+    await withTempDir('happier-service-prepare-owner-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const resolveRuntimeTargetMock = vi.fn(async () => ({ nodePath: '/managed/node', entryPath: '/managed/index.mjs' }));
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+      });
+      vi.resetModules();
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: resolveRuntimeTargetMock,
+      }));
+
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { writeDaemonState }] = await Promise.all([
+        loadCliModule(),
+        import('@/persistence'),
+      ]);
+      const paths = resolveDaemonServicePaths(resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' }));
+      writeDaemonState({
+        pid: process.pid,
+        httpPort: 43161,
+        startedAt: Date.now(),
+        startedWithCliVersion: '0.0.0',
+        startedWithPublicReleaseChannel: 'stable',
+        startupSource: 'manual',
+      });
+      const output = captureStdoutJsonOutput<{ ok: boolean; error: string }>();
+      try {
+        await runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--yes', '--json'] });
+        expect(output.json()).toEqual(expect.objectContaining({ ok: false, error: 'service_not_stopped' }));
+      } finally {
+        output.restore();
+      }
+      expect(resolveRuntimeTargetMock).not.toHaveBeenCalled();
+      expect(existsSync(paths.installedPath)).toBe(false);
+    });
+  });
+
+  it('does not resolve a runtime after an ambiguous prepare-only service-state query', async () => {
+    await withTempDir('happier-service-prepare-ambiguous-state-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const resolveRuntimeTargetMock = vi.fn(async () => ({ nodePath: '/managed/node', entryPath: '/managed/index.mjs' }));
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command, args = []) => command === 'systemctl' && args.includes('is-active')
+        ? { status: 1, stdout: Buffer.from(''), stderr: Buffer.from('Failed to connect to bus') }
+        : { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') });
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: resolveRuntimeTargetMock,
+      }));
+
+      const { runDaemonServiceCliCommand } = await loadCliModule();
+      const output = captureStdoutJsonOutput<{ ok: boolean; error: string }>();
+      try {
+        await runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--yes', '--json'] });
+        expect(output.json()).toEqual(expect.objectContaining({ ok: false, error: 'service_not_stopped' }));
+      } finally {
+        output.restore();
+      }
+      expect(resolveRuntimeTargetMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('uses non-bootstrap runtime resolution for prepare-only dry-runs', async () => {
+    await withTempDir('happier-service-prepare-dry-run-runtime-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const resolveRuntimeTargetMock = vi.fn(async (options: { allowBootstrap?: boolean }) => {
+        if (options.allowBootstrap === false) {
+          throw new ReferenceError('Daemon service runtime bootstrap is disabled for this resolution');
+        }
+        throw new Error('prepare-only dry-run unexpectedly allowed bootstrap');
+      });
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command, args = []) => command === 'systemctl' && args.includes('is-active')
+        ? { status: 3, stdout: Buffer.from('inactive\n'), stderr: Buffer.from('') }
+        : { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') });
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: resolveRuntimeTargetMock,
+      }));
+
+      const { runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths } = await loadCliModule();
+      const paths = resolveDaemonServicePaths(resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' }));
+      await expect(runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--dry-run', '--json'] })).rejects.toThrow(/bootstrap is disabled/);
+      expect(resolveRuntimeTargetMock).toHaveBeenCalledWith(expect.objectContaining({ allowBootstrap: false }));
+      expect(existsSync(paths.installedPath)).toBe(false);
+    });
+  });
+
+  it('returns an inactive no-start plan for a prepare-only dry-run without writing the unit', async () => {
+    await withTempDir('happier-service-prepare-dry-run-plan-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const resolveRuntimeTargetMock = vi.fn(async () => ({ nodePath: '/managed/node', entryPath: '/managed/index.mjs' }));
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command, args = []) => command === 'systemctl' && args.includes('is-active')
+        ? { status: 3, stdout: Buffer.from('inactive\n'), stderr: Buffer.from('') }
+        : { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') });
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: resolveRuntimeTargetMock,
+      }));
+
+      const { runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths } = await loadCliModule();
+      const paths = resolveDaemonServicePaths(resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' }));
+      const output = captureStdoutJsonOutput<{
+        ok: boolean;
+        prepareOnly: boolean;
+        dryRun: boolean;
+        wouldStart: boolean;
+        stoppedAndInactive: boolean;
+        plan: { commands: Array<{ args: string[] }> };
+      }>();
+      try {
+        await runDaemonServiceCliCommand({ argv: ['install', '--prepare-only', '--dry-run', '--json'] });
+        const payload = output.json();
+        expect(payload).toEqual(expect.objectContaining({
+          ok: true,
+          prepareOnly: true,
+          dryRun: true,
+          wouldStart: false,
+          stoppedAndInactive: true,
+        }));
+        expect(payload.plan.commands.some((command) => command.args.includes('restart') || command.args.includes('start'))).toBe(false);
+      } finally {
+        output.restore();
+      }
+      expect(resolveRuntimeTargetMock).toHaveBeenCalledWith(expect.objectContaining({ allowBootstrap: false }));
+      expect(existsSync(paths.installedPath)).toBe(false);
     });
   });
 
@@ -2114,6 +2526,203 @@ describe('runDaemonServiceCliCommand', () => {
       } finally {
         output.restore();
       }
+    });
+  });
+
+  it.each(['start', 'restart'] as const)('keeps %s on the managed default shim after runtime re-exec', async (action) => {
+    await withTempDir(`happier-service-${action}-managed-shim-`, async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const managedShimPath = join(happierHomeDir, 'bin', 'happier');
+      const launcherRuntimePath = join(happierHomeDir, 'tools', 'js-runtime', 'current', 'bin', 'happier-js-runtime');
+      const launcherEntryPath = join(happierHomeDir, 'cli-dev', 'current', 'package-dist', 'index.mjs');
+      let expectedServiceLabel = '';
+      let expectedCliVersion = '';
+      let writeDaemonStateImpl: ((state: DaemonLocallyPersistedState) => void) | null = null;
+
+      mkdirSync(dirname(managedShimPath), { recursive: true });
+      writeFileSync(managedShimPath, '#!/bin/sh\n', 'utf-8');
+      writeFileSync(join(happierHomeDir, 'default-cli-release-channel.json'), '{"releaseChannel":"dev"}\n', 'utf-8');
+
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'default-following',
+        HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+        HAPPIER_DAEMON_SERVICE_NODE_PATH: launcherRuntimePath,
+        HAPPIER_DAEMON_SERVICE_ENTRY_PATH: launcherEntryPath,
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_TIMEOUT_MS: '120',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_ACTIVE_GRACE_TIMEOUT_MS: '0',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_POLL_MS: '10',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_STABLE_MS: '20',
+      });
+      vi.resetModules();
+      doMockChildProcessSpawnSync((command: string, args: readonly string[] = []) => {
+        if (command === 'systemctl' && (args.includes('start') || args.includes('restart'))) {
+          writeDaemonStateImpl?.({
+            pid: process.pid,
+            httpPort: 43138,
+            startedAt: Date.now(),
+            startedWithCliVersion: expectedCliVersion,
+            startedWithPublicReleaseChannel: 'dev',
+            startupSource: 'background-service',
+            serviceLabel: expectedServiceLabel,
+            runtimeId: `runtime-managed-shim-${action}`,
+          });
+        }
+        if (command === 'systemctl' && args.includes('is-active')) {
+          return { status: 0, stdout: Buffer.from('active'), stderr: Buffer.from('') };
+        }
+        return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+      });
+      vi.doMock('./commandExistsInPath', () => ({
+        commandExistsInPath: vi.fn(() => true),
+      }));
+
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
+        loadCliModule(),
+        import('@/persistence'),
+        import('@/configuration'),
+      ]);
+      writeDaemonStateImpl = writeDaemonState;
+      expectedCliVersion = configuration.currentCliVersion;
+
+      const runtime = resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' });
+      const paths = resolveDaemonServicePaths(runtime);
+      expectedServiceLabel = paths.label;
+      const expectedPlan = planDaemonServiceInstall({
+        platform: runtime.platform,
+        mode: 'user',
+        channel: runtime.channel,
+        targetMode: runtime.targetMode,
+        instanceId: runtime.instanceId,
+        activeServerId: runtime.activeServerId,
+        uid: runtime.uid ?? undefined,
+        userHomeDir: runtime.userHomeDir,
+        happierHomeDir: runtime.happierHomeDir,
+        serverUrl: runtime.serverUrl,
+        webappUrl: runtime.webappUrl,
+        publicServerUrl: runtime.publicServerUrl,
+        nodePath: managedShimPath,
+        entryPath: '',
+      });
+      const expectedContents = expectedPlan.files[0]?.content ?? '';
+      mkdirSync(dirname(paths.installedPath), { recursive: true });
+      writeFileSync(paths.installedPath, expectedContents, 'utf-8');
+      await writeCredentialsLegacy({ secret: new Uint8Array(32).fill(1), token: 'token-managed-shim-restart' });
+      clearDaemonState();
+
+      const output = captureStdoutJsonOutput<{ ok: boolean; platform: string }>();
+      try {
+        await runDaemonServiceCliCommand({ argv: [action, '--json'] });
+        expect(output.json().ok).toBe(true);
+      } finally {
+        output.restore();
+      }
+
+      expect(managedShimPath).not.toBe(process.execPath);
+      expect(readFileSync(paths.installedPath, 'utf-8')).toBe(expectedContents);
+      expect(readFileSync(paths.installedPath, 'utf-8')).toContain(`ExecStart=${managedShimPath} daemon start-sync --takeover`);
+      expect(readFileSync(paths.installedPath, 'utf-8')).not.toContain(launcherEntryPath);
+      expect(configuration.currentCliVersion).toBeTruthy();
+    });
+  });
+
+  it('preserves the installed definition when the lifecycle drift runtime cannot be resolved', async () => {
+    await withTempDir('happier-service-restart-unresolved-drift-runtime-', async (homeDir) => {
+      const happierHomeDir = `${homeDir}/.happier`;
+      const managedShimPath = join(happierHomeDir, 'bin', 'happier');
+      const resolveInstallRuntimeTargetMock = vi.fn(async () => {
+        throw new ReferenceError('managed default shim is unavailable');
+      });
+      let expectedServiceLabel = '';
+      let expectedCliVersion = '';
+      let writeDaemonStateImpl: ((state: DaemonLocallyPersistedState) => void) | null = null;
+
+      envScope.patch({
+        HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_PLATFORM: 'linux',
+        HAPPIER_DAEMON_SERVICE_USER_HOME_DIR: homeDir,
+        HAPPIER_DAEMON_SERVICE_HAPPIER_HOME_DIR: happierHomeDir,
+        HAPPIER_DAEMON_SERVICE_TARGET_MODE: 'default-following',
+        HAPPIER_PUBLIC_RELEASE_CHANNEL: 'dev',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_TIMEOUT_MS: '120',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_ACTIVE_GRACE_TIMEOUT_MS: '0',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_WAIT_POLL_MS: '10',
+        HAPPIER_DAEMON_SERVICE_OWNERSHIP_STABLE_MS: '20',
+      });
+      vi.resetModules();
+      vi.doMock('./resolveDaemonServiceInstallRuntimeTarget', () => ({
+        resolveDaemonServiceInstallRuntimeTarget: resolveInstallRuntimeTargetMock,
+      }));
+      doMockChildProcessSpawnSync((command: string, args: readonly string[] = []) => {
+        if (command === 'systemctl' && args.includes('restart')) {
+          writeDaemonStateImpl?.({
+            pid: process.pid,
+            httpPort: 43138,
+            startedAt: Date.now(),
+            startedWithCliVersion: expectedCliVersion,
+            startedWithPublicReleaseChannel: 'dev',
+            startupSource: 'background-service',
+            serviceLabel: expectedServiceLabel,
+            runtimeId: 'runtime-unresolved-drift-restart',
+          });
+        }
+        if (command === 'systemctl' && args.includes('is-active')) {
+          return { status: 0, stdout: Buffer.from('active'), stderr: Buffer.from('') };
+        }
+        return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') };
+      });
+      vi.doMock('./commandExistsInPath', () => ({
+        commandExistsInPath: vi.fn(() => true),
+      }));
+
+      const [{ runDaemonServiceCliCommand, resolveDaemonServiceCliRuntimeFromEnv, resolveDaemonServicePaths }, { clearDaemonStateForTests: clearDaemonState, writeCredentialsLegacy, writeDaemonState }, { configuration }] = await Promise.all([
+        loadCliModule(),
+        import('@/persistence'),
+        import('@/configuration'),
+      ]);
+      writeDaemonStateImpl = writeDaemonState;
+      expectedCliVersion = configuration.currentCliVersion;
+
+      const runtime = resolveDaemonServiceCliRuntimeFromEnv({ targetMode: 'default-following' });
+      const paths = resolveDaemonServicePaths(runtime);
+      expectedServiceLabel = paths.label;
+      const installedContents = planDaemonServiceInstall({
+        platform: runtime.platform,
+        mode: 'user',
+        channel: runtime.channel,
+        targetMode: runtime.targetMode,
+        instanceId: runtime.instanceId,
+        activeServerId: runtime.activeServerId,
+        uid: runtime.uid ?? undefined,
+        userHomeDir: runtime.userHomeDir,
+        happierHomeDir: runtime.happierHomeDir,
+        serverUrl: runtime.serverUrl,
+        webappUrl: runtime.webappUrl,
+        publicServerUrl: runtime.publicServerUrl,
+        nodePath: managedShimPath,
+        entryPath: '',
+      }).files[0]?.content ?? '';
+      mkdirSync(dirname(paths.installedPath), { recursive: true });
+      writeFileSync(paths.installedPath, installedContents, 'utf-8');
+      await writeCredentialsLegacy({ secret: new Uint8Array(32).fill(1), token: 'token-unresolved-drift-restart' });
+      clearDaemonState();
+
+      const stderr = captureStderr();
+      const output = captureStdoutJsonOutput<{ ok: boolean; platform: string }>();
+      try {
+        await runDaemonServiceCliCommand({ argv: ['restart', '--json'] });
+        expect(output.json().ok).toBe(true);
+        expect(stderr.text()).toContain('Drift check skipped: managed default shim is unavailable');
+      } finally {
+        output.restore();
+        stderr.restore();
+      }
+
+      expect(readFileSync(paths.installedPath, 'utf-8')).toBe(installedContents);
+      expect(readFileSync(paths.installedPath, 'utf-8')).toContain(`ExecStart=${managedShimPath} daemon start-sync --takeover`);
     });
   });
 

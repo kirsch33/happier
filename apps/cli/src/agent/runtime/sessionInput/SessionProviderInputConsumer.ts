@@ -46,6 +46,8 @@ export interface SessionProviderInputConsumerSession {
     reason: 'unknown';
   }>) => Promise<boolean>) | undefined;
   waitForPendingEligibilityUpdate: (abortSignal?: AbortSignal) => Promise<boolean>;
+  readPendingEligibilityWakeSequence?: (() => number | null) | undefined;
+  waitForPendingEligibilityUpdateSince?: ((sequence: number, abortSignal?: AbortSignal) => Promise<boolean>) | undefined;
   readRuntimeActivitySnapshotTail?: (() => RuntimeActivitySnapshotTail) | undefined;
   waitForRuntimeActivitySnapshotTailChange?: ((sequence: number, signal?: AbortSignal) => Promise<boolean>) | undefined;
 }
@@ -55,6 +57,7 @@ export interface SessionProviderInputConsumerOptions<Mode, Message> {
   session: SessionProviderInputConsumerSession;
   onMetadataUpdate?: ((abortSignal: AbortSignal) => void | Promise<void>) | null | undefined;
   reconcileWhenEmpty?: PendingMaterializationReconcileWhenEmpty | undefined;
+  initialReconcileWhenEmpty?: PendingMaterializationReconcileWhenEmpty | undefined;
   activeTurnSteerability?: PendingForegroundSteerability | undefined;
   resolveActiveTurnSteerability?: (() => PendingForegroundSteerability) | undefined;
   pendingQueueDeliveryTiming?: PendingQueueDeliveryTiming | undefined;
@@ -221,6 +224,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
   let activeProviderInputDispatches = 0;
   let activePendingMaterializationRequests = 0;
   let providerInputBatchReserved = false;
+  let initialReconcileWhenEmpty = opts.initialReconcileWhenEmpty;
   const activeProviderInputAdmissionWorkDrainWaiters = new Set<() => void>();
 
   const notifyProviderInputAdmissionWorkDrained = (): void => {
@@ -279,6 +283,15 @@ export function createSessionProviderInputConsumer<Mode, Message>(
       }
     },
     waitForPendingEligibilityUpdate: (abortSignal) => opts.session.waitForPendingEligibilityUpdate(abortSignal),
+    ...(opts.session.readPendingEligibilityWakeSequence
+      ? { readPendingEligibilityWakeSequence: () => opts.session.readPendingEligibilityWakeSequence!() }
+      : {}),
+    ...(opts.session.waitForPendingEligibilityUpdateSince
+      ? {
+          waitForPendingEligibilityUpdateSince: (sequence, abortSignal) =>
+            opts.session.waitForPendingEligibilityUpdateSince!(sequence, abortSignal),
+        }
+      : {}),
     ...(opts.session.readRuntimeActivitySnapshotTail
       ? { readRuntimeActivitySnapshotTail: () => opts.session.readRuntimeActivitySnapshotTail!() }
       : {}),
@@ -410,6 +423,11 @@ export function createSessionProviderInputConsumer<Mode, Message>(
           session: admissionTrackedSession,
           abortSignal: waitOpts.abortSignal,
           isProviderInputAdmissionOpen: () => providerInputAdmissionOpen,
+          consumeInitialReconcileWhenEmpty: () => {
+            const value = initialReconcileWhenEmpty;
+            initialReconcileWhenEmpty = undefined;
+            return value;
+          },
         });
         if (
           batch?.pendingProviderAction !== undefined
@@ -429,6 +447,8 @@ export function createSessionProviderInputConsumer<Mode, Message>(
       await pumpPendingWhileActive({
         ...pumpOpts,
         waitForPendingEligibilityUpdate: admissionTrackedSession.waitForPendingEligibilityUpdate,
+        readPendingEligibilityWakeSequence: admissionTrackedSession.readPendingEligibilityWakeSequence,
+        waitForPendingEligibilityUpdateSince: admissionTrackedSession.waitForPendingEligibilityUpdateSince,
         drainPending,
       });
     },
@@ -438,19 +458,39 @@ export function createSessionProviderInputConsumer<Mode, Message>(
 async function pumpPendingWhileActive(
   opts: ActiveTurnPendingPumpOptions & Readonly<{
     waitForPendingEligibilityUpdate: SessionProviderInputConsumerSession['waitForPendingEligibilityUpdate'];
+    readPendingEligibilityWakeSequence: SessionProviderInputConsumerSession['readPendingEligibilityWakeSequence'];
+    waitForPendingEligibilityUpdateSince: SessionProviderInputConsumerSession['waitForPendingEligibilityUpdateSince'];
     drainPending: (drainOpts?: DrainPendingOptions) => Promise<DrainPendingResult>;
   }>,
 ): Promise<void> {
+  let timedMaterializationRejoinConsumed = false;
+  let previousPassWakeSequence = opts.readPendingEligibilityWakeSequence?.() ?? null;
+
   while (!opts.abortSignal.aborted && (opts.shouldContinue?.() ?? true)) {
+    const passWakeSequence = opts.readPendingEligibilityWakeSequence?.() ?? null;
+    if (
+      previousPassWakeSequence !== null
+      && passWakeSequence !== null
+      && passWakeSequence !== previousPassWakeSequence
+    ) {
+      timedMaterializationRejoinConsumed = false;
+    }
+    previousPassWakeSequence = passWakeSequence;
     const wakeController = new AbortController();
     const onAbort = () => wakeController.abort(opts.abortSignal.reason);
     opts.abortSignal.addEventListener('abort', onAbort, { once: true });
     if (opts.abortSignal.aborted) wakeController.abort(opts.abortSignal.reason);
 
     let passDirty = false;
-    const armedWake = opts.waitForPendingEligibilityUpdate(wakeController.signal).then(
+    const armedWakeSource = passWakeSequence !== null && opts.waitForPendingEligibilityUpdateSince
+      ? opts.waitForPendingEligibilityUpdateSince(passWakeSequence, wakeController.signal)
+      : opts.waitForPendingEligibilityUpdate(wakeController.signal);
+    const armedWake = armedWakeSource.then(
       (updated) => {
-        if (updated) passDirty = true;
+        if (updated) {
+          passDirty = true;
+          timedMaterializationRejoinConsumed = false;
+        }
         return updated;
       },
       () => false,
@@ -467,12 +507,40 @@ async function pumpPendingWhileActive(
         || result.stoppedReason === 'aborted'
         || result.stoppedReason === 'auth_failure'
       ) return;
-      if (passDirty) continue;
+      if (passDirty) {
+        timedMaterializationRejoinConsumed = false;
+        continue;
+      }
+      if (
+        result.stoppedReason === 'error'
+        && result.retryAfterMs !== undefined
+        && !timedMaterializationRejoinConsumed
+      ) {
+        timedMaterializationRejoinConsumed = true;
+        const retryBackoff = waitForSessionMetadataRetryBackoff({
+          abortSignal: wakeController.signal,
+          backoffMs: result.retryAfterMs,
+        });
+        const retryOrWake = await Promise.race([
+          armedWake.then((updated) => updated
+            ? { kind: 'wake' as const }
+            : { kind: 'unavailable' as const }),
+          retryBackoff.then(() => ({ kind: 'retry' as const })),
+        ]);
+        if (opts.abortSignal.aborted || !(opts.shouldContinue?.() ?? true)) return;
+        if (passDirty || retryOrWake.kind === 'wake') {
+          timedMaterializationRejoinConsumed = false;
+        } else if (retryOrWake.kind === 'unavailable') {
+          await retryBackoff;
+        }
+        continue;
+      }
       const didWake = await armedWake || (
         !opts.abortSignal.aborted
         && await opts.waitForPendingEligibilityUpdate(opts.abortSignal).catch(() => false)
       );
       if (!didWake) return;
+      timedMaterializationRejoinConsumed = false;
     } finally {
       opts.abortSignal.removeEventListener('abort', onAbort);
       wakeController.abort('active-turn-pending-pass-complete');
@@ -509,6 +577,7 @@ async function waitForNextInput<Mode, Message>(
   opts: SessionProviderInputConsumerOptions<Mode, Message> & {
     abortSignal: AbortSignal;
     isProviderInputAdmissionOpen: () => boolean;
+    consumeInitialReconcileWhenEmpty: () => PendingMaterializationReconcileWhenEmpty | undefined;
   },
 ): Promise<MessageBatch<Mode, Message> | null> {
   const metadataWaitRetryBackoffMs = opts.metadataWaitRetryBackoffMs ?? DEFAULT_SESSION_METADATA_WAIT_RETRY_BACKOFF_MS;
@@ -547,7 +616,11 @@ async function waitForNextInput<Mode, Message>(
       return existingBatch;
     }
 
-    const materializationRetryAfterMs = await materializePendingMessage(opts);
+    const initialReconcileWhenEmpty = opts.consumeInitialReconcileWhenEmpty();
+    const materializationRetryAfterMs = await materializePendingMessage({
+      ...opts,
+      reconcileWhenEmpty: initialReconcileWhenEmpty ?? opts.reconcileWhenEmpty,
+    });
     if (!opts.isProviderInputAdmissionOpen()) return null;
 
     const materializedBatch = await collectQueuedBatch(opts.messageQueue, opts.abortSignal);
@@ -765,11 +838,15 @@ async function drainPendingMessages(
         opts.session,
         opts,
       );
-      if (result === 'materialized') {
+      if (result.type === 'materialized') {
         materialized += 1;
         continue;
       }
-      return { materialized, stoppedReason: result };
+      return {
+        materialized,
+        stoppedReason: result.stoppedReason,
+        ...(result.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {}),
+      };
     } catch (error) {
       return { materialized, stoppedReason: readDrainErrorStoppedReason(error, opts) };
     }
@@ -781,11 +858,23 @@ async function drainPendingMessages(
 async function materializeNextPendingForDrain(
   session: SessionProviderInputConsumerSession,
   opts: DrainPendingOptions,
-): Promise<Exclude<DrainPendingResult['stoppedReason'], 'aborted' | 'drain_disallowed' | 'materialization_blocked' | 'max_pop_per_wake'> | 'materialized'> {
+): Promise<
+  | Readonly<{ type: 'materialized' }>
+  | Readonly<{
+    type: 'stopped';
+    stoppedReason: Exclude<
+      DrainPendingResult['stoppedReason'],
+      'aborted' | 'drain_disallowed' | 'materialization_blocked' | 'max_pop_per_wake'
+    >;
+    retryAfterMs?: number;
+  }>
+> {
   try {
     const reconcileWhenEmpty = 'force';
     let activeTurnSteerability = readActiveTurnSteerability(opts);
-    if (opts.shouldContinue && !opts.shouldContinue()) return 'no_pending';
+    if (opts.shouldContinue && !opts.shouldContinue()) {
+      return { type: 'stopped', stoppedReason: 'no_pending' };
+    }
     activeTurnSteerability = readActiveTurnSteerability(opts);
     const pendingQueueDeliveryTiming = readPendingQueueDeliveryTiming(opts);
     const result = await materializeWithRuntimeActivityTail(
@@ -804,23 +893,29 @@ async function materializeNextPendingForDrain(
       result,
     });
     if (result.type === 'materialized') {
-      return 'materialized';
+      return { type: 'materialized' };
     }
     if (result.type === 'deferred') {
       if (result.reason === 'supervisor_auth_failed') {
         logTerminalAuthDrainStop(opts, null);
-        return 'auth_failure';
+        return { type: 'stopped', stoppedReason: 'auth_failure' };
       }
-      return 'deferred';
+      return { type: 'stopped', stoppedReason: 'deferred' };
     }
     if (result.type === 'auth_failure') {
       logTerminalAuthDrainStop(opts, result.statusCode);
-      return 'auth_failure';
+      return { type: 'stopped', stoppedReason: 'auth_failure' };
     }
-    if (result.type === 'retryable_transport') return 'error';
-    return 'no_pending';
+    if (result.type === 'retryable_transport') {
+      return {
+        type: 'stopped',
+        stoppedReason: 'error',
+        ...(result.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {}),
+      };
+    }
+    return { type: 'stopped', stoppedReason: 'no_pending' };
   } catch (error) {
-    return readDrainErrorStoppedReason(error, opts);
+    return { type: 'stopped', stoppedReason: readDrainErrorStoppedReason(error, opts) };
   }
 }
 

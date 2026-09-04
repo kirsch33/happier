@@ -17,17 +17,20 @@ import {
     PendingQueueMaterializationTransportAmbiguousError,
     readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
+    updatePendingQueueV2RequestedActionViaHttp,
 } from './pendingQueueV2Transport';
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockPatch } = vi.hoisted(() => ({
     mockGet: vi.fn(),
     mockPost: vi.fn(),
+    mockPatch: vi.fn(),
 }));
 
 vi.mock('axios', () => ({
     default: {
         get: mockGet,
         post: mockPost,
+        patch: mockPatch,
         isAxiosError: (error: unknown) => Boolean(
             error && typeof error === 'object' && (error as { isAxiosError?: unknown }).isAxiosError === true,
         ),
@@ -38,6 +41,24 @@ describe('pendingQueueV2Transport', () => {
     beforeEach(() => {
         mockGet.mockReset();
         mockPost.mockReset();
+        mockPatch.mockReset();
+    });
+
+    it('promotes one exact Pending request through the canonical requested-action endpoint', async () => {
+        mockPatch.mockResolvedValueOnce({ data: { ok: true } });
+
+        await expect(updatePendingQueueV2RequestedActionViaHttp({
+            token: 'token',
+            sessionId: 'session/one',
+            localId: 'pending/one',
+            requestedAction: { v: 1, kind: 'send_now' },
+        })).resolves.toBeUndefined();
+
+        expect(mockPatch).toHaveBeenCalledWith(
+            expect.stringContaining('/v2/sessions/session%2Fone/pending/pending%2Fone/action'),
+            { requestedAction: { v: 1, kind: 'send_now' } },
+            expect.objectContaining({ timeout: 10_000 }),
+        );
     });
 
     it('accepts a terminal enqueue rejoin only with the exact committed-message localId', async () => {

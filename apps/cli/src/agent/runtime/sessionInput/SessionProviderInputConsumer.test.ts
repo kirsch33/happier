@@ -138,6 +138,139 @@ describe('SessionProviderInputConsumer drainPending', () => {
     expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
   });
 
+  it('rejoins an ambiguously acknowledged active-turn materialization after its requested backoff', async () => {
+    vi.useFakeTimers();
+    try {
+      const materializeNextPendingMessageSafely = vi
+        .fn<() => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValueOnce({ type: 'retryable_transport', retryAfterMs: 1_000 })
+        .mockResolvedValueOnce({ type: 'no_pending' });
+      const consumer = createDrainConsumer({
+        materializeNextPendingMessageSafely,
+        waitForPendingEligibilityUpdate: async (signal) => await new Promise<boolean>((resolve) => {
+          if (signal?.aborted) {
+            resolve(false);
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(false), { once: true });
+        }),
+      });
+      const abortController = new AbortController();
+      const pump = consumer.pumpPendingWhileActive({
+        abortSignal: abortController.signal,
+        reason: 'active-turn-ambiguous-materialization-test',
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.runOnlyPendingTimersAsync();
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+
+      abortController.abort();
+      await expect(pump).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps timer-driven active-turn materialization rejoin at one attempt until another wake', async () => {
+    vi.useFakeTimers();
+    try {
+      const materializeNextPendingMessageSafely = vi
+        .fn<() => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValue({ type: 'retryable_transport', retryAfterMs: 1_000 });
+      const consumer = createDrainConsumer({
+        materializeNextPendingMessageSafely,
+        waitForPendingEligibilityUpdate: async (signal) => await new Promise<boolean>((resolve) => {
+          if (signal?.aborted) {
+            resolve(false);
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(false), { once: true });
+        }),
+      });
+      const abortController = new AbortController();
+      const pump = consumer.pumpPendingWhileActive({
+        abortSignal: abortController.signal,
+        reason: 'active-turn-ambiguous-materialization-cap-test',
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.runOnlyPendingTimersAsync();
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2);
+
+      abortController.abort();
+      await expect(pump).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not lose an eligibility wake immediately after the retry timer wins', async () => {
+    vi.useFakeTimers();
+    try {
+      let wakeSequence = 0;
+      const wakeWaiters: Array<(updated: boolean) => void> = [];
+      const publishWake = () => {
+        wakeSequence += 1;
+        for (const resolve of wakeWaiters.splice(0)) resolve(true);
+      };
+      const waitForPendingEligibilityUpdateSince = async (sequence: number, signal?: AbortSignal) => {
+        if (wakeSequence !== sequence) return true;
+        return await new Promise<boolean>((resolve) => {
+          const finish = (updated: boolean) => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve(updated);
+          };
+          const onAbort = () => finish(false);
+          wakeWaiters.push(finish);
+          signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      };
+      const materializeNextPendingMessageSafely = vi
+        .fn<() => Promise<MaterializeNextPendingResult>>()
+        .mockResolvedValue({ type: 'retryable_transport', retryAfterMs: 1_000 });
+      const consumer = createDrainConsumer({
+        materializeNextPendingMessageSafely,
+        readPendingEligibilityWakeSequence: () => wakeSequence,
+        waitForPendingEligibilityUpdateSince,
+        waitForPendingEligibilityUpdate: (signal) =>
+          waitForPendingEligibilityUpdateSince(wakeSequence, signal),
+      });
+      const abortController = new AbortController();
+      const pump = consumer.pumpPendingWhileActive({
+        abortSignal: abortController.signal,
+        reason: 'active-turn-simultaneous-wake-and-retry-test',
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1);
+
+      setTimeout(publishWake, 1_001);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(2));
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(3));
+
+      abortController.abort();
+      await expect(pump).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('closes admission synchronously and waits for an active provider dispatch to drain', async () => {
     let releaseDispatch: () => void = () => {};
     const dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
@@ -803,6 +936,48 @@ describe('SessionProviderInputConsumer drainPending', () => {
 });
 
 describe('SessionProviderInputConsumer waitForNextInput', () => {
+  it('force-reconciles exactly the first startup input pass before returning to the ordinary policy', async () => {
+    const abortController = new AbortController();
+    const firstWake = createDeferred<boolean>();
+    const materializeNextPendingMessageSafely = vi
+      .fn<() => Promise<MaterializeNextPendingResult>>()
+      .mockResolvedValueOnce({ type: 'no_pending' })
+      .mockImplementationOnce(async () => {
+        abortController.abort();
+        return { type: 'no_pending' };
+      });
+    let wakeCount = 0;
+    const consumer = createSessionProviderInputConsumer({
+      messageQueue: new MessageQueue2<TestMode>(() => 'hash'),
+      session: {
+        materializeNextPendingMessageSafely,
+        waitForPendingEligibilityUpdate: async (signal) => {
+          wakeCount += 1;
+          if (wakeCount === 1) return await firstWake.promise;
+          return await new Promise<boolean>((resolve) => {
+            if (signal?.aborted) {
+              resolve(false);
+              return;
+            }
+            signal?.addEventListener('abort', () => resolve(false), { once: true });
+          });
+        },
+      },
+      reconcileWhenEmpty: 'skip',
+      initialReconcileWhenEmpty: 'force',
+    } as Parameters<typeof createSessionProviderInputConsumer<TestMode, string>>[0]);
+
+    const waiting = consumer.waitForNextInput({ abortSignal: abortController.signal });
+    await vi.waitFor(() => expect(materializeNextPendingMessageSafely).toHaveBeenCalledTimes(1));
+    firstWake.resolve(true);
+    await expect(waiting).resolves.toBeNull();
+
+    expect(materializeNextPendingMessageSafely.mock.calls).toEqual([
+      [{ reconcileWhenEmpty: 'force' }],
+      [{ reconcileWhenEmpty: 'skip' }],
+    ]);
+  });
+
   it('does not treat an unrelated general metadata notification as Pending eligibility', async () => {
     const abortController = new AbortController();
     const generalMetadataWake = createDeferred<boolean>();

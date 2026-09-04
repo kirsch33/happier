@@ -68,6 +68,31 @@ describe('doctor win32 process discovery', () => {
         ]);
     });
 
+    it('enriches hdev.exe host candidates with Win32_Process command lines during full-snapshot discovery', async () => {
+        psListMock.mockResolvedValue([
+            { pid: 41420, ppid: 1, name: 'hdev.exe' },
+        ]);
+        execFileSyncMock.mockReturnValue(
+            JSON.stringify([
+                {
+                    ProcessId: 41420,
+                    Name: 'hdev.exe',
+                    CommandLine: '"C:\\Users\\alice\\AppData\\Local\\Happier\\hdev.exe" daemon start-sync',
+                },
+            ]),
+        );
+
+        const { findAllHappyProcesses } = await import('./doctor');
+
+        await expect(findAllHappyProcesses()).resolves.toEqual([
+            {
+                pid: 41420,
+                command: '"C:\\Users\\alice\\AppData\\Local\\Happier\\hdev.exe" daemon start-sync',
+                type: 'daemon',
+            },
+        ]);
+    });
+
     it('falls back to a broader Win32_Process snapshot when startup discovery still classifies zero Happy processes', async () => {
         psListMock.mockResolvedValue([
             { pid: 26316, ppid: 17692, name: 'MainThread' },

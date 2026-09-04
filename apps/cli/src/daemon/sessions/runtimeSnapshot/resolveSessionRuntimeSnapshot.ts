@@ -250,6 +250,7 @@ function readModelFromMetadata(
 }
 
 function chooseVendorResumeId(params: ResolveSessionRuntimeSnapshotParams): SessionRuntimeSnapshot['vendorResumeId'] {
+  if (params.incomingOptions.freshProviderContextOnce === true) return null;
   const metadata = params.persistedMetadata ?? null;
   const incomingResume = normalizeNonEmptyString(params.incomingOptions.resume);
   if (incomingResume) {
@@ -287,9 +288,14 @@ function applySnapshotToSpawnOptions(
     pendingFirstInput: _pendingFirstInput,
     initialGoal: _initialGoal,
     existingSessionAttachPayload: _existingSessionAttachPayload,
+    resume: _resume,
+    freshProviderContextOnce,
     ...durableOptions
   } = options;
-  const next: SpawnSessionOptions = { ...durableOptions };
+  const next: SpawnSessionOptions = {
+    ...durableOptions,
+    ...(freshProviderContextOnce === true ? { freshProviderContextOnce: true } : {}),
+  };
 
   if (snapshot.connectedServices) {
     next.connectedServices = snapshot.connectedServices;
@@ -321,7 +327,7 @@ function applySnapshotToSpawnOptions(
     next.modelUpdatedAt = snapshot.modelId.updatedAt;
   }
 
-  if (snapshot.vendorResumeId) {
+  if (snapshot.vendorResumeId && freshProviderContextOnce !== true) {
     next.resume = snapshot.vendorResumeId.value;
   }
 
