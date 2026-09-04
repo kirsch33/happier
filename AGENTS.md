@@ -214,6 +214,27 @@ process does not prove it opened the incumbent database.
    warning and `cli_self_update_available` are failed gates until explained and
    corrected at their source.
 
+### Native Codex updates on Happier hosts
+
+- Use OpenAI's supported standalone Linux installer, not a local Codex build.
+  Before running it, record the resolved command, version, architecture, and
+  hashes of the target account's existing `config.toml` and `auth.json` without
+  printing either file's contents.
+- Set the account boundary explicitly. On RPi use `HOME=/root` and
+  `CODEX_HOME=/root/.codex`; on Debian use `HOME=/home/akirsch` and
+  `CODEX_HOME=/home/akirsch/.codex`, run as `akirsch`, and use an accessible
+  working directory. Never inherit `CODEX_HOME` from a live provider: connected
+  services may set it to a per-session materialized directory, producing a
+  disposable installation behind a durable `~/.local/bin/codex` link.
+- Run the installer non-interactively, verify the resulting `~/.local/bin/codex`
+  target, reported version, native architecture, and unchanged auth/config
+  hashes, then remove a superseded global npm installation. Do not leave two
+  managed Codex installations whose selection depends on PATH order.
+- Confirm the generated Happier daemon service PATH can resolve
+  `~/.local/bin/codex`. An already-running provider keeps its loaded executable;
+  the upgrade is not converged until each retained session is gracefully
+  resume-freshed and its new provider process is checked.
+
 ### Responsiveness and warning correctness
 
 - Viewing a Session must not launch continuation-inspection RPCs. Hover, focus,
