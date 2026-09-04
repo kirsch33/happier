@@ -2726,6 +2726,7 @@ export async function runCodex(opts: {
                                         localIds,
                                         reason: 'steering_unavailable',
                                         userMessageSeq: message.maxUserMessageSeq ?? null,
+                                        providerEffect: 'none',
                                     });
                                     continue;
                                 }

@@ -4680,6 +4680,7 @@ describe('runCodex CodexACP resume behavior', () => {
     expect(lastSessionClient?.blockPendingMessageDelivery).toHaveBeenCalledWith({
       localIds: ['goal-explicit-steer-local-id'],
       reason: 'steering_unavailable',
+      providerEffect: 'none',
     });
     expect(outcome).toMatchObject({ ok: false, error: { message: 'stop-after-explicit-steer-race' } });
   });
