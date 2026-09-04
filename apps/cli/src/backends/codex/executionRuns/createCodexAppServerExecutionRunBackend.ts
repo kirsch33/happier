@@ -175,11 +175,12 @@ export function createCodexAppServerExecutionRunBackend(args: Readonly<{
   };
 
   const sessionAdapter: Pick<ApiSessionClient,
-    'sessionId' | 'getLastObservedMessageSeq' | 'updateMetadata' | 'sendAgentMessage' | 'sendAgentMessageCommitted' | 'sendCodexMessage'
+    'sessionId' | 'getLastObservedMessageSeq' | 'updateMetadata' | 'sendAgentMessage' | 'sendAgentMessageCommitted' | 'sendCodexMessage' | 'sendSessionEvent'
   > = {
     sessionId: 'codex-app-server-execution-run',
     getLastObservedMessageSeq: () => lastObservedMessageSeq,
     updateMetadata: async () => undefined,
+    sendSessionEvent: () => undefined,
     sendAgentMessage: (provider, body) => {
       emitCommittedTranscriptBody(provider, body);
     },
