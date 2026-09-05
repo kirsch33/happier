@@ -2402,6 +2402,7 @@ describe("pendingMessageService (shared sessions)", () => {
             ok: true,
             didUpdate: true,
             pendingBlockedCount: 0,
+            activationTarget: { accountId: owner.id, requestId: localId },
         });
         await expect(db.sessionPendingMessage.findUniqueOrThrow({
             where: { sessionId_localId: { sessionId: session.id, localId } },
@@ -2457,6 +2458,7 @@ describe("pendingMessageService (shared sessions)", () => {
             sessionId: session.id,
             localId,
             ciphertext: "cipher-requested-action-runtime-disposed",
+            messageRole: "user",
             requestedAction: { v: 1, kind: "enqueue" },
         });
         await blockPendingDelivery({
@@ -2483,6 +2485,18 @@ describe("pendingMessageService (shared sessions)", () => {
             requestedAction: { v: 1, kind: "send_now" },
             deliveryState: null,
             deliveryBlockedReason: null,
+        });
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: session.id },
+            select: {
+                pendingActivationRequestId: true,
+                pendingActivationStatus: true,
+                pendingActivationFailureCode: true,
+            },
+        })).resolves.toEqual({
+            pendingActivationRequestId: localId,
+            pendingActivationStatus: "waiting",
+            pendingActivationFailureCode: null,
         });
     });
 

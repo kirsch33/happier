@@ -761,12 +761,16 @@ export async function updatePendingRequestedAction(params: {
                 if (updated.count === 0) {
                     return { ok: false, error: "action-conflict" } as const;
                 }
+                const activationTarget = requestedActionResult.data.kind === "send_now"
+                    ? await armPendingActivationAuthorizationInTx({ tx, sessionId, requestId: localId })
+                    : await reconcilePendingActivationAuthorizationForRemovedRequestInTx({ tx, sessionId, requestId: localId });
                 const state = await applyPendingSessionStateChange({
                     tx,
                     sessionId,
                     pendingBlockedCountDelta: -1,
+                    activationTarget,
                 });
-                return { ok: true, didUpdate: true, ...state } as const;
+                return { ok: true, didUpdate: true, ...(activationTarget ? { activationTarget } : {}), ...state } as const;
             }
 
             // Lifecycle fencing is authoritative even for a same-action retry. Once provider

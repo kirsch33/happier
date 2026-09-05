@@ -80,9 +80,13 @@ export function createFreshProviderRecoveryReservationStore(params: Readonly<{ h
       if (current === null) return { ok: false, code: 'reservation_missing' };
       if (current === 'corrupt') return { ok: false, code: 'reservation_corrupt' };
       if (current.requestId !== undefined || current.pendingVersion !== undefined) {
-        return current.requestId === requestId && current.pendingVersion === pendingVersion
-          ? { ok: true }
-          : { ok: false, code: 'reservation_claim_mismatch' };
+        if (current.requestId !== requestId || current.pendingVersion === undefined || pendingVersion < current.pendingVersion) {
+          return { ok: false, code: 'reservation_claim_mismatch' };
+        }
+        if (pendingVersion > current.pendingVersion) {
+          await write(sessionId, { ...current, pendingVersion });
+        }
+        return { ok: true };
       }
       if (current.admissionLocalId !== undefined && current.admissionLocalId !== requestId) {
         return { ok: false, code: 'reservation_claim_mismatch' };

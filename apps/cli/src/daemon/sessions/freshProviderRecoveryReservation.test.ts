@@ -36,6 +36,18 @@ describe('fresh provider recovery reservation', () => {
     await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('rebinds the same exact Pending request to a newer retry revision without accepting rollback or another request', async () => {
+    const reservations = await store();
+    await reservations.arm('sess_exact');
+    await reservations.claim('sess_exact', 'pending_1', 7);
+
+    await expect(reservations.claim('sess_exact', 'pending_1', 8)).resolves.toEqual({ ok: true });
+    await expect(reservations.clearProven('sess_exact', 'pending_1', 7)).resolves.toEqual({ ok: false, code: 'reservation_claim_mismatch' });
+    await expect(reservations.claim('sess_exact', 'pending_2', 8)).resolves.toEqual({ ok: false, code: 'reservation_claim_mismatch' });
+    await expect(reservations.claim('sess_exact', 'pending_1', 7)).resolves.toEqual({ ok: false, code: 'reservation_claim_mismatch' });
+    await expect(reservations.clearProven('sess_exact', 'pending_1', 8)).resolves.toEqual({ ok: true });
+  });
+
   it('retains an armed claim across a fresh store/load and fails closed for corruption only at that exact reservation', async () => {
     const reservations = await store();
     await reservations.arm('sess_exact');
