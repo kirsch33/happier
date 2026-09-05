@@ -1,4 +1,4 @@
-import { buildMessageUpdatedUpdate } from '@/app/events/eventRouter';
+import { buildMessageUpdatedUpdate, buildUpdateSessionUpdate } from '@/app/events/eventRouter';
 import { parseSessionMessageRole } from '@/app/session/messageRole/resolveSessionMessageRole';
 import { db } from '@/storage/db';
 import { SessionTranscriptObservationProvenanceV1Schema } from '@happier-dev/protocol';
@@ -38,6 +38,9 @@ export async function replayReleasedIos295SocketCatchUp(params: Readonly<{
         take: RELEASED_IOS_295_SOCKET_CATCH_UP_MAX_SESSIONS,
         select: {
             id: true,
+            seq: true,
+            metadata: true,
+            metadataVersion: true,
             messages: {
                 where: { updatedAt: { gte: changedAfter } },
                 orderBy: [
@@ -62,6 +65,15 @@ export async function replayReleasedIos295SocketCatchUp(params: Readonly<{
             },
         },
     });
+
+    for (const session of sessions) {
+        params.socket.emit('update', buildUpdateSessionUpdate(
+            session.id,
+            session.seq,
+            `released-ios295-session-catch-up:${session.id}:${session.metadataVersion}`,
+            { value: session.metadata, version: session.metadataVersion },
+        ));
+    }
 
     const messages = sessions.flatMap((session) => session.messages.map((message) => ({
         sessionId: session.id,

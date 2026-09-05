@@ -273,6 +273,11 @@ process does not prove it opened the incumbent database.
   older than the required version. Unknown or malformed metadata must not be
   relabeled as old. The warning must state the exact runner version and minimum;
   an installed daemon version never substitutes for the Session runner version.
+  After a runner replacement, verify both the runner's local metadata and the
+  relay's persisted decrypted Session metadata, then prove the connected client
+  rendered that value. A correct process path does not clear a stale client
+  snapshot, and a compatibility catch-up for a released client must cover the
+  bounded Session metadata needed by its UI as well as missed transcript rows.
 
 ### Debian relay and session safety
 
