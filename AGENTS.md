@@ -153,6 +153,12 @@ process does not prove it opened the incumbent database.
   killed a healthy progressing compiler while the host still had roughly
   2 GiB available. These are measured RPi values, not fleet-wide defaults;
   remeasure before applying the pattern to a host with different capacity.
+- On the 16 GiB Debian development host, use Debian's stock `systemd-oomd`
+  package and its packaged `user@.service` pressure policy. The package already
+  sets `ManagedOOMMemoryPressure=kill` with a 50% limit for user managers; do
+  not copy the RPi's hard memory caps onto this host or invent a parallel
+  watchdog. Verify the package service and the effective `user@1000.service`
+  properties after installation.
 - A CLI typecheck under that hierarchy remained CPU-active at roughly 4 GiB
   but did not finish inside a 10-minute outer timeout. Treat that result as an
   inconclusive bounded gate, not a type error or permission to retry unchanged.
