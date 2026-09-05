@@ -11,6 +11,7 @@ import {
     type SessionAgentContinuationInspectionState,
     type SessionAgentContinuationSourceState,
 } from './resolveSessionAgentContinuationEligibility';
+import { resolveSessionContinuationDaemonGeneration } from './resolveSessionContinuationDaemonGeneration';
 
 function builtInEntry(
     agentId: string,
@@ -57,6 +58,45 @@ const SUPPORTED: SessionAgentContinuationInspectionState = {
 };
 
 describe('resolveSessionAgentContinuationEligibility', () => {
+    it('keys inspection answers to daemon identity, not mutable daemon-state versions', () => {
+        const firstMachineRecord = {
+            daemonState: { pid: 42, startedAt: 1_000 },
+            daemonStateVersion: 100,
+        };
+        const laterStateWrite = {
+            daemonState: { pid: 42, startedAt: 1_000 },
+            daemonStateVersion: 101,
+        };
+
+        expect(resolveSessionContinuationDaemonGeneration(firstMachineRecord))
+            .toBe('process:42:1000');
+        expect(resolveSessionContinuationDaemonGeneration(laterStateWrite))
+            .toBe('process:42:1000');
+        expect(resolveSessionContinuationDaemonGeneration({
+            daemonState: { pid: 84, startedAt: 2_000 },
+            daemonStateVersion: 1,
+        })).toBe('process:84:2000');
+        expect(resolveSessionContinuationDaemonGeneration({
+            daemonState: { pid: 42, startedAt: 2_000 },
+            daemonStateVersion: 1,
+        })).toBe('process:42:2000');
+    });
+
+    it('uses process identity only as the bounded legacy-daemon fallback', () => {
+        expect(resolveSessionContinuationDaemonGeneration({
+            daemonState: { pid: 42 },
+            daemonStateVersion: 100,
+        })).toBe('pid:42');
+        expect(resolveSessionContinuationDaemonGeneration({
+            daemonState: { pid: 42 },
+            daemonStateVersion: 101,
+        })).toBe('pid:42');
+        expect(resolveSessionContinuationDaemonGeneration({
+            daemonState: { pid: 84 },
+            daemonStateVersion: 1,
+        })).toBe('pid:84');
+    });
+
     it('keeps the running Agent selectable without treating it as a switch', () => {
         expect(resolveSessionAgentContinuationEligibility({
             entry: builtInEntry('claude'),
