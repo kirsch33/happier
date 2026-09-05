@@ -222,6 +222,12 @@ process does not prove it opened the incumbent database.
    run, and check `happier status --json`. Both a UI “CLI Update Required”
    warning and `cli_self_update_available` are failed gates until explained and
    corrected at their source.
+   Run status from the target account's durable environment: unset a
+   provider-materialized `CODEX_HOME` and replace an injected provider `PATH`
+   with the generated service PATH before judging service drift. A status run
+   from a connected-service PATH can falsely report the otherwise identical
+   generated daemon definition as stale; do not reinstall or restart a healthy
+   daemon from that false comparison.
 
 ### Native Codex updates on Happier hosts
 
