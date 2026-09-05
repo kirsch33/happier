@@ -33,7 +33,7 @@ export class TransactionDeadlineExceededError extends Error {
 
 const symbol = Symbol();
 
-type SqliteTransactionConfig = Readonly<{
+type TransactionConfig = Readonly<{
     maxRetries: number;
     maxWaitMs: number;
     retryBaseDelayMs: number;
@@ -42,60 +42,64 @@ type SqliteTransactionConfig = Readonly<{
     totalRetryBudgetMs: number;
 }>;
 
+const DEFAULT_TRANSACTION_MAX_RETRIES = 3;
+const DEFAULT_TRANSACTION_MAX_WAIT_MS = 2_000;
+const DEFAULT_TRANSACTION_RETRY_BASE_DELAY_MS = 100;
+const DEFAULT_TRANSACTION_RETRY_MAX_DELAY_MS = 800;
+const DEFAULT_TRANSACTION_TIMEOUT_MS = 10_000;
+const DEFAULT_TRANSACTION_TOTAL_RETRY_BUDGET_MS = 600_000;
 const DEFAULT_SQLITE_TRANSACTION_MAX_RETRIES = 8;
 const DEFAULT_SQLITE_TRANSACTION_MAX_WAIT_MS = 5_000;
-const DEFAULT_SQLITE_TRANSACTION_RETRY_BASE_DELAY_MS = 100;
-const DEFAULT_SQLITE_TRANSACTION_RETRY_MAX_DELAY_MS = 800;
-const DEFAULT_SQLITE_TRANSACTION_TIMEOUT_MS = 10_000;
 // Keep default inTx retry scheduling inside request/client timeout envelopes; raise via env only for known background paths.
 const DEFAULT_SQLITE_TRANSACTION_TOTAL_RETRY_BUDGET_MS = 25_000;
 
-function readSqliteTransactionConfigFromEnv(env: NodeJS.ProcessEnv): SqliteTransactionConfig {
+function readTransactionConfigFromEnv(env: NodeJS.ProcessEnv, provider: string): TransactionConfig {
+    const sqlite = provider === "sqlite";
     const retryBaseDelayMs = parseIntEnv(
         env.HAPPIER_DB_TX_RETRY_BASE_DELAY_MS ?? env.HAPPY_DB_TX_RETRY_BASE_DELAY_MS,
-        DEFAULT_SQLITE_TRANSACTION_RETRY_BASE_DELAY_MS,
+        DEFAULT_TRANSACTION_RETRY_BASE_DELAY_MS,
         { min: 0, max: 60_000 },
     );
 
     return {
         maxRetries: parseIntEnv(
             env.HAPPIER_DB_TX_MAX_RETRIES ?? env.HAPPY_DB_TX_MAX_RETRIES,
-            DEFAULT_SQLITE_TRANSACTION_MAX_RETRIES,
+            sqlite ? DEFAULT_SQLITE_TRANSACTION_MAX_RETRIES : DEFAULT_TRANSACTION_MAX_RETRIES,
             { min: 0, max: 100 },
         ),
         maxWaitMs: parseIntEnv(
             env.HAPPIER_DB_TX_MAX_WAIT_MS ?? env.HAPPY_DB_TX_MAX_WAIT_MS,
-            DEFAULT_SQLITE_TRANSACTION_MAX_WAIT_MS,
+            sqlite ? DEFAULT_SQLITE_TRANSACTION_MAX_WAIT_MS : DEFAULT_TRANSACTION_MAX_WAIT_MS,
             { min: 1_000, max: 600_000 },
         ),
         retryBaseDelayMs,
         retryMaxDelayMs: parseIntEnv(
             env.HAPPIER_DB_TX_RETRY_MAX_DELAY_MS ?? env.HAPPY_DB_TX_RETRY_MAX_DELAY_MS,
-            DEFAULT_SQLITE_TRANSACTION_RETRY_MAX_DELAY_MS,
+            DEFAULT_TRANSACTION_RETRY_MAX_DELAY_MS,
             { min: retryBaseDelayMs, max: 600_000 },
         ),
         timeoutMs: parseIntEnv(
             env.HAPPIER_DB_TX_TIMEOUT_MS ?? env.HAPPY_DB_TX_TIMEOUT_MS,
-            DEFAULT_SQLITE_TRANSACTION_TIMEOUT_MS,
+            DEFAULT_TRANSACTION_TIMEOUT_MS,
             { min: 1_000, max: 600_000 },
         ),
         totalRetryBudgetMs: parseIntEnv(
             env.HAPPIER_DB_TX_TOTAL_RETRY_BUDGET_MS ?? env.HAPPY_DB_TX_TOTAL_RETRY_BUDGET_MS,
-            DEFAULT_SQLITE_TRANSACTION_TOTAL_RETRY_BUDGET_MS,
+            sqlite ? DEFAULT_SQLITE_TRANSACTION_TOTAL_RETRY_BUDGET_MS : DEFAULT_TRANSACTION_TOTAL_RETRY_BUDGET_MS,
             { min: 1, max: 600_000 },
         ),
     };
 }
 
-function resolveSqliteTransactionRetryDelayMs(
+function resolveTransactionRetryDelayMs(
     attempt: number,
-    config: Pick<SqliteTransactionConfig, "retryBaseDelayMs" | "retryMaxDelayMs">,
+    config: Pick<TransactionConfig, "retryBaseDelayMs" | "retryMaxDelayMs">,
 ): number {
     return Math.min(config.retryMaxDelayMs, attempt * config.retryBaseDelayMs);
 }
 
-function canStartAnotherSqliteTransactionAttempt(params: Readonly<{
-    config: SqliteTransactionConfig;
+function canStartAnotherTransactionAttempt(params: Readonly<{
+    config: TransactionConfig;
     retryDelayMs: number;
     startedAtMs: number;
 }>): boolean {
@@ -168,8 +172,8 @@ export function isTransactionDeadlineExceededError(error: unknown): error is Tra
 
 export async function inTx<T>(fn: (tx: Tx) => Promise<T>, options: InTxOptions = {}): Promise<T> {
     const provider = getDbProviderFromEnv(process.env, "postgres");
-    const sqliteTransactionConfig = provider === "sqlite" ? readSqliteTransactionConfigFromEnv(process.env) : null;
-    const maxRetries = sqliteTransactionConfig?.maxRetries ?? 3;
+    const transactionConfig = readTransactionConfigFromEnv(process.env, provider);
+    const maxRetries = transactionConfig.maxRetries;
     const startedAtMs = Date.now();
     let counter = 0;
     let transactionCallbackEntered = false;
@@ -187,18 +191,18 @@ export async function inTx<T>(fn: (tx: Tx) => Promise<T>, options: InTxOptions =
                 ? null
                 : resolveBoundedTransactionOptions({
                     deadlineAtMs: options.deadlineAtMs,
-                    maxWaitMs: sqliteTransactionConfig?.maxWaitMs ?? 2_000,
-                    timeoutMs: sqliteTransactionConfig?.timeoutMs ?? 10_000,
+                    maxWaitMs: transactionConfig.maxWaitMs,
+                    timeoutMs: transactionConfig.timeoutMs,
                 });
-            const txOpts = sqliteTransactionConfig
+            const txOpts = provider === "sqlite"
                 ? {
-                    timeout: bounded?.timeout ?? sqliteTransactionConfig.timeoutMs,
-                    maxWait: bounded?.maxWait ?? sqliteTransactionConfig.maxWaitMs,
+                    timeout: bounded?.timeout ?? transactionConfig.timeoutMs,
+                    maxWait: bounded?.maxWait ?? transactionConfig.maxWaitMs,
                 }
                 : {
                     isolationLevel: "Serializable" as const,
-                    timeout: bounded?.timeout ?? 10_000,
-                    ...(bounded ? { maxWait: bounded.maxWait } : {}),
+                    timeout: bounded?.timeout ?? transactionConfig.timeoutMs,
+                    maxWait: bounded?.maxWait ?? transactionConfig.maxWaitMs,
                 };
             let result = await db.$transaction(wrapped, txOpts);
             for (let callback of result.callbacks) {
@@ -224,13 +228,10 @@ export async function inTx<T>(fn: (tx: Tx) => Promise<T>, options: InTxOptions =
             }
             if (retryable && counter < maxRetries) {
                 const nextAttempt = counter + 1;
-                const retryDelayMs = sqliteTransactionConfig
-                    ? resolveSqliteTransactionRetryDelayMs(nextAttempt, sqliteTransactionConfig)
-                    : nextAttempt * 100;
+                const retryDelayMs = resolveTransactionRetryDelayMs(nextAttempt, transactionConfig);
                 if (
-                    sqliteTransactionConfig &&
-                    !canStartAnotherSqliteTransactionAttempt({
-                        config: sqliteTransactionConfig,
+                    !canStartAnotherTransactionAttempt({
+                        config: transactionConfig,
                         retryDelayMs,
                         startedAtMs,
                     })

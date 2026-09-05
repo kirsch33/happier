@@ -98,6 +98,42 @@ describe("inTx", () => {
         expect(delayMock).toHaveBeenCalledTimes(1);
     });
 
+    it("honors configured transaction retry and timeout settings on Postgres", async () => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: undefined,
+            HAPPIER_DB_PROVIDER: "postgres",
+            HAPPIER_DB_TX_MAX_RETRIES: "5",
+            HAPPIER_DB_TX_RETRY_BASE_DELAY_MS: "0",
+            HAPPIER_DB_TX_RETRY_MAX_DELAY_MS: "0",
+            HAPPIER_DB_TX_TOTAL_RETRY_BUDGET_MS: "120000",
+            HAPPIER_DB_TX_MAX_WAIT_MS: "7000",
+            HAPPIER_DB_TX_TIMEOUT_MS: "12000",
+        });
+        const conflict = Object.assign(new Error("retry me"), { code: "P2034" });
+        transaction
+            .mockRejectedValueOnce(conflict)
+            .mockRejectedValueOnce(conflict)
+            .mockRejectedValueOnce(conflict)
+            .mockRejectedValueOnce(conflict)
+            .mockRejectedValueOnce(conflict)
+            .mockImplementationOnce(async (fn: any, _opts?: any) => fn({} as any));
+
+        const { inTx } = await import("./inTx");
+        const result = await inTx(async () => 792);
+
+        expect(result).toBe(792);
+        expect(transaction).toHaveBeenCalledTimes(6);
+        expect(delayMock).toHaveBeenCalledTimes(5);
+        expect(transaction.mock.calls.at(-1)?.[1]).toEqual(
+            expect.objectContaining({
+                isolationLevel: "Serializable",
+                maxWait: 7000,
+                timeout: 12000,
+            }),
+        );
+    });
+
     it.each(["postgres", "mysql"])("retries an acquisition-shaped P2028 before the transaction callback starts on %s", async (provider) => {
         restoreEnv(envSnapshot);
         applyEnvValues({
