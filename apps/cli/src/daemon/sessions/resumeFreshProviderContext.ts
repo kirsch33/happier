@@ -59,7 +59,6 @@ export type FreshProviderCompletionObservation = Readonly<{
     processInstanceFingerprint?: string | null;
   }>[];
   sessionLock: Readonly<{ pid: number; processInstanceFingerprint?: string | null }> | null;
-  pendingControlState: string | null;
   rawActive: boolean;
   pendingIds: readonly string[];
   marker: Readonly<{
@@ -113,7 +112,6 @@ export async function awaitFreshProviderCompletion(params: Readonly<{
     if (
       tracked
       && lockMatchesTrackedChild
-      && observed.pendingControlState === 'servable'
       && observed.rawActive
       && observed.pendingIds.length === 0
       && providerIsNew

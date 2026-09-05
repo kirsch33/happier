@@ -6565,18 +6565,12 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 token: credentials.token,
                 sessionId,
               }).catch(() => [requestId]);
-              const pendingControl = await probePendingQueueServiceability({
-                sessionId,
-                credentials,
-                isShutdownRequested: () => shutdownInitiated,
-              }).catch(() => ({ state: 'unknown' }));
               return {
                 daemonChildren,
                 sessionLock: lockStatus?.ok ? {
                   pid: lockStatus.lock.pid,
                   processInstanceFingerprint: lockStatus.lock.processInstanceFingerprint,
                 } : null,
-                pendingControlState: pendingControl.state,
                 rawActive: raw?.active === true,
                 pendingIds,
                 marker: marker ? {

@@ -646,6 +646,10 @@ describe('awaitFreshProviderCompletion', () => {
     await expect(resolveObserved(hostedCustody())).resolves.toBe('provider-new');
   });
 
+  it('does not require a Pending-control observation after the exact request has already drained', async () => {
+    await expect(resolveObserved({ pendingControlState: undefined })).resolves.toBe('provider-new');
+  });
+
   it('keeps the sole-child gate load-bearing when a plausible find would select valid accepted custody', async () => {
     const duplicate = {
       daemonChildren: [
@@ -671,7 +675,6 @@ describe('awaitFreshProviderCompletion', () => {
       sessionLock: { pid: 778, processInstanceFingerprint: 'linux-proc:competing-778' },
       marker: validMarker({ pid: 778 }),
     }],
-    ['a live but Pending-control-unservable accepted PID', { pendingControlState: 'recoverable_unservable' }],
     ['a reused PID with a mismatched process identity', { sessionLock: { pid: 777, processInstanceFingerprint: 'linux-proc:reused-777' } }],
     ['a current session lock held by another PID', { sessionLock: { pid: 778, processInstanceFingerprint: 'linux-proc:accepted-777' } }],
     ['a hosted wrapper whose lock remains on the launch PID', hostedCustody({
