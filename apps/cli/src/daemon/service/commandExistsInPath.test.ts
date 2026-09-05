@@ -8,7 +8,7 @@ import { commandExistsInPath } from './commandExistsInPath.js';
 describe('commandExistsInPath', () => {
   it('detects unix commands by exact filename', async () => {
     await withTempDir('happier-cli-cmd-', async (dir) => {
-      await writeTextFile(join(dir, 'hello'), '#!/bin/sh\necho hi\n');
+      await writeTextFile(join(dir, 'hello'), '#!/bin/sh\necho hi\n', { mode: 0o755 });
       expect(commandExistsInPath({ cmd: 'hello', envPath: dir, platform: 'linux' })).toBe(true);
       expect(commandExistsInPath({ cmd: 'missing', envPath: dir, platform: 'linux' })).toBe(false);
     });

@@ -1,14 +1,4 @@
-import { existsSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
-
-import { resolveWindowsCommandOnPath } from '@happier-dev/cli-common/process';
-
-function normalizePathList(envPath: string | undefined): string[] {
-  return String(envPath ?? '')
-    .split(delimiter)
-    .map((p) => p.trim())
-    .filter(Boolean);
-}
+import { commandExistsOnPath, resolveWindowsCommandOnPath } from '@happier-dev/cli-common/process';
 
 export function commandExistsInPath(params: Readonly<{
   cmd: string;
@@ -28,13 +18,5 @@ export function commandExistsInPath(params: Readonly<{
     );
   }
 
-  const pathDirs = normalizePathList(params.envPath);
-  if (pathDirs.length === 0) return false;
-
-  for (const dir of pathDirs) {
-    const full = join(dir, cmd);
-    if (existsSync(full)) return true;
-  }
-
-  return false;
+  return commandExistsOnPath(cmd, { path: params.envPath });
 }
