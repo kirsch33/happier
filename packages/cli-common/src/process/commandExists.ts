@@ -15,6 +15,15 @@ function isExecutableFile(path: string): boolean {
   }
 }
 
+function isExecutableFileViaShell(path: string): boolean {
+  const result = spawnSync(
+    '/bin/sh',
+    ['-c', '[ -f "$1" ] && [ -x "$1" ]', 'happier-command-probe', path],
+    { stdio: 'ignore' },
+  );
+  return !result.error && result.status === 0;
+}
+
 export function commandExistsOnPath(
   cmd: string,
   options: Readonly<{
@@ -44,9 +53,11 @@ export function commandExistsOnPath(
     return resolveWindowsCommandOnPath(name, probeEnv) !== null;
   }
 
-  if (name.includes('/')) return isExecutableFile(name);
+  if (name.includes('/')) return isExecutableFile(name) || isExecutableFileViaShell(name);
 
-  return String(pathEnv ?? '')
+  const candidates = String(pathEnv ?? '')
     .split(delimiter)
-    .some((dir) => isExecutableFile(join(dir || '.', name)));
+    .map((dir) => join(dir || '.', name));
+  return candidates.some(isExecutableFile)
+    || candidates.some(isExecutableFileViaShell);
 }
