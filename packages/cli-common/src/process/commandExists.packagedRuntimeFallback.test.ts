@@ -17,7 +17,7 @@ vi.mock('node:child_process', async (importOriginal) => ({
     spawnSync: mocks.spawnSync,
 }));
 
-import { commandExistsOnPath } from './commandExists';
+import { commandExistsOnPath, resolveCommandOnPath } from './commandExists';
 
 describe('commandExistsOnPath packaged-runtime fallback', () => {
     beforeEach(() => {
@@ -28,6 +28,7 @@ describe('commandExistsOnPath packaged-runtime fallback', () => {
 
     it('uses a side-effect-free shell file probe when the packaged fs probe false-negatives', () => {
         expect(commandExistsOnPath('systemctl', { path: '/usr/bin:/bin' })).toBe(true);
+        expect(resolveCommandOnPath('systemctl', { path: '/usr/bin:/bin' })).toBe('/usr/bin/systemctl');
         expect(mocks.spawnSync).toHaveBeenCalledWith(
             '/bin/sh',
             ['-c', '[ -f "$1" ] && [ -x "$1" ]', 'happier-command-probe', '/usr/bin/systemctl'],

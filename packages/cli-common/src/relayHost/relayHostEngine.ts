@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 import { normalizePublicReleaseRingId, type PublicReleaseRingId } from '@happier-dev/release-runtime/releaseRings';
+import { resolveCommandOnPath } from '../process/index.js';
 
 import {
   applyServicePlan,
@@ -772,7 +773,8 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
   const now = deps.now ?? (() => Date.now());
 
   const runLocalText = (cmd: string, args: readonly string[]) => {
-    const res = spawnSync(cmd, [...args], {
+    const executable = resolveCommandOnPath(cmd, { env: process.env }) ?? cmd;
+    const res = spawnSync(executable, [...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: buildServiceCommandEnv({ cmd, args, env: process.env }),
