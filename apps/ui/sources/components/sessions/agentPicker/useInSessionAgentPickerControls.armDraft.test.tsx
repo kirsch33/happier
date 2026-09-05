@@ -81,7 +81,7 @@ const onlineMachine: SessionAgentContinuationMachineTarget = {
     machineId: 'machine-1',
     serverId: 'server-1',
     connectionGeneration: 1,
-    daemonGeneration: 1,
+    daemonGeneration: 'process:42:1000',
 };
 
 const AVAILABLE = {
@@ -430,7 +430,7 @@ describe('useInSessionAgentPickerControls arm draft', () => {
         const reinspection = createDeferred<typeof AVAILABLE>();
         machineRpcWithServerScope.mockImplementationOnce(() => reinspection.promise);
 
-        await hook.rerender({ machine: { ...onlineMachine, daemonGeneration: 2 } });
+        await hook.rerender({ machine: { ...onlineMachine, daemonGeneration: 'process:84:2000' } });
         await act(async () => { await Promise.resolve(); });
 
         // A changed daemon invalidates the old answer, not the reader's choice.

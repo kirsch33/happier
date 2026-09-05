@@ -53,7 +53,7 @@ function selectionKey(selection: SessionAgentTransitionSelectionV1): string {
  * Session with no other Agent asks nothing at all.
  *
  * **One runtime pair, one answer.** Answers are cached against the realtime
- * connection, the daemon generation, and the machine state they were read over,
+ * connection, the daemon instance, and the machine state they were read over,
  * and discarded when any of them changes, because inspection reserves nothing and
  * re-reading is the only way it stays true. Caching also matters for a negative:
  * the machine RPC already retries once on `METHOD_NOT_AVAILABLE`, so an old daemon
@@ -75,7 +75,7 @@ export function useSessionContinuationInspections(
     const serverId = machine.serverId;
     const offline = machinePresence === 'offline';
     // Everything an answer is only valid within. Session and machine are obvious;
-    // the connection generation makes a reconnect re-ask, the daemon generation
+    // the connection generation makes a reconnect re-ask, the daemon identity
     // makes a daemon that restarted under a live connection re-ask, and presence
     // makes a machine that bounced re-ask rather than trust what its previous
     // daemon said. Both generations are load-bearing: a restarting daemon never

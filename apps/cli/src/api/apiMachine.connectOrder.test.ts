@@ -272,7 +272,15 @@ describe('ApiMachineClient connect ordering', () => {
         missingMethods: [...requiredMachineControlMethods],
       })
       .mockImplementation(waitForRegisteredHandlers);
-    const updateDaemonState = vi.spyOn(client, 'updateDaemonState').mockResolvedValue();
+    let publishedState: ReturnType<Parameters<ApiMachineClient['updateDaemonState']>[0]> | null = null;
+    const updateDaemonState = vi.spyOn(client, 'updateDaemonState').mockImplementation(async (handler) => {
+      publishedState = handler({
+        status: 'offline',
+        pid: 42,
+        startedAt: 1_000,
+        startedWithCliVersion: '0.2.11',
+      });
+    });
 
     client.connect();
     await vi.waitFor(() => expect(rpcHandlerManager.waitForRegisteredHandlers).toHaveBeenCalled());
@@ -288,6 +296,12 @@ describe('ApiMachineClient connect ordering', () => {
       socket.trigger(SOCKET_RPC_EVENTS.REGISTERED, { method: `machine-1:${method}` });
     }
     await vi.waitFor(() => expect(updateDaemonState).toHaveBeenCalledTimes(1));
+    expect(publishedState).toMatchObject({
+      status: 'running',
+      pid: process.pid,
+      startedAt: 1_000,
+      startedWithCliVersion: '0.2.11',
+    });
   });
 
   it('ignores late registration acknowledgements from a superseded transport', async () => {

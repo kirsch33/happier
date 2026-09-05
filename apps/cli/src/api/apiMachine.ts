@@ -291,7 +291,9 @@ export class ApiMachineClient {
             status: 'running',
             pid: process.pid,
             httpPort: this.machine.daemonState?.httpPort,
-            startedAt: Date.now(),
+            // This is daemon-process identity, not transport-readiness time. A
+            // reconnect must not make the same daemon look like a replacement.
+            startedAt: state?.startedAt ?? Date.now(),
         })).then(() => {
             if (
                 this.socket === socket

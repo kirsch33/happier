@@ -345,6 +345,7 @@ import { resolveAuthCredentialsScopeKey } from '@/auth/storage/resolveAuthCreden
 import { useEnabledAgentIds } from '@/agents/hooks/useEnabledAgentIds';
 import { getResolvedBackendCatalogEntries } from '@/agents/backendCatalog/getResolvedBackendCatalogEntries';
 import { useInSessionAgentPickerControls } from '@/components/sessions/agentPicker/useInSessionAgentPickerControls';
+import { resolveSessionContinuationDaemonGeneration } from '@/components/sessions/agentPicker/resolveSessionContinuationDaemonGeneration';
 import { getSessionStorageKind } from '@/sync/domains/session/sessionStorageKind';
 import { isMachineOnline } from '@/utils/sessions/machineUtils';
 import { readDirectSessionLink } from '@/sync/domains/session/directSessions/readDirectSessionLink';
@@ -3850,17 +3851,16 @@ function SessionViewLoaded({
     }), [hasWriteAccess, session, sessionAgentCurrentTargetKey, sessionMachineRecord]);
     // `session.continuation.inspect` is answered by the machine hosting the
     // Session, so an answer only holds for as long as BOTH runtimes behind it do:
-    // this realtime connection, and the daemon that answered. A daemon that
-    // restarts leaves the socket untouched, so its own generation — the machine
-    // record's daemon-state version, the same currentness fact CLI detection keys
-    // on — has to be part of the scope or the rail keeps offering targets the
-    // send path already refuses.
+    // this realtime connection, and the daemon that answered. A daemon restart
+    // can leave the socket untouched, while an ordinary daemon-state publication
+    // increments `daemonStateVersion` without changing the answering process.
+    // Key this cache to the daemon's stable runtime identity, never that counter.
     const agentContinuationMachine = React.useMemo(() => ({
         machineId: typeof machineId === 'string' && machineId.length > 0 ? machineId : null,
         serverId: sessionRouteServerId,
         connectionGeneration: socketConnectionGeneration,
-        daemonGeneration: sessionMachineRecord?.daemonStateVersion ?? null,
-    }), [machineId, sessionMachineRecord?.daemonStateVersion, sessionRouteServerId, socketConnectionGeneration]);
+        daemonGeneration: resolveSessionContinuationDaemonGeneration(sessionMachineRecord),
+    }), [machineId, sessionMachineRecord?.daemonState, sessionRouteServerId, socketConnectionGeneration]);
     // What a target Agent's own model/mode/config detail resolves against. Same
     // machine, server and folder as this Session, so the models offered for the
     // target are the models it would actually run with here.

@@ -106,10 +106,11 @@ export type SessionAgentContinuationMachineTarget = Readonly<{
      * daemon restarts under a live connection — the window in which the rail kept
      * advertising targets the send path then refused as `unsupported_operation`,
      * because the answers it was showing came from a daemon that no longer
-     * existed. This is the same daemon-currentness fact CLI detection keys its own
-     * cache on, not a second notion of it.
+     * existed. The value is opaque here; the Session shell derives it from the
+     * daemon process's owned PID/start-time identity rather than from the mutable
+     * daemon-state version counter.
      */
-    daemonGeneration: number | null;
+    daemonGeneration: string | null;
 }>;
 
 /**
