@@ -324,6 +324,10 @@ flowchart TD
 
 `inTx()` wraps Prisma transactions with:
 - Serializable isolation.
+- Process-local Postgres admission serialization by default, preventing busy sessions for one
+  account from livelocking on the shared account change cursor. Set
+  `HAPPIER_DB_TX_SERIALIZE_IN_PROCESS=false` only when an external admission boundary owns that
+  serialization.
 - Automatic retry on `P2034` (serialization failures).
 - `afterTx()` to emit socket updates after commit.
 

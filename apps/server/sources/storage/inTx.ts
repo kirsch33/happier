@@ -1,5 +1,6 @@
-import { parseIntEnv } from "@/config/env";
+import { parseBooleanEnv, parseIntEnv } from "@/config/env";
 import { delay } from "@/utils/runtime/delay";
+import { AsyncLock, isLockAdmissionDeadlineExceededError } from "@/utils/runtime/lock";
 import { db } from "@/storage/db";
 import { getDbProviderFromEnv, isPrismaErrorCode, type TransactionClient } from "@/storage/prisma";
 import { isRetryableSqliteWriteError } from "@/storage/sqliteRetryClassifier";
@@ -52,6 +53,22 @@ const DEFAULT_SQLITE_TRANSACTION_MAX_RETRIES = 8;
 const DEFAULT_SQLITE_TRANSACTION_MAX_WAIT_MS = 5_000;
 // Keep default inTx retry scheduling inside request/client timeout envelopes; raise via env only for known background paths.
 const DEFAULT_SQLITE_TRANSACTION_TOTAL_RETRY_BUDGET_MS = 25_000;
+
+// A single self-host relay can have several busy session publishers for the same account. Every
+// durable session mutation eventually advances that account's shared change cursor, so overlapping
+// Serializable transactions can continuously abort one another even though they target different
+// sessions. This admission gate starts only one local Postgres transaction at a time. It is
+// deliberately process-local: database isolation remains authoritative for multi-process installs,
+// while the common single-process self-host shape avoids a retry livelock before entering Prisma.
+// Operators with an external transaction admission boundary may explicitly disable it.
+const postgresTransactionAdmissionLock = new AsyncLock();
+
+function shouldSerializePostgresTransactionsInProcess(env: NodeJS.ProcessEnv): boolean {
+    return parseBooleanEnv(
+        env.HAPPIER_DB_TX_SERIALIZE_IN_PROCESS ?? env.HAPPY_DB_TX_SERIALIZE_IN_PROCESS,
+        true,
+    );
+}
 
 function readTransactionConfigFromEnv(env: NodeJS.ProcessEnv, provider: string): TransactionConfig {
     const sqlite = provider === "sqlite";
@@ -173,91 +190,108 @@ export function isTransactionDeadlineExceededError(error: unknown): error is Tra
 export async function inTx<T>(fn: (tx: Tx) => Promise<T>, options: InTxOptions = {}): Promise<T> {
     const provider = getDbProviderFromEnv(process.env, "postgres");
     const transactionConfig = readTransactionConfigFromEnv(process.env, provider);
-    const maxRetries = transactionConfig.maxRetries;
-    const startedAtMs = Date.now();
-    let counter = 0;
-    let transactionCallbackEntered = false;
-    let wrapped = async (tx: Tx) => {
-        transactionCallbackEntered = true;
-        (tx as any)[symbol] = [];
-        let result = await fn(tx);
-        let callbacks = (tx as any)[symbol] as (() => void)[];
-        return { result, callbacks };
-    }
-    while (true) {
-        transactionCallbackEntered = false;
-        try {
-            const bounded = options.deadlineAtMs === undefined
-                ? null
-                : resolveBoundedTransactionOptions({
-                    deadlineAtMs: options.deadlineAtMs,
-                    maxWaitMs: transactionConfig.maxWaitMs,
-                    timeoutMs: transactionConfig.timeoutMs,
-                });
-            const txOpts = provider === "sqlite"
-                ? {
-                    timeout: bounded?.timeout ?? transactionConfig.timeoutMs,
-                    maxWait: bounded?.maxWait ?? transactionConfig.maxWaitMs,
-                }
-                : {
-                    isolationLevel: "Serializable" as const,
-                    timeout: bounded?.timeout ?? transactionConfig.timeoutMs,
-                    maxWait: bounded?.maxWait ?? transactionConfig.maxWaitMs,
-                };
-            let result = await db.$transaction(wrapped, txOpts);
-            for (let callback of result.callbacks) {
-                try {
-                    callback();
-                } catch {
-                    // Ignore callback failures; transactional result is already committed.
-                }
-            }
-            return result.result;
-        } catch (e) {
-            const acquisitionTimeout = isTransactionAcquisitionTimeout(e) && !transactionCallbackEntered;
-            const retryable = acquisitionTimeout || isRetryableTransactionError({ provider, err: e });
-            if (
-                options.deadlineAtMs !== undefined
-                && transactionCallbackEntered
-                && (
-                    Date.now() >= options.deadlineAtMs
-                    || isPrismaErrorCode(e, "P2028")
-                )
-            ) {
-                throw new TransactionDeadlineExceededError(e);
-            }
-            if (retryable && counter < maxRetries) {
-                const nextAttempt = counter + 1;
-                const retryDelayMs = resolveTransactionRetryDelayMs(nextAttempt, transactionConfig);
-                if (
-                    !canStartAnotherTransactionAttempt({
-                        config: transactionConfig,
-                        retryDelayMs,
-                        startedAtMs,
-                    })
-                ) {
-                    if (acquisitionTimeout) {
-                        throw new TransactionAcquisitionUnavailableError(e);
+    const executeTransactionAttempts = async (): Promise<T> => {
+        const maxRetries = transactionConfig.maxRetries;
+        const startedAtMs = Date.now();
+        let counter = 0;
+        let transactionCallbackEntered = false;
+        const wrapped = async (tx: Tx) => {
+            transactionCallbackEntered = true;
+            (tx as any)[symbol] = [];
+            const result = await fn(tx);
+            const callbacks = (tx as any)[symbol] as (() => void)[];
+            return { result, callbacks };
+        };
+        while (true) {
+            transactionCallbackEntered = false;
+            try {
+                const bounded = options.deadlineAtMs === undefined
+                    ? null
+                    : resolveBoundedTransactionOptions({
+                        deadlineAtMs: options.deadlineAtMs,
+                        maxWaitMs: transactionConfig.maxWaitMs,
+                        timeoutMs: transactionConfig.timeoutMs,
+                    });
+                const txOpts = provider === "sqlite"
+                    ? {
+                        timeout: bounded?.timeout ?? transactionConfig.timeoutMs,
+                        maxWait: bounded?.maxWait ?? transactionConfig.maxWaitMs,
                     }
-                    throw e;
+                    : {
+                        isolationLevel: "Serializable" as const,
+                        timeout: bounded?.timeout ?? transactionConfig.timeoutMs,
+                        maxWait: bounded?.maxWait ?? transactionConfig.maxWaitMs,
+                    };
+                const result = await db.$transaction(wrapped, txOpts);
+                for (const callback of result.callbacks) {
+                    try {
+                        callback();
+                    } catch {
+                        // Ignore callback failures; transactional result is already committed.
+                    }
                 }
+                return result.result;
+            } catch (e) {
+                const acquisitionTimeout = isTransactionAcquisitionTimeout(e) && !transactionCallbackEntered;
+                const retryable = acquisitionTimeout || isRetryableTransactionError({ provider, err: e });
                 if (
                     options.deadlineAtMs !== undefined
-                    && Date.now() + retryDelayMs >= options.deadlineAtMs
+                    && transactionCallbackEntered
+                    && (
+                        Date.now() >= options.deadlineAtMs
+                        || isPrismaErrorCode(e, "P2028")
+                    )
                 ) {
                     throw new TransactionDeadlineExceededError(e);
                 }
-                counter = nextAttempt;
-                await delay(retryDelayMs);
-                continue;
-            }
-            if (acquisitionTimeout) {
-                if (options.deadlineAtMs !== undefined) {
-                    throw new TransactionDeadlineExceededError(e);
+                if (retryable && counter < maxRetries) {
+                    const nextAttempt = counter + 1;
+                    const retryDelayMs = resolveTransactionRetryDelayMs(nextAttempt, transactionConfig);
+                    if (
+                        !canStartAnotherTransactionAttempt({
+                            config: transactionConfig,
+                            retryDelayMs,
+                            startedAtMs,
+                        })
+                    ) {
+                        if (acquisitionTimeout) {
+                            throw new TransactionAcquisitionUnavailableError(e);
+                        }
+                        throw e;
+                    }
+                    if (
+                        options.deadlineAtMs !== undefined
+                        && Date.now() + retryDelayMs >= options.deadlineAtMs
+                    ) {
+                        throw new TransactionDeadlineExceededError(e);
+                    }
+                    counter = nextAttempt;
+                    await delay(retryDelayMs);
+                    continue;
                 }
-                throw new TransactionAcquisitionUnavailableError(e);
+                if (acquisitionTimeout) {
+                    if (options.deadlineAtMs !== undefined) {
+                        throw new TransactionDeadlineExceededError(e);
+                    }
+                    throw new TransactionAcquisitionUnavailableError(e);
+                }
+                throw e;
             }
-            throw e;
         }
+    };
+
+    if (provider !== "postgres" || !shouldSerializePostgresTransactionsInProcess(process.env)) {
+        return await executeTransactionAttempts();
+    }
+    try {
+        return await postgresTransactionAdmissionLock.inLock(
+            executeTransactionAttempts,
+            options.deadlineAtMs === undefined ? {} : { deadlineAtMs: options.deadlineAtMs },
+        );
+    } catch (error) {
+        if (isLockAdmissionDeadlineExceededError(error)) {
+            throw new TransactionDeadlineExceededError(error);
+        }
+        throw error;
     }
 }

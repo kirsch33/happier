@@ -134,6 +134,46 @@ describe("inTx", () => {
         );
     });
 
+    it("serializes Postgres transaction admission in-process by default", async () => {
+        restoreEnv(envSnapshot);
+        applyEnvValues({
+            HAPPY_DB_PROVIDER: undefined,
+            HAPPIER_DB_PROVIDER: "postgres",
+            HAPPIER_DB_TX_SERIALIZE_IN_PROCESS: undefined,
+            HAPPIER_DB_TX_MAX_RETRIES: "0",
+        });
+
+        let activeTransactions = 0;
+        let maxActiveTransactions = 0;
+        let releaseFirst!: () => void;
+        const firstHeld = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        transaction.mockImplementation(async (fn: any, _opts?: any) => {
+            activeTransactions += 1;
+            maxActiveTransactions = Math.max(maxActiveTransactions, activeTransactions);
+            try {
+                if (activeTransactions === 1 && transaction.mock.calls.length === 1) {
+                    await firstHeld;
+                }
+                return await fn({} as any);
+            } finally {
+                activeTransactions -= 1;
+            }
+        });
+
+        const { inTx } = await import("./inTx");
+        const first = inTx(async () => "first");
+        await vi.waitFor(() => expect(transaction).toHaveBeenCalledTimes(1));
+        const second = inTx(async () => "second");
+        await Promise.resolve();
+
+        expect(transaction).toHaveBeenCalledTimes(1);
+        releaseFirst();
+        await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
+        expect(maxActiveTransactions).toBe(1);
+    });
+
     it.each(["postgres", "mysql"])("retries an acquisition-shaped P2028 before the transaction callback starts on %s", async (provider) => {
         restoreEnv(envSnapshot);
         applyEnvValues({
