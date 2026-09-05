@@ -601,6 +601,7 @@ describe('awaitFreshProviderCompletion', () => {
     pid: 777,
     happySessionId: 'cm8q7dqx00001k0n1s5v6z2ab',
     vendorResumeId: 'provider-new',
+    processInstanceFingerprint: 'linux-proc:accepted-777',
     hasResume: false,
     hasFreshProviderContextOnce: false,
     ...overrides,
@@ -621,7 +622,10 @@ describe('awaitFreshProviderCompletion', () => {
       processInstanceFingerprint: 'linux-proc:runner-888',
     })],
     sessionLock: { pid: 888, processInstanceFingerprint: 'linux-proc:runner-888' },
-    marker: validMarker({ pid: 888 }),
+    marker: validMarker({
+      pid: 888,
+      processInstanceFingerprint: 'linux-proc:runner-888',
+    }),
     ...overrides,
   });
 
@@ -648,6 +652,12 @@ describe('awaitFreshProviderCompletion', () => {
 
   it('does not require a Pending-control observation after the exact request has already drained', async () => {
     await expect(resolveObserved({ pendingControlState: undefined })).resolves.toBe('provider-new');
+  });
+
+  it('uses the exact PID-bound durable marker when the daemon child provider projection is stale', async () => {
+    await expect(resolveObserved({
+      daemonChildren: [validChild({ vendorResumeId: 'provider-old' })],
+    })).resolves.toBe('provider-new');
   });
 
   it('keeps the sole-child gate load-bearing when a plausible find would select valid accepted custody', async () => {
@@ -684,14 +694,10 @@ describe('awaitFreshProviderCompletion', () => {
       sessionLock: { pid: 888, processInstanceFingerprint: 'linux-proc:reused-888' },
     })],
     ['an inactive raw session despite a live accepted PID', { rawActive: false }],
-    ['the old provider id on the accepted PID', {
-      daemonChildren: [validChild({ vendorResumeId: 'provider-old' })],
-      marker: validMarker({ vendorResumeId: 'provider-old' }),
+    ['a marker with a reused process identity', {
+      marker: validMarker({ processInstanceFingerprint: 'linux-proc:reused-777' }),
     }],
-    ['a missing provider id on the accepted PID', {
-      daemonChildren: [validChild({ vendorResumeId: '' })],
-      marker: validMarker({ vendorResumeId: '' }),
-    }],
+    ['a marker without a provider id', { marker: validMarker({ vendorResumeId: '' }) }],
     ['a stale marker provider id', { marker: validMarker({ vendorResumeId: 'provider-old' }) }],
     ['a marker that retained fresh state', { marker: validMarker({ hasFreshProviderContextOnce: true }) }],
     ['a partial Pending drain', { pendingIds: ['pending-exact'] }],

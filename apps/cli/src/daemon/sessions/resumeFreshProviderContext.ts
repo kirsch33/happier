@@ -65,6 +65,7 @@ export type FreshProviderCompletionObservation = Readonly<{
     pid?: number;
     happySessionId?: string;
     vendorResumeId?: string;
+    processInstanceFingerprint?: string;
     hasResume?: boolean;
     hasFreshProviderContextOnce?: boolean;
   }> | null;
@@ -101,11 +102,14 @@ export async function awaitFreshProviderCompletion(params: Readonly<{
     const lockMatchesTrackedChild = observed.sessionLock?.pid === effectiveRunnerPid
       && trackedProcessInstanceFingerprint.length > 0
       && observed.sessionLock.processInstanceFingerprint === trackedProcessInstanceFingerprint;
-    const providerSessionId = typeof tracked?.vendorResumeId === 'string' ? tracked.vendorResumeId.trim() : '';
+    const providerSessionId = typeof observed.marker?.vendorResumeId === 'string'
+      ? observed.marker.vendorResumeId.trim()
+      : '';
     const providerIsNew = providerSessionId.length > 0
       && (!params.previousProviderId || providerSessionId !== params.previousProviderId);
     const markerMatches = observed.marker?.pid === effectiveRunnerPid
       && observed.marker.happySessionId === params.sessionId
+      && observed.marker.processInstanceFingerprint === trackedProcessInstanceFingerprint
       && observed.marker.vendorResumeId === providerSessionId
       && observed.marker.hasResume !== true
       && observed.marker.hasFreshProviderContextOnce !== true;

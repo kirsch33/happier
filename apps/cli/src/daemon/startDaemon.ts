@@ -6577,6 +6577,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   pid: marker.pid,
                   happySessionId: marker.happySessionId,
                   vendorResumeId: marker.respawn?.vendorResumeId,
+                  processInstanceFingerprint: marker.processInstanceFingerprint,
                   hasResume: marker.respawn?.resume !== undefined,
                   hasFreshProviderContextOnce: marker.respawn?.freshProviderContextOnce !== undefined,
                 } : null,
