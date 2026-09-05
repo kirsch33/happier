@@ -17,6 +17,7 @@ type FakeSocket = {
     conn: { remotePort: number; transport: { name: string } };
     handlers: Map<string, SocketHandler>;
     disconnect: ReturnType<typeof vi.fn>;
+    emit: ReturnType<typeof vi.fn>;
     join: ReturnType<typeof vi.fn>;
     on: (event: string, handler: SocketHandler) => FakeSocket;
     timeout: () => { emitWithAck: ReturnType<typeof vi.fn> };
@@ -28,6 +29,7 @@ const socketTestMocks = vi.hoisted(() => ({
     emitEphemeral: vi.fn(),
     addConnection: vi.fn(),
     removeConnection: vi.fn(),
+    replayReleasedIos295SocketCatchUp: vi.fn(async () => undefined),
 }));
 
 vi.mock("socket.io", () => ({
@@ -63,6 +65,14 @@ vi.mock("@/app/auth/auth", () => ({
 
 vi.mock("@/app/auth/enforceLoginEligibility", () => ({
     enforceLoginEligibility: vi.fn(async () => ({ ok: true })),
+}));
+
+vi.mock("@/app/session/compatibility/replayReleasedIos295SocketCatchUp", () => ({
+    replayReleasedIos295SocketCatchUp: socketTestMocks.replayReleasedIos295SocketCatchUp,
+}));
+
+vi.mock("@/app/presence/publishMachinePresenceSnapshot", () => ({
+    publishMachinePresenceSnapshot: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/storage/db", () => ({
@@ -175,6 +185,32 @@ function createMachineSocket(): FakeSocket {
         conn: { remotePort: 1234, transport: { name: "websocket" } },
         handlers,
         disconnect: vi.fn(),
+        emit: vi.fn(),
+        join: vi.fn(),
+        on(event: string, handler: SocketHandler) {
+            handlers.set(event, handler);
+            return socket;
+        },
+        timeout: () => ({ emitWithAck: vi.fn() }),
+    };
+    return socket;
+}
+
+function createUserSocket(params: Readonly<{ id: string; purpose: string; userAgent: string }>): FakeSocket {
+    const handlers = new Map<string, SocketHandler>();
+    let socket: FakeSocket;
+    socket = {
+        id: params.id,
+        data: {},
+        handshake: {
+            address: "127.0.0.1",
+            auth: { token: "token-1", clientType: "user-scoped", clientPurpose: params.purpose },
+            headers: { "user-agent": params.userAgent },
+        },
+        conn: { remotePort: 1234, transport: { name: "polling" } },
+        handlers,
+        disconnect: vi.fn(),
+        emit: vi.fn(),
         join: vi.fn(),
         on(event: string, handler: SocketHandler) {
             handlers.set(event, handler);
@@ -242,5 +278,34 @@ describe("startSocket planned shutdown machine presence", () => {
                 active: false,
             }),
         }));
+    });
+
+    it("starts the build-295 catch-up only for its subscribed sync socket", async () => {
+        const harness = createIoHarness();
+        socketTestMocks.serverCtor.mockReturnValue(harness.io);
+        startSocket(createFastifyLikeApp());
+
+        const syncSocket = createUserSocket({
+            id: "socket-ios-295-sync",
+            purpose: "sync",
+            userAgent: "Happierdev/295 CFNetwork/3860.700.1 Darwin/25.6.0",
+        });
+        await harness.connect(syncSocket);
+        await harness.connect(createUserSocket({
+            id: "socket-ios-295-rpc",
+            purpose: "scoped-rpc",
+            userAgent: "Happierdev/295 CFNetwork/3860.700.1 Darwin/25.6.0",
+        }));
+
+        expect(socketTestMocks.replayReleasedIos295SocketCatchUp).toHaveBeenCalledTimes(1);
+        expect(socketTestMocks.replayReleasedIos295SocketCatchUp).toHaveBeenCalledWith(expect.objectContaining({
+            accountId: "user-1",
+            userAgent: "Happierdev/295 CFNetwork/3860.700.1 Darwin/25.6.0",
+            socket: syncSocket,
+            connectedAtMs: expect.any(Number),
+        }));
+        expect(syncSocket.join.mock.invocationCallOrder[0]).toBeLessThan(
+            socketTestMocks.replayReleasedIos295SocketCatchUp.mock.invocationCallOrder[0]!,
+        );
     });
 });

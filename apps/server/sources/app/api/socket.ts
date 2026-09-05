@@ -35,6 +35,7 @@ import { registerSessionRuntimeActivitySnapshotSocketEvent } from "@/app/session
 import { publishSessionPublisherLifecycleUpdate } from "@/app/session/runtimeActivity/publishPublisherLifecycleUpdate";
 import { readHappierSocketData } from "./socket/socketData";
 import { registerReleasedUiV021SessionEndSocketEvent } from "@/app/session/compatibility/registerReleasedUiV021SessionEndSocketEvent";
+import { replayReleasedIos295SocketCatchUp } from "@/app/session/compatibility/replayReleasedIos295SocketCatchUp";
 
 export const DEFAULT_SOCKET_MAX_HTTP_BUFFER_SIZE = 25_000_000;
 
@@ -317,6 +318,20 @@ export function startSocket(app: Fastify) {
             sessionId,
             machineId,
         }));
+
+        if (connection.connectionType === 'user-scoped' && metadata.clientPurpose === 'sync') {
+            void replayReleasedIos295SocketCatchUp({
+                accountId: userId,
+                userAgent,
+                socket,
+                connectedAtMs,
+            }).catch((error) => {
+                log(
+                    { module: 'released-ios-295-socket-catch-up', level: 'warn', userId, error: describeLoggableError(error) },
+                    'Failed to replay released iOS build 295 socket catch-up',
+                );
+            });
+        }
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
