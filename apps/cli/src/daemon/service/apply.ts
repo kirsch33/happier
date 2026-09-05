@@ -7,7 +7,6 @@ import {
   buildServiceCommandEnv,
   isBenignServiceAbsenceFailure,
 } from '@happier-dev/cli-common/service';
-import { resolveCommandOnPath } from '@happier-dev/cli-common/process';
 
 import type { DaemonServiceInstallPlan, DaemonServiceUninstallPlan, DaemonServicePlannedCommand } from './plan';
 import { commandExistsInPath } from './commandExistsInPath';
@@ -22,10 +21,7 @@ function formatDaemonServiceCommand(command: DaemonServicePlannedCommand): strin
 function runCommand(command: DaemonServicePlannedCommand): { ok: boolean; out: string | null } {
   try {
     const timeoutMs = readPositiveIntEnv('HAPPIER_DAEMON_SERVICE_COMMAND_TIMEOUT_MS', 30_000);
-    const executable = command.cmd === 'systemctl'
-      ? (resolveCommandOnPath(command.cmd, { env: process.env }) ?? command.cmd)
-      : command.cmd;
-    const res = spawnSync(executable, [...command.args], {
+    const res = spawnSync(command.cmd, [...command.args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: buildServiceCommandEnv({ cmd: command.cmd, args: command.args, env: process.env }),
       timeout: timeoutMs,

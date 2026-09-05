@@ -24,15 +24,15 @@ function isExecutableFileViaShell(path: string): boolean {
   return !result.error && result.status === 0;
 }
 
-export function resolveCommandOnPath(
+export function commandExistsOnPath(
   cmd: string,
   options: Readonly<{
     env?: NodeJS.ProcessEnv;
     path?: string | undefined;
   }> = {},
-): string | null {
+): boolean {
   const name = String(cmd ?? '').trim();
-  if (!name) return null;
+  if (!name) return false;
 
   const env = options.env ?? process.env;
   const pathEnv = options.path ?? env.PATH ?? process.env.PATH;
@@ -46,28 +46,18 @@ export function resolveCommandOnPath(
         env: probeEnv,
       });
       if (invocation.command.toLowerCase() !== name.toLowerCase()) {
-        return invocation.command;
+        return true;
       }
     }
 
-    return resolveWindowsCommandOnPath(name, probeEnv);
+    return resolveWindowsCommandOnPath(name, probeEnv) !== null;
   }
 
-  if (name.includes('/')) return isExecutableFile(name) || isExecutableFileViaShell(name) ? name : null;
+  if (name.includes('/')) return isExecutableFile(name) || isExecutableFileViaShell(name);
 
   const candidates = String(pathEnv ?? '')
     .split(delimiter)
     .map((dir) => join(dir || '.', name));
-  if (candidates.some(isExecutableFile)) return name;
-  return candidates.find(isExecutableFileViaShell) ?? null;
-}
-
-export function commandExistsOnPath(
-  cmd: string,
-  options: Readonly<{
-    env?: NodeJS.ProcessEnv;
-    path?: string | undefined;
-  }> = {},
-): boolean {
-  return resolveCommandOnPath(cmd, options) !== null;
+  return candidates.some(isExecutableFile)
+    || candidates.some(isExecutableFileViaShell);
 }
