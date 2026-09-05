@@ -535,6 +535,13 @@ export async function handleSelfCliCommand(context: CommandContext): Promise<voi
       console.log(usage());
       return;
     }
+    if (
+      (sub === 'check' || sub === 'update' || sub === 'migrate')
+      && argv.slice(1).some((arg) => arg === '--help' || arg === '-h')
+    ) {
+      console.log(usage());
+      return;
+    }
     if (sub === 'check') {
       await cmdCheck(argv.slice(1), context.rawArgv);
       return;

@@ -96,6 +96,29 @@ describe('happier self update for binary installs', () => {
     vi.resetModules();
   });
 
+  it('renders nested update help without consulting or changing a release', async () => {
+    const originalArgv = [...process.argv];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const releaseLookupsBefore = fetchGitHubReleaseByTagMock.mock.calls.length;
+    const installsBefore = updateInstalledCliPayloadFromReleaseAssetsMock.mock.calls.length;
+
+    try {
+      process.argv[1] = '/opt/happier/bin/happier';
+      const { handleSelfCliCommand } = await import('./self');
+      await handleSelfCliCommand({
+        args: ['self', 'update', '--help'],
+        rawArgv: ['happier', 'self', 'update', '--help'],
+        terminalRuntime: null,
+      });
+
+      expect(logSpy.mock.calls.flat().join('\n')).toContain('happier self update');
+      expect(fetchGitHubReleaseByTagMock).toHaveBeenCalledTimes(releaseLookupsBefore);
+      expect(updateInstalledCliPayloadFromReleaseAssetsMock).toHaveBeenCalledTimes(installsBefore);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
   it('uses the full-payload updater instead of replacing only the executable bytes', async () => {
     const originalArgv = [...process.argv];
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
