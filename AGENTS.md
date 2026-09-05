@@ -202,8 +202,12 @@ process does not prove it opened the incumbent database.
    Happier bin path, `XDG_RUNTIME_DIR=/run/user/1000`, the matching user-bus
    address, and an accessible working directory such as `/home/akirsch`. Use a
    transient `systemd-run --user --wait --pipe --collect` scope when entering
-   through the root access gateway. Never invoke the user payload while the
-   process cwd remains `/root`.
+   through the root access gateway, except for the service install that replaces
+   that same user service: run `happier service install
+   --replace-existing=ring --yes --json` directly as `akirsch` from
+   `/home/akirsch`. Never invoke the user payload while the process cwd remains
+   `/root`, and do not assume an outer `env` crossed a `systemd-run` boundary;
+   pass required variables with `--setenv`.
 5. Restart each daemon through its existing generated service. Confirm the
    configured and running versions, actual executable path, service user,
    `currentInvocationMatches`, unit reload state, relay reachability, and
