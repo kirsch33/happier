@@ -5566,20 +5566,18 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
           const operation = Promise.resolve().then(async (): Promise<StopSessionResult> => {
             sessionRunnerRespawnManager.markStopRequested(normalizedSessionId, { reason: 'daemon_stop_session', requestedAtMs: Date.now() });
-            const automaticRecoveryCancellations = await awaitAutomaticRecoveryCancellationBoundary({
-              operations: [
+            temporaryThrottleResumeSnapshotsBySessionId.delete(normalizedSessionId);
+            const automaticRecoveryCleanup = (async (): Promise<void> => {
+              const automaticRecoveryCancellations = await Promise.allSettled([
                 inactiveUsageLimitRecoveryCheckOwner.cancelSession({
                   sessionId: normalizedSessionId,
                   scheduler: inactiveUsageLimitRecoveryScheduler,
                 }),
                 runtimeAuthRecoveryScheduler?.cancel({ sessionId: normalizedSessionId }) ?? Promise.resolve(null),
                 temporaryThrottleRecoveryScheduler.stopRetrying({ sessionId: normalizedSessionId }),
-              ],
-              timeoutMs: 1_000,
-            });
-            const automaticRecoveryOwners = ['inactive_usage_limit', 'runtime_auth', 'temporary_throttle'] as const;
-            if (automaticRecoveryCancellations.status === 'settled') {
-              automaticRecoveryCancellations.results.forEach((result, index) => {
+              ]);
+              const automaticRecoveryOwners = ['inactive_usage_limit', 'runtime_auth', 'temporary_throttle'] as const;
+              automaticRecoveryCancellations.forEach((result, index) => {
                 if (result.status !== 'rejected') return;
                 logger.warn('[DAEMON RUN] Automatic recovery cancellation failed after explicit Stop', {
                   sessionId: normalizedSessionId,
@@ -5587,30 +5585,38 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   error: serializeAxiosErrorForLog(result.reason),
                 });
               });
-            } else {
-              logger.warn('[DAEMON RUN] Automatic recovery cancellation timed out after explicit Stop; continuing under the stop-request fence', {
+              await clearConnectedServiceRecoveryAfterSupersession({
+                sessionId: normalizedSessionId,
+                event: {
+                  kind: 'manual_session_supersession',
+                  reason: 'stop',
+                },
+              }).catch((error) => {
+                logger.warn('[DAEMON RUN] Failed to clear connected-service recovery after explicit Stop', {
+                  sessionId: normalizedSessionId,
+                  error: serializeAxiosErrorForLog(error),
+                });
+              });
+              await persistExplicitSessionStopRecoveryCancellation({
+                credentials,
+                sessionId: normalizedSessionId,
+              }).catch((error) => {
+                logger.warn('[DAEMON RUN] Failed to publish usage-limit recovery cancellation after explicit Stop', {
+                  sessionId: normalizedSessionId,
+                  error: serializeAxiosErrorForLog(error),
+                });
+              });
+            })();
+            const automaticRecoveryCleanupBoundary = await awaitAutomaticRecoveryCancellationBoundary({
+              operations: [automaticRecoveryCleanup],
+              timeoutMs: 1_000,
+            });
+            if (automaticRecoveryCleanupBoundary.status === 'timeout') {
+              logger.warn('[DAEMON RUN] Automatic recovery cleanup timed out after explicit Stop; continuing under the stop-request fence', {
                 sessionId: normalizedSessionId,
                 timeoutMs: 1_000,
-                owners: automaticRecoveryOwners,
               });
             }
-            temporaryThrottleResumeSnapshotsBySessionId.delete(normalizedSessionId);
-            await clearConnectedServiceRecoveryAfterSupersession({
-              sessionId: normalizedSessionId,
-              event: {
-                kind: 'manual_session_supersession',
-                reason: 'stop',
-              },
-            });
-            await persistExplicitSessionStopRecoveryCancellation({
-              credentials,
-              sessionId: normalizedSessionId,
-            }).catch((error) => {
-              logger.warn('[DAEMON RUN] Failed to publish usage-limit recovery cancellation after explicit Stop', {
-                sessionId: normalizedSessionId,
-                error: serializeAxiosErrorForLog(error),
-              });
-            });
             physicallyRetiredTerminalAttachmentIdBySessionId.delete(normalizedSessionId);
             const trackedStopResult = await stopSessionCore(normalizedSessionId);
             const physicallyRetiredAttachmentId = physicallyRetiredTerminalAttachmentIdBySessionId.get(normalizedSessionId);

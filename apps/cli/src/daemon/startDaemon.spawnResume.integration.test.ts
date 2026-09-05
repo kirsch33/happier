@@ -4209,6 +4209,9 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       usageLimitCancelSpy.mockRejectedValueOnce(new Error('durable recovery store unavailable'));
       await expect(stopSession(sessionId)).resolves.toEqual({ status: 'stopped' });
 
+      runtimeAuthCancelSpy.mockImplementationOnce(async () => await new Promise<never>(() => {}));
+      await expect(stopSession(sessionId)).resolves.toEqual({ status: 'stopped' });
+
       harness.requestShutdown('happier-cli');
       await run;
       run = null;
