@@ -369,7 +369,7 @@ vi.mock('@/utils/sessions/sessionUtils', () => ({
     useSessionStatus: () => 'online',
 }));
 vi.mock('@/utils/system/versionUtils', () => ({
-    isVersionSupported: () => true,
+    isCliVersionOutdated: () => false,
     MINIMUM_CLI_VERSION: '0.0.0',
 }));
 vi.mock('@/utils/system/fireAndForget', () => ({

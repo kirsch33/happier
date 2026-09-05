@@ -521,7 +521,7 @@ vi.mock('@/components/sessions/agentInput', () => ({
     }),
 }));
 vi.mock('@/utils/system/versionUtils', () => ({
-    isVersionSupported: () => true,
+    isCliVersionOutdated: () => false,
     MINIMUM_CLI_VERSION: '0.0.0',
 }));
 vi.mock('@/agents/catalog/catalog', async (importOriginal) => {

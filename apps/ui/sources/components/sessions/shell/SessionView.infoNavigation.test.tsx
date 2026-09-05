@@ -319,7 +319,7 @@ vi.mock('@/sync/domains/server/activeServerSwitch', async (importOriginal) => ({
     setActiveServerAndSwitch: vi.fn(async () => {}),
 }));
 vi.mock('@/utils/system/versionUtils', () => ({
-    isVersionSupported: () => true,
+    isCliVersionOutdated: () => false,
     MINIMUM_CLI_VERSION: '0.0.0',
 }));
 vi.mock('@/hooks/server/useFeatureEnabled', () => ({

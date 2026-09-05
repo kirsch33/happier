@@ -565,7 +565,7 @@ vi.mock('@/hooks/server/useAutomationsSupport', () => ({
 }));
 
 vi.mock('@/utils/system/versionUtils', () => ({
-    isVersionSupported: () => true,
+    isCliVersionOutdated: () => false,
     MINIMUM_CLI_VERSION: '0.0.0',
 }));
 
