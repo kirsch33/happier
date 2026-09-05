@@ -126,7 +126,9 @@ process does not prove it opened the incumbent database.
   `node scripts/pipeline/run.mjs release-build-cli-binaries --channel dev
   --version <version> --targets linux-arm64,linux-x64` and, when the relay
   changed, `release-build-server-binaries --channel dev --version <version>
-  --targets linux-x64`. Do not assemble payload trees by hand.
+  --targets linux-x64 --server-component happier-server`. The Great White Lab
+  relay is the full Postgres/Redis/S3 server; the pipeline otherwise defaults
+  to the light SQLite component. Do not assemble payload trees by hand.
 - Before a broad build on the RPi, inspect load, available memory, swap, and
   disk. Run one heavy job at a time with a sensible timeout. Start with the
   narrowest relevant test; a CLI typecheck can consume several GiB and must be
@@ -182,7 +184,10 @@ process does not prove it opened the incumbent database.
    --channel dev --server-binary <path>` flow. Preserve the existing unit
    environment and bind address. Verify migrations, database inode/owner/mode,
    auth, machine list, sessions, HTTP health, WebSocket behavior, and real UI
-   login before retiring the previous relay payload or rollback volume.
+   login before retiring the previous relay payload or rollback volume. Reuse
+   an existing verified protection point when no schema or storage contract
+   changed and it still covers the rollback boundary; do not create another
+   multi-gigabyte dump merely because a server binary is being replaced.
 3. Extract each signed/checksummed CLI archive into a temporary directory and
    run that payload's `self __install-payload --component happier-cli
    --payload-root <root> --version <version> --channel publicdev`. Let the
