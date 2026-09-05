@@ -109,6 +109,7 @@ import {
   type PendingSessionActivationInput,
 } from './sessions/pendingSessionActivationRecovery';
 import { awaitFreshProviderCompletion, resumeFreshProviderContext } from './sessions/resumeFreshProviderContext';
+import { awaitAutomaticRecoveryCancellationBoundary } from './sessions/awaitAutomaticRecoveryCancellationBoundary';
 import { createFreshProviderRecoveryReservationStore } from './sessions/freshProviderRecoveryReservation';
 import { HAPPIER_FRESH_PROVIDER_CONTEXT_ONCE } from '@/agent/runtime/freshProviderContext';
 import { resolveExistingRunnerAcceptance } from './spawn/resolveRunnerAcceptance';
@@ -5565,23 +5566,34 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
           const operation = Promise.resolve().then(async (): Promise<StopSessionResult> => {
             sessionRunnerRespawnManager.markStopRequested(normalizedSessionId, { reason: 'daemon_stop_session', requestedAtMs: Date.now() });
-            const automaticRecoveryCancellations = await Promise.allSettled([
-              inactiveUsageLimitRecoveryCheckOwner.cancelSession({
-                sessionId: normalizedSessionId,
-                scheduler: inactiveUsageLimitRecoveryScheduler,
-              }),
-              runtimeAuthRecoveryScheduler?.cancel({ sessionId: normalizedSessionId }) ?? Promise.resolve(null),
-              temporaryThrottleRecoveryScheduler.stopRetrying({ sessionId: normalizedSessionId }),
-            ]);
-            const automaticRecoveryOwners = ['inactive_usage_limit', 'runtime_auth', 'temporary_throttle'] as const;
-            automaticRecoveryCancellations.forEach((result, index) => {
-              if (result.status !== 'rejected') return;
-              logger.warn('[DAEMON RUN] Automatic recovery cancellation failed after explicit Stop', {
-                sessionId: normalizedSessionId,
-                owner: automaticRecoveryOwners[index],
-                error: serializeAxiosErrorForLog(result.reason),
-              });
+            const automaticRecoveryCancellations = await awaitAutomaticRecoveryCancellationBoundary({
+              operations: [
+                inactiveUsageLimitRecoveryCheckOwner.cancelSession({
+                  sessionId: normalizedSessionId,
+                  scheduler: inactiveUsageLimitRecoveryScheduler,
+                }),
+                runtimeAuthRecoveryScheduler?.cancel({ sessionId: normalizedSessionId }) ?? Promise.resolve(null),
+                temporaryThrottleRecoveryScheduler.stopRetrying({ sessionId: normalizedSessionId }),
+              ],
+              timeoutMs: 1_000,
             });
+            const automaticRecoveryOwners = ['inactive_usage_limit', 'runtime_auth', 'temporary_throttle'] as const;
+            if (automaticRecoveryCancellations.status === 'settled') {
+              automaticRecoveryCancellations.results.forEach((result, index) => {
+                if (result.status !== 'rejected') return;
+                logger.warn('[DAEMON RUN] Automatic recovery cancellation failed after explicit Stop', {
+                  sessionId: normalizedSessionId,
+                  owner: automaticRecoveryOwners[index],
+                  error: serializeAxiosErrorForLog(result.reason),
+                });
+              });
+            } else {
+              logger.warn('[DAEMON RUN] Automatic recovery cancellation timed out after explicit Stop; continuing under the stop-request fence', {
+                sessionId: normalizedSessionId,
+                timeoutMs: 1_000,
+                owners: automaticRecoveryOwners,
+              });
+            }
             temporaryThrottleResumeSnapshotsBySessionId.delete(normalizedSessionId);
             await clearConnectedServiceRecoveryAfterSupersession({
               sessionId: normalizedSessionId,
