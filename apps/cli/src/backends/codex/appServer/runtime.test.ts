@@ -4030,7 +4030,7 @@ describe('createCodexAppServerRuntime', () => {
         expect(onProviderPromptAccepted).toHaveBeenCalledTimes(1);
     });
 
-    it('places a correlated steer at the provider user-message boundary before accepting Pending custody', async () => {
+    it('accepts correlated steer custody before waiting on the committed Pending transcript row', async () => {
         const { root, requestLogPath } = await createRuntimeFixture(
             'happier-codex-app-server-runtime-steer-user-boundary-',
             { steerUserMessageEchoDelayMs: 80 },
@@ -4043,7 +4043,16 @@ describe('createCodexAppServerRuntime', () => {
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
-            session: { updateMetadata: vi.fn() } as any,
+            session: {
+                updateMetadata: vi.fn(),
+                getCommittedUserMessageSeq: vi.fn(() => null),
+                waitForCommittedUserMessageSeq: vi.fn(async () => {
+                    expect(acceptedPrompts).toContainEqual(expect.objectContaining({
+                        localIds: ['pending-steer-287'],
+                    }));
+                    return 287;
+                }),
+            } as any,
         });
         runtime.setOnPromptAcceptedByProvider((prompt) => {
             acceptedPrompts.push(prompt);
@@ -4071,8 +4080,9 @@ describe('createCodexAppServerRuntime', () => {
                 }),
             }),
         ]));
-        expect(acceptedPrompts).not.toContainEqual(expect.objectContaining({
+        expect(acceptedPrompts).toContainEqual(expect.objectContaining({
             localIds: ['pending-steer-287'],
+            providerTurnId: 'turn-overlap-start',
         }));
 
         await waitForCondition(
@@ -4083,6 +4093,7 @@ describe('createCodexAppServerRuntime', () => {
                 label: 'provider user-message echo to settle Pending custody',
             },
         );
+        expect(acceptedPrompts.filter((prompt) => prompt.localIds?.includes('pending-steer-287') === true)).toHaveLength(1);
         await activeTurn;
     });
 

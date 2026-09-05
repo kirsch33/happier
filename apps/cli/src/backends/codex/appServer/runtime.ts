@@ -4880,10 +4880,13 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 ...(clientUserMessageId ? { clientUserMessageId } : {}),
             };
             const finishAcceptedSteer = async (): Promise<void> => {
+                // A successful turn/steer response is Codex's provider-acceptance receipt for
+                // this exact clientUserMessageId. Publish it before waiting for Happier's
+                // committed transcript sequence: committing a Pending row is downstream of this
+                // acceptance, so waiting first creates a circular dependency that can outlive a
+                // short native Goal continuation and strand the row as ambiguous.
+                markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId);
                 await turnBoundaryTracker.appendSteerMessage({ localId: options?.localId ?? null });
-                if (!clientUserMessageId) {
-                    markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId);
-                }
                 options?.onProviderPromptAccepted?.();
             };
             const requestSteer = async (
